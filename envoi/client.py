@@ -8,24 +8,16 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed
 
-from .utils import build_request_kwargs, to_jsonable, to_websocket_url
-
-DEFAULT_HTTP_TIMEOUT_SECONDS = 300
-DEFAULT_SESSION_TIMEOUT_SECONDS = 300
-
-
-def capability_names(capabilities: Any) -> list[str]:
-    if not isinstance(capabilities, list):
-        return []
-
-    names: list[str] = []
-    for capability in capabilities:
-        if not isinstance(capability, dict):
-            continue
-        name = capability.get("name")
-        if isinstance(name, str):
-            names.append(name)
-    return names
+from .constants import (
+    DEFAULT_HTTP_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_TIMEOUT_SECONDS,
+)
+from .utils import (
+    build_request_kwargs,
+    schema_item_values,
+    to_jsonable,
+    to_websocket_url,
+)
 
 
 class Client:
@@ -42,15 +34,15 @@ class Client:
 
     @property
     def tests(self) -> list[str]:
-        return capability_names(self.schema.get("tests", []))
+        return schema_item_values(self.schema.get("tests", []), "name", str)
 
     @property
     def actions(self) -> list[str]:
-        return capability_names(self.schema.get("actions", []))
+        return schema_item_values(self.schema.get("actions", []), "name", str)
 
     @property
     def observables(self) -> list[str]:
-        return capability_names(self.schema.get("observables", []))
+        return schema_item_values(self.schema.get("observables", []), "name", str)
 
     @property
     def has_setup(self) -> bool:

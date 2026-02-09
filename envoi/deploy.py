@@ -6,8 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-DEFAULT_IMAGE_NAME = "envoi-local-runtime"
-DEFAULT_PORT = 8000
+from .constants import DEFAULT_IMAGE_NAME, DEFAULT_PORT
 
 
 def deploy(

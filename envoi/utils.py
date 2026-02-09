@@ -9,9 +9,11 @@ import tomllib
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TypeVar
 
 from pydantic import BaseModel
+
+T = TypeVar("T")
 
 
 class Documents:
@@ -144,6 +146,22 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [to_jsonable(item) for item in value]
     return value
+
+
+def schema_item_values(items: Any, field: str, value_type: type[T]) -> list[T]:
+    if not isinstance(items, list):
+        return []
+
+    values: list[T] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        value = item.get(field)
+        if isinstance(value, value_type):
+            values.append(value)
+
+    return values
 
 
 def build_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

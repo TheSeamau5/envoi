@@ -15,9 +15,8 @@ from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse
 
 from . import environment
+from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
 from .utils import Documents, parse_params, serialize_object, working_dir
-
-DEFAULT_SESSION_TIMEOUT_SECONDS = 300
 
 sessions: dict[str, dict[str, Any]] = {}
 
