@@ -86,17 +86,11 @@ RUN pip install --no-cache-dir .
         dockerfile_path = Path(temp_file.name)
 
     try:
-        _run_command(
-            [
-                "docker",
-                "build",
-                "-t",
-                image_name,
-                "-f",
-                str(dockerfile_path),
-                str(project_root),
-            ]
-        )
+        build_command = ["docker", "build"]
+        build_command.extend(["-t", image_name])
+        build_command.extend(["-f", str(dockerfile_path)])
+        build_command.append(str(project_root))
+        _run_command(build_command)
     finally:
         dockerfile_path.unlink(missing_ok=True)
 
