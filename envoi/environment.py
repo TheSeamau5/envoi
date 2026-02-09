@@ -25,9 +25,23 @@ class Environment:
         self.actions[function.__name__] = function
         return function
 
-    def observe(self, function: Callable[..., Any]) -> Callable[..., Any]:
-        self.observables[function.__name__] = function
-        return function
+    def observe(
+        self, function: Callable[..., Any] | str | None = None
+    ) -> Callable[..., Any]:
+        if callable(function):
+            self.observables[function.__name__] = function
+            return function
+
+        observe_name = function
+
+        def decorator(inner_function: Callable[..., Any]) -> Callable[..., Any]:
+            capability_name = (
+                observe_name if isinstance(observe_name, str) else inner_function.__name__
+            )
+            self.observables[capability_name] = inner_function
+            return inner_function
+
+        return decorator
 
     def setup(self, function: Callable[..., Any]) -> Callable[..., Any]:
         if self.setup_fn is not None:
@@ -200,7 +214,9 @@ def action(function: Callable[..., Any]) -> Callable[..., Any]:
     return state.action(function)
 
 
-def observe(function: Callable[..., Any]) -> Callable[..., Any]:
+def observe(
+    function: Callable[..., Any] | str | None = None,
+) -> Callable[..., Any]:
     return state.observe(function)
 
 

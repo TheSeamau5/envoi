@@ -122,7 +122,10 @@ class Session:
         response.raise_for_status()
         return response.json()
 
-    async def observe(self) -> AsyncIterator[Any]:
+    async def observe(self, name: str | None = None) -> AsyncIterator[Any]:
+        if name is not None and name not in self.client.observables:
+            raise ValueError(f"Unknown observable: {name}")
+
         stream_connection = await self._get_stream_connection()
         try:
             async for raw_message in stream_connection:
@@ -130,7 +133,9 @@ class Session:
                 message_type = decoded_message.get("type")
 
                 if message_type == "observe":
-                    yield decoded_message.get("data")
+                    observe_name = decoded_message.get("name")
+                    if name is None or observe_name == name:
+                        yield decoded_message.get("data")
                 elif message_type == "error":
                     raise RuntimeError(decoded_message.get("message", "Unknown error"))
         except ConnectionClosed:
