@@ -1,0 +1,5 @@
+[project]
+name = "polish-notation"
+version = "0.1.0"
+description = "Evaluate polish notation expressions."
+requires-python = ">=3.11"
