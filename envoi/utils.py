@@ -34,8 +34,9 @@ class Documents:
     @classmethod
     def from_text(cls, filename: str, content: str) -> Documents:
         temp_dir = Path(tempfile.mkdtemp(prefix="envoi-"))
-        (temp_dir / filename).write_text(content, encoding="utf-8")
-        return cls._from_dir(temp_dir)
+        file_path = temp_dir / filename
+        file_path.write_text(content, encoding="utf-8")
+        return cls(file_path)
 
     @classmethod
     def _from_dir(cls, directory: str | Path) -> Documents:
