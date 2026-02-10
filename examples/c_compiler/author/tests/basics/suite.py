@@ -12,7 +12,7 @@ Each file declares expected output via comment headers:
 import re
 from pathlib import Path
 
-from tests.shared import TestResult, run_case, to_result
+from tests.shared import TestResult, run_case, select_cases, to_result
 
 # .c files are in subdirectories alongside this file
 TESTS_DIR = Path(__file__).resolve().parent
@@ -37,5 +37,6 @@ def _load_all() -> list[dict]:
     return cases
 
 
-async def run_basics() -> TestResult:
-    return to_result([await run_case(c) for c in _load_all()])
+async def run_basics(n_tests: int = 0, test_name: str | None = None) -> TestResult:
+    cases = select_cases(_load_all(), n_tests=n_tests, test_name=test_name)
+    return to_result([await run_case(c) for c in cases])

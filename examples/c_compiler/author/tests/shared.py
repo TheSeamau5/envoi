@@ -83,6 +83,35 @@ def to_result(results: list[CaseResult]) -> TestResult:
     )
 
 
+def select_cases(
+    cases: list[dict],
+    *,
+    n_tests: int = 0,
+    test_name: str | None = None,
+) -> list[dict]:
+    """
+    Filter suite cases by optional test_name and optional n_tests limit.
+
+    - If test_name is provided, run exactly one matching case.
+    - Else if n_tests > 0, run the first n_tests cases.
+    - Else run all cases.
+    """
+    if n_tests < 0:
+        raise ValueError("n_tests must be >= 0")
+
+    normalized_name = (test_name or "").strip()
+    if normalized_name:
+        matches = [case for case in cases if case.get("name") == normalized_name]
+        if not matches:
+            raise ValueError(f"Unknown test_name: {normalized_name}")
+        return [matches[0]]
+
+    if n_tests > 0:
+        return cases[:n_tests]
+
+    return cases
+
+
 def _reset_debug_artifacts_dir(sp: Path) -> Path:
     debug_dir = sp / DEBUG_ARTIFACTS_DIR
     shutil.rmtree(debug_dir, ignore_errors=True)

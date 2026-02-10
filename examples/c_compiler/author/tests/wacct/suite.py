@@ -10,7 +10,7 @@ Source: github.com/nlsandler/writing-a-c-compiler-tests
 import json
 from pathlib import Path
 
-from tests.shared import TestResult, run_case, to_result
+from tests.shared import TestResult, run_case, select_cases, to_result
 
 WACCT_DIR = Path("/opt/tests/wacct")
 TESTS_DIR = WACCT_DIR / "tests"
@@ -23,7 +23,7 @@ def _load_expected() -> dict:
     return {}
 
 
-async def run_wacct() -> TestResult:
+async def run_wacct(n_tests: int = 0, test_name: str | None = None) -> TestResult:
     expected_map = _load_expected()
     cases: list[dict] = []
 
@@ -58,4 +58,5 @@ async def run_wacct() -> TestResult:
                     "expect_compile_success": False,
                 })
 
-    return to_result([await run_case(c) for c in cases])
+    selected = select_cases(cases, n_tests=n_tests, test_name=test_name)
+    return to_result([await run_case(c) for c in selected])

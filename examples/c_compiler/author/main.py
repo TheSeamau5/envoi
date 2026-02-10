@@ -37,24 +37,28 @@ async def build_compiler(submission: envoi.Documents) -> None:
 
 
 @envoi.test
-async def basics() -> TestResult:
+async def basics(n_tests: int = 0, test_name: str | None = None) -> TestResult:
     """Hand-written tests: smoke, variables, control flow, functions, expressions, edge cases, stress."""
-    return await run_basics()
+    return await run_basics(n_tests=n_tests, test_name=test_name)
 
 
 @envoi.test
-async def wacct() -> TestResult:
+async def wacct(n_tests: int = 0, test_name: str | None = None) -> TestResult:
     """Writing-a-C-Compiler tests: chapters 1-20, valid + invalid programs."""
-    return await run_wacct()
+    return await run_wacct(n_tests=n_tests, test_name=test_name)
 
 
 @envoi.test
-async def c_testsuite() -> TestResult:
+async def c_testsuite(n_tests: int = 0, test_name: str | None = None) -> TestResult:
     """~220 single-file C conformance tests from c-testsuite."""
-    return await run_c_testsuite()
+    return await run_c_testsuite(n_tests=n_tests, test_name=test_name)
 
 
 @envoi.test
-async def torture_execute(count: int = 0) -> TestResult:
+async def torture_execute(
+    count: int = 0,
+    n_tests: int = 0,
+    test_name: str | None = None,
+) -> TestResult:
     """~370 GCC torture execute tests (standard-C subset, blacklist-filtered)."""
-    return await run_torture(count=count)
+    return await run_torture(count=count, n_tests=n_tests, test_name=test_name)
