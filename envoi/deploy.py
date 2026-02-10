@@ -44,6 +44,7 @@ def deploy(
         run_command.extend(["--name", container_name])
 
     run_command.extend(["-p", f"{port}:{port}"])
+    run_command.extend(["-v", "/tmp/envoi-sessions:/tmp"])
     run_command.extend(["-v", environment_mount])
     run_command.append(image_name)
     run_command.extend(["python3", "-m", "envoi.runtime"])

@@ -20,6 +20,44 @@ from .utils import (
 )
 
 
+def _parse_json_response(response: httpx.Response) -> Any | None:
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _response_error_message(response: httpx.Response, payload: Any | None) -> str:
+    if isinstance(payload, dict):
+        error_value = payload.get("error")
+        if isinstance(error_value, str):
+            return error_value
+
+        if isinstance(error_value, dict):
+            message = error_value.get("message")
+            if isinstance(message, str):
+                return message
+            return json.dumps(error_value, ensure_ascii=False)
+
+        if error_value is not None:
+            return str(error_value)
+
+    raw_text = response.text.strip()
+    if raw_text:
+        return raw_text
+
+    return response.reason_phrase or "unknown error"
+
+
+def _raise_for_response_error(response: httpx.Response, payload: Any | None) -> None:
+    has_payload_error = isinstance(payload, dict) and "error" in payload
+    if response.is_error or has_payload_error:
+        message = _response_error_message(response, payload)
+        raise RuntimeError(
+            f"Request failed ({response.status_code}): {message}"
+        )
+
+
 class Client:
     def __init__(
         self,
@@ -58,8 +96,13 @@ class Client:
         response = await self.http_client.post(
             f"{self.base_url}/test/{name}", **request_kwargs
         )
-        response.raise_for_status()
-        return response.json()
+        payload = _parse_json_response(response)
+        _raise_for_response_error(response, payload)
+        if payload is None:
+            raise RuntimeError(
+                f"Request failed ({response.status_code}): invalid JSON response body"
+            )
+        return payload
 
     async def session(
         self, timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS, **kwargs: Any
@@ -70,11 +113,12 @@ class Client:
         response = await self.http_client.post(
             f"{self.base_url}/session", **request_kwargs
         )
-        response.raise_for_status()
-
-        session_payload = response.json()
-        if "error" in session_payload:
-            raise RuntimeError(f"Session setup failed: {session_payload['error']}")
+        session_payload = _parse_json_response(response)
+        _raise_for_response_error(response, session_payload)
+        if not isinstance(session_payload, dict):
+            raise RuntimeError(
+                f"Request failed ({response.status_code}): invalid JSON response body"
+            )
 
         return Session(
             client=self,
@@ -111,8 +155,13 @@ class Session:
             f"{self.client.base_url}/session/{self.session_id}/test/{name}",
             data={"params": json.dumps(to_jsonable(kwargs))} if kwargs else {},
         )
-        response.raise_for_status()
-        return response.json()
+        payload = _parse_json_response(response)
+        _raise_for_response_error(response, payload)
+        if payload is None:
+            raise RuntimeError(
+                f"Request failed ({response.status_code}): invalid JSON response body"
+            )
+        return payload
 
     async def observe(self, name: str | None = None) -> AsyncIterator[Any]:
         if name is not None and name not in self.client.observables:
@@ -151,9 +200,9 @@ class Session:
             response = await self.client.http_client.delete(
                 f"{self.client.base_url}/session/{self.session_id}"
             )
-
-            if response.status_code not in (200, 404):
-                response.raise_for_status()
+            payload = _parse_json_response(response)
+            if response.status_code != 404:
+                _raise_for_response_error(response, payload)
         finally:
             if self.close_client_on_close:
                 self.close_client_on_close = False
@@ -183,11 +232,16 @@ async def connect(
     http_client = httpx.AsyncClient(timeout=timeout_seconds)
     try:
         response = await http_client.get(f"{url.rstrip('/')}/schema")
-        response.raise_for_status()
+        payload = _parse_json_response(response)
+        _raise_for_response_error(response, payload)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Request failed ({response.status_code}): invalid JSON response body"
+            )
     except Exception:
         await http_client.aclose()
         raise
-    return Client(url=url, schema=response.json(), http_client=http_client)
+    return Client(url=url, schema=payload, http_client=http_client)
 
 
 async def connect_session(

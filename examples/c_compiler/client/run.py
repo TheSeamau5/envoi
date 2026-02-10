@@ -21,28 +21,29 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
 from rich import box
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.table import Table
-from rich.text import Text
 
 import envoi
 
 ENVOI_URL = os.environ.get("ENVOI_URL", "http://localhost:8000")
 MAX_ITERATIONS = 4
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.2")
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "high")
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "xhigh")
+VERBOSITY = os.environ.get("OPENAI_VERBOSITY", "high")
 
 console = Console()
+FILE_KEY_PATTERN = re.compile(r'"((?:[^"\\]|\\.)+)"\s*:')
 
 C_SUBSET_SPEC = """
 You are building a C compiler in Rust. The compiler binary accepts:
@@ -161,12 +162,49 @@ def normalize_files(payload: Any) -> dict[str, str]:
     return normalized
 
 
+def looks_like_project_file(path: str) -> bool:
+    if path == "files":
+        return False
+    if path in {"Cargo.toml", "build.sh", "README.md"}:
+        return True
+    if path.startswith("src/"):
+        return True
+
+    known_suffixes = (".rs", ".toml", ".sh", ".md", ".txt", ".json", ".lock")
+    if path.endswith(known_suffixes):
+        return True
+
+    return "/" in path and "." in Path(path).name
+
+
+def discover_stream_file_keys(raw_text: str, seen: set[str]) -> list[str]:
+    discovered: list[str] = []
+    for match in FILE_KEY_PATTERN.finditer(raw_text):
+        raw_key = match.group(1)
+        try:
+            key = json.loads(f'"{raw_key}"')
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(key, str):
+            continue
+        if key in seen:
+            continue
+        if not looks_like_project_file(key):
+            continue
+
+        seen.add(key)
+        discovered.append(key)
+
+    return discovered
+
+
 async def call_llm(
     client: AsyncOpenAI,
     prompt: str,
     phase: str = "Generating",
 ) -> dict[str, str]:
-    """Call GPT via Responses API and stream reasoning summaries + output."""
+    """Call GPT via Responses API and stream reasoning + output progress."""
     request: dict[str, Any] = {
         "model": MODEL,
         "input": prompt,
@@ -174,70 +212,140 @@ async def call_llm(
             "effort": REASONING_EFFORT,
             "summary": "auto",
         },
-        "text": {"format": {"type": "json_object"}},
+        "text": {
+            "format": {"type": "json_object"},
+            "verbosity": VERBOSITY,
+        },
         "stream": True,
     }
     stream = await client.responses.create(**request)
 
-    reasoning_chunks: list[str] = []
-    output_chunks: list[str] = []
-    reasoning_char_count = 0
-    output_char_count = 0
+    output_text = ""
+    seen_files: set[str] = set()
+    discovered_files: list[str] = []
+    current_loading_file: str | None = None
+    started_at = time.monotonic()
+    reasoning_seen = False
+    reasoning_chunk_buffer = ""
+    output_started = False
+    last_status_update_at = started_at
 
-    with Live(Spinner("dots", text=f"{phase}..."), console=console, refresh_per_second=10) as live:
+    def maybe_update_status(status: Any, label: str, *, force: bool = False) -> None:
+        nonlocal last_status_update_at
+        now = time.monotonic()
+        if force or (now - last_status_update_at) >= 0.25:
+            status.update(f"[cyan]{label}[/cyan] [dim]{now - started_at:.1f}s[/dim]")
+            last_status_update_at = now
+
+    def flush_reasoning_buffer(*, force: bool = False) -> None:
+        nonlocal reasoning_chunk_buffer
+        if force and reasoning_chunk_buffer:
+            console.print(reasoning_chunk_buffer, style="dim", markup=False)
+            reasoning_chunk_buffer = ""
+            return
+
+        while "\n" in reasoning_chunk_buffer:
+            line, reasoning_chunk_buffer = reasoning_chunk_buffer.split("\n", 1)
+            console.print(line, style="dim", markup=False)
+
+    console.print(f"[bold cyan]{phase}[/bold cyan]")
+    console.print("[dim]Thinking summary (streaming):[/dim]")
+    with console.status("[cyan]Thinking...[/cyan] [dim]0.0s[/dim]", spinner="dots") as status:
         async for event in stream:
             event_type = getattr(event, "type", "")
 
             if event_type == "response.reasoning_summary_text.delta":
                 delta = getattr(event, "delta", "")
                 if delta:
-                    reasoning_chunks.append(delta)
-                    reasoning_char_count += len(delta)
-                    live.update(
-                        Text.assemble(
-                            ("⟳ ", "bold cyan"),
-                            ("Thinking... ", ""),
-                            (f"{reasoning_char_count:,} chars", "dim"),
-                        )
-                    )
+                    reasoning_seen = True
+                    reasoning_chunk_buffer += delta
+                    flush_reasoning_buffer()
+
+                    if len(reasoning_chunk_buffer) >= 100 and reasoning_chunk_buffer[-1] in {" ", ".", "!", "?"}:
+                        console.print(reasoning_chunk_buffer, style="dim", markup=False)
+                        reasoning_chunk_buffer = ""
+                maybe_update_status(status, "Thinking...")
                 continue
 
             if event_type == "response.output_text.delta":
                 delta = getattr(event, "delta", "")
-                if delta:
-                    output_chunks.append(delta)
-                    output_char_count += len(delta)
-                    live.update(
-                        Text.assemble(
-                            ("⟳ ", "bold cyan"),
-                            ("Generating code... ", ""),
-                            (f"{output_char_count:,} chars", "dim"),
-                        )
-                    )
+                if not delta:
+                    maybe_update_status(status, "Generating project files...")
+                    continue
+
+                if reasoning_chunk_buffer:
+                    flush_reasoning_buffer(force=True)
+
+                if not output_started:
+                    output_started = True
+                    if reasoning_seen:
+                        console.print()
+                    console.print("[cyan]Generating project files...[/cyan]")
+
+                output_text += delta
+
+                new_files = discover_stream_file_keys(output_text, seen_files)
+                for file_path in new_files:
+                    discovered_files.append(file_path)
+                    if current_loading_file is not None:
+                        console.print(f"[green]✓[/green] {current_loading_file}")
+                    current_loading_file = file_path
+                    console.print(f"[cyan]loading {file_path}[/cyan]")
+                    maybe_update_status(status, f"Loading {file_path}...", force=True)
+
+                if current_loading_file is not None:
+                    maybe_update_status(status, f"Loading {current_loading_file}...")
+                else:
+                    maybe_update_status(status, "Generating project files...")
                 continue
 
             if event_type == "response.completed":
                 break
 
-    reasoning_summary = "".join(reasoning_chunks).strip()
-    if reasoning_summary:
-        console.print(Panel(reasoning_summary, title="Reasoning Summary", border_style="dim", expand=False))
+    if current_loading_file is not None:
+        console.print(f"[green]✓[/green] {current_loading_file}")
 
-    console.print(
-        f"[dim]{phase} complete (reasoning: {reasoning_char_count:,} chars, "
-        f"output: {output_char_count:,} chars).[/dim]"
-    )
+    flush_reasoning_buffer(force=True)
 
-    content = "".join(output_chunks)
-    if not content:
+    if reasoning_seen:
+        console.print()
+    elif not discovered_files:
+        console.print("[dim]No reasoning summary text emitted by model.[/dim]")
+
+    total_elapsed = time.monotonic() - started_at
+
+    if not output_text:
         raise RuntimeError("Model returned an empty response.")
 
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(output_text)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"Model did not return valid JSON: {error}") from error
 
-    return normalize_files(parsed)
+    files = normalize_files(parsed)
+
+    sample_files = ", ".join(sorted(files.keys())[:6])
+    if len(files) > 6:
+        sample_files += ", ..."
+    if not sample_files:
+        sample_files = "none"
+
+    console.print(
+        Panel(
+            "\n".join(
+                [
+                    f"Total elapsed: {total_elapsed:.1f}s",
+                    f"Files returned: {len(files)}",
+                    f"Sample files: {sample_files}",
+                ]
+            ),
+            title="LLM Generation Summary",
+            border_style="cyan",
+            expand=False,
+        )
+    )
+
+    return files
 
 
 def write_submission(files: dict[str, str], output_dir: Path) -> None:
@@ -378,7 +486,10 @@ async def run_loop() -> None:
     if not test_names:
         raise RuntimeError("Environment has no tests.")
     _print(f"Available tests: {test_names}")
-    _print(f"Model: {MODEL} | Reasoning effort: {REASONING_EFFORT}")
+    _print(
+        f"Model: {MODEL} | Reasoning effort: {REASONING_EFFORT} | "
+        f"Verbosity: {VERBOSITY}"
+    )
 
     previous_files: dict[str, str] | None = None
     last_results: dict[str, Any] = {"passed": 0, "failed": 0, "total": 0, "cases": []}
