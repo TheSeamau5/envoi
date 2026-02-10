@@ -1,8 +1,9 @@
 """
 LLM-driven C compiler development loop.
 
-Calls GPT-5.2 to generate a Rust-based C compiler, submits it to the
-envoi C compiler environment, reads structured test results, and iterates.
+Calls gpt-5.2-codex via the OpenAI Responses API to generate a Rust-based
+C compiler, submits it to the envoi C compiler environment, reads structured
+test results, and iterates.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -28,54 +29,41 @@ import time
 from pathlib import Path
 from typing import Any
 
+import envoi
 from openai import AsyncOpenAI
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-import envoi
-
 ENVOI_URL = os.environ.get("ENVOI_URL", "http://localhost:8000")
 MAX_ITERATIONS = 4
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.2")
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "xhigh")
-VERBOSITY = os.environ.get("OPENAI_VERBOSITY", "high")
+MODEL = os.environ.get("AI_MODEL", "gpt-5.2-codex")
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low")
+VERBOSITY = os.environ.get("OPENAI_VERBOSITY", "medium")
 
 console = Console()
 FILE_KEY_PATTERN = re.compile(r'"((?:[^"\\]|\\.)+)"\s*:')
 
-C_SUBSET_SPEC = """
-You are building a C compiler in Rust. The compiler binary accepts:
-    ./cc input.c -o output
+SYSTEM_PROMPT = """
+Build a C compiler in Rust. CLI: ./cc input.c -o output
+Read C source, compile to x86_64 assembly, invoke `as` and `gcc` to assemble and link.
 
-It should read a C source file, compile it, and produce a Linux x86_64 ELF executable.
-You can (and probably should) invoke the system assembler `as` and linker `gcc`
-to handle assembly and linking. Focus on parsing C and generating assembly.
-
-The subset of C to support:
-- #include <stdio.h> (just needs to not crash on it; printf is linked from libc)
-- int type only (no char, no float, no pointers for now)
-- int main() { ... } as the entry point
-- Integer literals
-- Arithmetic: +, -, *, /
-- Local variable declarations: int x = 5;
-- Assignment: x = 10;
-- if / else statements
-- while loops
-- Comparison operators: <, >, <=, >=, ==, !=
-- Function definitions with int parameters and int return type
-- Function calls
+C subset to support:
+- #include <stdio.h> (ignore, printf linked from libc)
+- int type only
+- int main() entry point
+- Integer literals, arithmetic (+, -, *, /)
+- Local variables: int x = 5; assignment: x = 10;
+- if/else, while loops
+- Comparisons: <, >, <=, >=, ==, !=
+- Functions with int params and int return
 - return statements
-- printf("%d\\n", expr) for one integer argument
-- printf("string\\n") with string literals
+- printf("%d\\n", expr) and printf("string\\n")
 
-Compiler requirements:
-1. Parse the C source
-2. Generate x86_64 assembly (AT&T or Intel syntax)
-3. Call `as` to assemble an object file
-4. Call `gcc` to link (needed for libc / printf)
-5. Respect CLI: ./cc input.c -o output
+Output format: JSON object where keys are file paths relative to project root and values are full file contents.
+Required files: Cargo.toml (package name "c_compiler"), src/main.rs, and any additional src/*.rs files.
+Do NOT include build.sh. Do NOT explain or plan. Produce ONLY the JSON object.
 """.strip()
 
 
@@ -84,20 +72,7 @@ def _print(message: str = "") -> None:
 
 
 def build_initial_prompt() -> str:
-    return f"""
-{C_SUBSET_SPEC}
-
-Generate a complete Rust project. Return a JSON object where keys are file paths
-relative to project root and values are full file contents.
-
-You MUST include:
-- Cargo.toml (package name must be "c_compiler")
-- src/main.rs
-- Any additional src/*.rs files needed
-
-Do NOT include build.sh (it is provided externally).
-Return ONLY JSON, no markdown, no commentary.
-""".strip()
+    return "Generate the complete Rust project. Return ONLY JSON, no markdown, no commentary."
 
 
 def format_failures(test_results: dict[str, Any]) -> list[dict[str, Any]]:
@@ -121,19 +96,13 @@ def format_failures(test_results: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_iteration_prompt(previous_files: dict[str, str], test_results: dict[str, Any]) -> str:
     failures = format_failures(test_results)
-    return f"""
-{C_SUBSET_SPEC}
-
-Here is your previous Rust source tree:
+    return f"""Previous source tree:
 {json.dumps(previous_files, indent=2)}
 
-The following test cases failed:
+Failed test cases:
 {json.dumps(failures, indent=2)}
 
-Fix the compiler and return the COMPLETE updated project as JSON.
-Return all files, not only changed files.
-Return ONLY JSON, no markdown, no commentary.
-""".strip()
+Fix the compiler. Return the COMPLETE updated project as JSON (all files, not only changed ones). ONLY JSON, no markdown, no commentary."""
 
 
 def normalize_files(payload: Any) -> dict[str, str]:
@@ -199,15 +168,25 @@ def discover_stream_file_keys(raw_text: str, seen: set[str]) -> list[str]:
     return discovered
 
 
+class LLMResult:
+    """Holds parsed files and the response ID for conversation chaining."""
+
+    def __init__(self, files: dict[str, str], response_id: str) -> None:
+        self.files = files
+        self.response_id = response_id
+
+
 async def call_llm(
     client: AsyncOpenAI,
     prompt: str,
     phase: str = "Generating",
-) -> dict[str, str]:
-    """Call GPT via Responses API and stream reasoning + output progress."""
+    previous_response_id: str | None = None,
+) -> LLMResult:
+    """Call gpt-5.2-codex via Responses API and stream reasoning + output progress."""
     request: dict[str, Any] = {
         "model": MODEL,
-        "input": prompt,
+        "instructions": SYSTEM_PROMPT,
+        "input": [{"role": "user", "content": prompt}],
         "reasoning": {
             "effort": REASONING_EFFORT,
             "summary": "auto",
@@ -218,6 +197,9 @@ async def call_llm(
         },
         "stream": True,
     }
+    if previous_response_id is not None:
+        request["previous_response_id"] = previous_response_id
+
     stream = await client.responses.create(**request)
 
     output_text = ""
@@ -247,6 +229,8 @@ async def call_llm(
         while "\n" in reasoning_chunk_buffer:
             line, reasoning_chunk_buffer = reasoning_chunk_buffer.split("\n", 1)
             console.print(line, style="dim", markup=False)
+
+    response_obj = None
 
     console.print(f"[bold cyan]{phase}[/bold cyan]")
     console.print("[dim]Thinking summary (streaming):[/dim]")
@@ -290,16 +274,17 @@ async def call_llm(
                     if current_loading_file is not None:
                         console.print(f"[green]✓[/green] {current_loading_file}")
                     current_loading_file = file_path
-                    console.print(f"[cyan]loading {file_path}[/cyan]")
-                    maybe_update_status(status, f"Loading {file_path}...", force=True)
+                    console.print(f"[cyan]generating {file_path}[/cyan]")
+                    maybe_update_status(status, f"Generating {file_path}...", force=True)
 
                 if current_loading_file is not None:
-                    maybe_update_status(status, f"Loading {current_loading_file}...")
+                    maybe_update_status(status, f"Generating {current_loading_file}...")
                 else:
                     maybe_update_status(status, "Generating project files...")
                 continue
 
             if event_type == "response.completed":
+                response_obj = getattr(event, "response", None)
                 break
 
     if current_loading_file is not None:
@@ -316,6 +301,8 @@ async def call_llm(
 
     if not output_text:
         raise RuntimeError("Model returned an empty response.")
+
+    response_id = getattr(response_obj, "id", "") if response_obj else ""
 
     try:
         parsed = json.loads(output_text)
@@ -345,7 +332,7 @@ async def call_llm(
         )
     )
 
-    return files
+    return LLMResult(files=files, response_id=response_id)
 
 
 def write_submission(files: dict[str, str], output_dir: Path) -> None:
@@ -494,6 +481,7 @@ async def run_loop() -> None:
     previous_files: dict[str, str] | None = None
     last_results: dict[str, Any] = {"passed": 0, "failed": 0, "total": 0, "cases": []}
     best_passed = -1
+    previous_response_id: str | None = None
 
     async with AsyncOpenAI(api_key=api_key) as llm_client:
         for iteration in range(1, MAX_ITERATIONS + 1):
@@ -507,11 +495,18 @@ async def run_loop() -> None:
                 prompt = build_iteration_prompt(previous_files, last_results)
 
             try:
-                files = await call_llm(llm_client, prompt, phase=phase)
+                llm_result = await call_llm(
+                    llm_client,
+                    prompt,
+                    phase=phase,
+                    previous_response_id=previous_response_id,
+                )
             except Exception as error:
                 console.print(f"[red]LLM call failed:[/red] {error}")
                 break
 
+            files = llm_result.files
+            previous_response_id = llm_result.response_id
             previous_files = files
             _print(f"Generated {len(files)} files")
 
