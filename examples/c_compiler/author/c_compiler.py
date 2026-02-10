@@ -9,14 +9,15 @@ Test .c files live in tests/<suite>/ directories. Each file has comment headers:
     // expect_exit: <code>     (default 0)
 """
 
+import os
 import re
 import shlex
+import time
 from pathlib import Path
-
-from pydantic import BaseModel
 
 import envoi
 from envoi.utils import working_dir
+from pydantic import BaseModel
 
 TESTS_DIR = Path(__file__).resolve().parent / "tests"
 
@@ -32,6 +33,12 @@ class CaseResult(BaseModel):
     actual_stdout: str
     expected_exit_code: int
     actual_exit_code: int
+    compile_time_ms: float
+    gcc_compile_time_ms: float | None = None
+    binary_size_bytes: int | None = None
+    gcc_binary_size_bytes: int | None = None
+    run_time_ms: float | None = None
+    gcc_run_time_ms: float | None = None
     stderr: str | None = None
 
 
@@ -70,6 +77,13 @@ def _session_path() -> Path:
         return Path.cwd()
 
 
+def _file_size(path: Path) -> int | None:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
 @envoi.setup
 async def build_compiler(submission: envoi.Documents) -> None:
     _ = submission
@@ -84,40 +98,83 @@ async def run_case(case: dict) -> CaseResult:
     name, src = case["name"], case["source"]
     expected_stdout = case["expected_stdout"]
     expected_exit = case["expected_exit_code"]
-
-    def fail(phase: str, stderr: str, exit_code: int = 1) -> CaseResult:
-        return CaseResult(
-            name=name, phase=phase, passed=False, c_source=src,
-            expected_stdout=expected_stdout, actual_stdout="",
-            expected_exit_code=expected_exit, actual_exit_code=exit_code,
-            stderr=stderr[:8000],
-        )
-
-    # Write source file and compile
     sp = _session_path()
+
     c_file = sp / f"test_{name}.c"
     out_file = sp / f"test_{name}"
+    gcc_out_file = sp / f"test_{name}_gcc"
     c_file.write_text(src)
 
+    # Compile with submitted compiler (timed)
+    t0 = time.monotonic()
     cc = await envoi.run(
         f"./cc {shlex.quote(c_file.name)} -o {shlex.quote(out_file.name)}",
         timeout_seconds=45,
     )
-    if cc.exit_code != 0:
-        return fail("compile", cc.stderr or cc.stdout or "compilation failed", cc.exit_code)
+    compile_time_ms = (time.monotonic() - t0) * 1000
 
-    # Execute the compiled binary
+    # Benchmark: compile same file with gcc (timed)
+    gcc_compile_time_ms = None
+    t0 = time.monotonic()
+    gcc = await envoi.run(
+        f"gcc {shlex.quote(c_file.name)} -o {shlex.quote(gcc_out_file.name)}",
+        timeout_seconds=45,
+    )
+    if gcc.exit_code == 0:
+        gcc_compile_time_ms = (time.monotonic() - t0) * 1000
+
+    # Binary sizes
+    binary_size_bytes = _file_size(out_file)
+    gcc_binary_size_bytes = _file_size(gcc_out_file) if gcc.exit_code == 0 else None
+
+    if cc.exit_code != 0:
+        return CaseResult(
+            name=name, phase="compile", passed=False, c_source=src,
+            expected_stdout=expected_stdout, actual_stdout="",
+            expected_exit_code=expected_exit, actual_exit_code=cc.exit_code,
+            compile_time_ms=compile_time_ms, gcc_compile_time_ms=gcc_compile_time_ms,
+            binary_size_bytes=None, gcc_binary_size_bytes=gcc_binary_size_bytes,
+            stderr=(cc.stderr or cc.stdout or "compilation failed")[:8000],
+        )
+
+    # Execute the compiled binary (timed)
+    t0 = time.monotonic()
     run = await envoi.run(shlex.quote(f"./{out_file.name}"), timeout_seconds=15)
+    run_time_ms = (time.monotonic() - t0) * 1000
+
+    # Benchmark: execute gcc-compiled binary (timed)
+    gcc_run_time_ms = None
+    if gcc.exit_code == 0:
+        t0 = time.monotonic()
+        gcc_run = await envoi.run(shlex.quote(f"./{gcc_out_file.name}"), timeout_seconds=15)
+        if gcc_run.exit_code == expected_exit:
+            gcc_run_time_ms = (time.monotonic() - t0) * 1000
 
     passed = (
         run.stdout.strip() == expected_stdout.strip()
         and run.exit_code == expected_exit
     )
+
+    # Build detailed stderr on verify failure
+    stderr = None
+    if not passed:
+        parts = []
+        if run.stdout.strip() != expected_stdout.strip():
+            parts.append(f"stdout mismatch:\n  expected: {expected_stdout!r}\n  actual:   {run.stdout.strip()!r}")
+        if run.exit_code != expected_exit:
+            parts.append(f"exit code mismatch: expected {expected_exit}, got {run.exit_code}")
+        if run.stderr:
+            parts.append(f"stderr:\n  {run.stderr.strip()}")
+        stderr = "\n".join(parts)[:8000]
+
     return CaseResult(
         name=name, phase="verify", passed=passed, c_source=src,
         expected_stdout=expected_stdout, actual_stdout=run.stdout,
         expected_exit_code=expected_exit, actual_exit_code=run.exit_code,
-        stderr=run.stderr[:8000] if (run.stderr and not passed) else None,
+        compile_time_ms=compile_time_ms, gcc_compile_time_ms=gcc_compile_time_ms,
+        binary_size_bytes=binary_size_bytes, gcc_binary_size_bytes=gcc_binary_size_bytes,
+        run_time_ms=run_time_ms, gcc_run_time_ms=gcc_run_time_ms,
+        stderr=stderr,
     )
 
 
