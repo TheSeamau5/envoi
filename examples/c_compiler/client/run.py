@@ -386,6 +386,22 @@ def print_iteration_header(iteration: int, max_iterations: int) -> None:
     )
 
 
+def _fmt_ms(ms: float | None) -> str:
+    if ms is None:
+        return "-"
+    return f"{ms:.0f}ms"
+
+
+def _fmt_bytes(b: int | None) -> str:
+    if b is None:
+        return "-"
+    if b >= 1024 * 1024:
+        return f"{b / (1024 * 1024):.1f}MB"
+    if b >= 1024:
+        return f"{b / 1024:.1f}KB"
+    return f"{b}B"
+
+
 def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
     table = Table(
         title=f"Test Tier: {tier_name}",
@@ -394,13 +410,17 @@ def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
     )
     table.add_column("Test", style="bold")
     table.add_column("Result", justify="center")
-    table.add_column("Phase", style="yellow")
-    table.add_column("Details", style="dim", max_width=70)
+    table.add_column("Compile", justify="right")
+    table.add_column("vs gcc", justify="right", style="dim")
+    table.add_column("Run", justify="right")
+    table.add_column("vs gcc", justify="right", style="dim")
+    table.add_column("Size", justify="right")
+    table.add_column("vs gcc", justify="right", style="dim")
+    table.add_column("Details", style="dim", max_width=50)
 
     for case in cases:
         name = case.get("name", "unknown")
         passed = case.get("passed", False)
-        phase = case.get("phase", "")
 
         if passed:
             result_str = "[green]PASS[/green]"
@@ -408,9 +428,19 @@ def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
         else:
             result_str = "[red]FAIL[/red]"
             stderr = (case.get("stderr") or "").strip()
-            detail = stderr.split("\n")[0][:70] if stderr else ""
+            detail = stderr.split("\n")[0][:50] if stderr else ""
 
-        table.add_row(str(name), result_str, str(phase), detail)
+        table.add_row(
+            str(name),
+            result_str,
+            _fmt_ms(case.get("compile_time_ms")),
+            _fmt_ms(case.get("gcc_compile_time_ms")),
+            _fmt_ms(case.get("run_time_ms")),
+            _fmt_ms(case.get("gcc_run_time_ms")),
+            _fmt_bytes(case.get("binary_size_bytes")),
+            _fmt_bytes(case.get("gcc_binary_size_bytes")),
+            detail,
+        )
 
     console.print(table)
 
@@ -422,7 +452,7 @@ def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
             continue
         case_name = case.get("name", "unknown")
         console.print(f"[dim]  stderr ({case_name}):[/dim]")
-        for line in stderr.splitlines()[:3]:
+        for line in stderr.splitlines()[:5]:
             console.print(f"[dim]    {line}[/dim]")
 
 
