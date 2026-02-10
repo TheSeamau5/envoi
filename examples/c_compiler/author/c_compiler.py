@@ -9,6 +9,7 @@ Test .c files live in tests/<suite>/ directories. Each file has comment headers:
     // expect_exit: <code>     (default 0)
 """
 
+import json
 import os
 import re
 import shlex
@@ -20,6 +21,9 @@ from envoi.utils import working_dir
 from pydantic import BaseModel
 
 TESTS_DIR = Path(__file__).resolve().parent / "tests"
+C_TESTSUITE_DIR = Path("/opt/tests/c-testsuite/tests/single-exec")
+WACCT_DIR = Path("/opt/tests/wacct")
+WACCT_TESTS_DIR = WACCT_DIR / "tests"
 
 
 # -- Models ----------------------------------------------------------------
@@ -216,3 +220,98 @@ async def edge_cases() -> TestResult:
 @envoi.test
 async def stress() -> TestResult:
     return await run_suite("stress")
+
+
+# -- External test suites --------------------------------------------------
+
+@envoi.test
+async def c_testsuite() -> TestResult:
+    """~220 single-file C tests from github.com/c-testsuite/c-testsuite."""
+    cases = []
+    for f in sorted(C_TESTSUITE_DIR.glob("*.c")):
+        expected_file = f.parent / f"{f.name}.expected"
+        expected_stdout = expected_file.read_text().strip() if expected_file.exists() else ""
+        cases.append({
+            "name": f.stem,
+            "source": f.read_text(),
+            "expected_stdout": expected_stdout,
+            "expected_exit_code": 0,
+        })
+    results = [await run_case(c) for c in cases]
+    passed = sum(1 for r in results if r.passed)
+    return TestResult(passed=passed, failed=len(results) - passed, total=len(results), cases=results)
+
+
+def _load_wacct_expected() -> dict:
+    path = WACCT_DIR / "expected_results.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {}
+
+
+@envoi.test
+async def wacct(chapter: int) -> TestResult:
+    """Valid tests from writing-a-c-compiler-tests, by chapter."""
+    expected_map = _load_wacct_expected()
+    chapter_dir = WACCT_TESTS_DIR / f"chapter_{chapter}" / "valid"
+
+    cases = []
+    for f in sorted(chapter_dir.rglob("*.c")):
+        src = f.read_text()
+        # Key format in expected_results.json: "chapter_N/valid/..."
+        rel = f.relative_to(WACCT_TESTS_DIR)
+        entry = expected_map.get(str(rel), {})
+        expected_exit = entry.get("return_code", 0) if isinstance(entry, dict) else 0
+        expected_stdout = entry.get("stdout", "").strip() if isinstance(entry, dict) else ""
+        cases.append({
+            "name": f.stem,
+            "source": src,
+            "expected_stdout": expected_stdout,
+            "expected_exit_code": expected_exit,
+        })
+    results = [await run_case(c) for c in cases]
+    passed = sum(1 for r in results if r.passed)
+    return TestResult(passed=passed, failed=len(results) - passed, total=len(results), cases=results)
+
+
+@envoi.test
+async def wacct_invalid(chapter: int) -> TestResult:
+    """Invalid tests from writing-a-c-compiler-tests — compilation must fail."""
+    chapter_dir = WACCT_TESTS_DIR / f"chapter_{chapter}"
+
+    cases = []
+    for invalid_dir in sorted(chapter_dir.glob("invalid_*")):
+        for f in sorted(invalid_dir.rglob("*.c")):
+            cases.append({"name": f.stem, "source": f.read_text()})
+
+    sp = _session_path()
+    results = []
+    for case in cases:
+        name, src = case["name"], case["source"]
+        c_file = sp / f"test_{name}.c"
+        out_file = sp / f"test_{name}"
+        c_file.write_text(src)
+
+        t0 = time.monotonic()
+        cc = await envoi.run(
+            f"./cc {shlex.quote(c_file.name)} -o {shlex.quote(out_file.name)}",
+            timeout_seconds=45,
+        )
+        compile_time_ms = (time.monotonic() - t0) * 1000
+
+        passed = cc.exit_code != 0
+        results.append(CaseResult(
+            name=name,
+            phase="compile",
+            passed=passed,
+            c_source=src,
+            expected_stdout="",
+            actual_stdout="",
+            expected_exit_code=1,
+            actual_exit_code=cc.exit_code,
+            compile_time_ms=compile_time_ms,
+            stderr=None if passed else "expected compilation to fail but it succeeded",
+        ))
+
+    passed = sum(1 for r in results if r.passed)
+    return TestResult(passed=passed, failed=len(results) - passed, total=len(results), cases=results)

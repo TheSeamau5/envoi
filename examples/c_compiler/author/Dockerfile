@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     gcc \
+    git \
     python3 \
     python3-pip \
     python3-venv \
@@ -21,6 +22,9 @@ WORKDIR /app
 COPY pyproject.toml README.md /app/
 COPY envoi /app/envoi
 RUN pip3 install --no-cache-dir --break-system-packages .
+
+RUN git clone --depth 1 https://github.com/c-testsuite/c-testsuite.git /opt/tests/c-testsuite
+RUN git clone --depth 1 https://github.com/nlsandler/writing-a-c-compiler-tests.git /opt/tests/wacct
 
 COPY examples/c_compiler/author /environment
 WORKDIR /environment
