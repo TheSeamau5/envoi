@@ -6,5 +6,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 examples/c_compiler/client/best_submission/
+examples/c_compiler/client/regression_state.json
 .env
 .env.*
