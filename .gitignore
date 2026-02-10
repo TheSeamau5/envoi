@@ -9,3 +9,4 @@ examples/c_compiler/client/best_submission/
 examples/c_compiler/client/regression_state.json
 .env
 .env.*
+prompt_logs

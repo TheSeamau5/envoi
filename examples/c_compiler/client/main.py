@@ -22,24 +22,28 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import envoi
+from openai import AsyncOpenAI
+
 from display import (
     console,
     print_build_failure,
     print_final_summary,
     print_iteration_header,
     print_llm_summary,
+    print_main_prompt,
     print_summary,
     print_tier_results,
     stream_llm_response,
 )
-from openai import AsyncOpenAI
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -48,11 +52,21 @@ from openai import AsyncOpenAI
 ENVOI_URL = os.environ.get("ENVOI_URL", "http://localhost:8000")
 MAX_ITERATIONS = 10
 MODEL = os.environ.get("AI_MODEL", "gpt-5.2-codex")
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "xhigh")
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low")
 VERBOSITY = os.environ.get("OPENAI_VERBOSITY", "medium")
+DEBUG_SUMMARY_ENABLED = os.environ.get("DEBUG_SUMMARY_ENABLED", "1") != "0"
+DEBUG_SUMMARY_MODEL = os.environ.get("DEBUG_SUMMARY_MODEL", MODEL)
+DEBUG_SUMMARY_REASONING_EFFORT = os.environ.get(
+    "DEBUG_SUMMARY_REASONING_EFFORT", "low"
+)
+DEBUG_SUMMARY_CHUNK_CHARS = int(os.environ.get("DEBUG_SUMMARY_CHUNK_CHARS", "12000"))
+DEBUG_SUMMARY_REDUCE_CHARS = int(os.environ.get("DEBUG_SUMMARY_REDUCE_CHARS", "24000"))
+PRINT_MAIN_PROMPT = os.environ.get("PRINT_MAIN_PROMPT", "1") != "0"
+PROMPT_PRINT_MAX_CHARS = int(os.environ.get("PROMPT_PRINT_MAX_CHARS", "12000"))
 
 TIER_ORDER = ["basics", "wacct", "c_testsuite", "torture"]
 REGRESSION_STATE_PATH = Path(__file__).resolve().parent / "regression_state.json"
+PROMPT_LOG_DIR = Path(__file__).resolve().parent / "prompt_logs"
 BUILD_SH = """\
 #!/bin/bash
 set -e
@@ -76,9 +90,29 @@ C subset to support:
 - return statements
 - printf("%d\\n", expr) and printf("string\\n")
 
+Error handling:
+- Never use panic!() or unwrap() for user-facing errors. Use Result types.
+- On invalid input, print a structured error to stderr and exit with code 1:
+    error: unexpected token `while` at line 5, col 3
+- On unsupported features, emit a clear message and exit 1, do not crash.
+
+Diagnostics on failure:
+- Use Command::output() (not status()) for `as` and `gcc` so you capture their stderr.
+- If the assembler fails, print its stderr. Do NOT dump the full assembly — it can be huge.
+- Tag each error with the compilation phase: "error[parse]:", "error[codegen]:", "error[assemble]:", "error[link]:".
+- Also write rich debugging artifacts into ./debug_artifacts/ with no extra CLI flags.
+- You may create any filenames in ./debug_artifacts/, but include useful internals
+  such as AST, IR, emitted assembly, command traces, or panic/backtrace details.
+- The evaluator clears ./debug_artifacts/ before each test case, then captures what you write.
+
 Output format: JSON object where keys are file paths relative to project root and values are full file contents.
 Required files: Cargo.toml (package name "c_compiler"), src/main.rs, and any additional src/*.rs files.
 Do NOT include build.sh. Do NOT explain or plan. Produce ONLY the JSON object.
+
+When fixing failures:
+- Failures are grouped by root cause. Fix the largest group first.
+- Each group shows representative C source code that triggers the bug.
+- REGRESSIONS are tests that previously passed but now fail. Fix these first.
 """.strip()
 
 # ---------------------------------------------------------------------------
@@ -99,14 +133,218 @@ def format_failures(test_results: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "test_name": case.get("name", "unknown"),
                 "phase": case.get("phase", "unknown"),
+                "c_source": case.get("c_source", ""),
                 "expected_stdout": case.get("expected_stdout", ""),
                 "actual_stdout": case.get("actual_stdout", ""),
                 "expected_exit_code": case.get("expected_exit_code", 0),
                 "actual_exit_code": case.get("actual_exit_code", 0),
                 "stderr": case.get("stderr", ""),
+                "debug_artifacts": case.get("debug_artifacts", []),
             }
         )
     return failures
+
+
+def extract_failure_signature(case: dict[str, Any]) -> str:
+    """Derive a clustering key from a failing test case."""
+    phase = case.get("phase", "unknown")
+    stderr = (case.get("stderr") or "").strip()
+
+    if phase == "compile":
+        first_line = stderr.split("\n")[0] if stderr else "compilation failed"
+        # Normalize file paths and line numbers so identical panics cluster.
+        first_line = re.sub(r"['\"](/?[\w./]+\.rs):(\d+)(:\d+)?['\"]?", "<location>", first_line)
+        first_line = re.sub(r"at .*?:\d+(:\d+)?", "at <location>", first_line)
+        return f"compile: {first_line}"
+
+    if phase == "verify":
+        actual_exit = case.get("actual_exit_code", 0)
+        expected_exit = case.get("expected_exit_code", 0)
+        if actual_exit != expected_exit:
+            if actual_exit in (139, -11):
+                return "verify: segfault (exit 139)"
+            if actual_exit in (134, -6):
+                return "verify: abort (exit 134)"
+            return f"verify: wrong exit code (expected {expected_exit}, got {actual_exit})"
+        return "verify: stdout mismatch"
+
+    return f"{phase}: unknown"
+
+
+def _fmt_bytes(value: int | None) -> str:
+    if value is None:
+        return "unknown"
+    if value >= 1024 * 1024:
+        return f"{value / (1024 * 1024):.1f}MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f}KB"
+    return f"{value}B"
+
+
+def _debug_artifacts_summary_for_prompt(
+    debug_artifacts: Any,
+    *,
+    max_files: int = 4,
+    max_snippet_lines: int = 8,
+) -> str:
+    if not isinstance(debug_artifacts, list) or not debug_artifacts:
+        return ""
+
+    valid_artifacts = [a for a in debug_artifacts if isinstance(a, dict)]
+    if not valid_artifacts:
+        return ""
+
+    total_bytes = sum(
+        a["size_bytes"]
+        for a in valid_artifacts
+        if isinstance(a.get("size_bytes"), int)
+    )
+    lines = [
+        f"debug_artifacts: {len(valid_artifacts)} file(s), total {_fmt_bytes(total_bytes)}"
+    ]
+
+    snippets: list[str] = []
+    interesting_pattern = re.compile(
+        r"(error|panic|trace|assert|unexpected|expected|token|stack|backtrace|phase|ast|ir|asm)",
+        re.IGNORECASE,
+    )
+
+    for artifact in valid_artifacts[:max_files]:
+        path = artifact.get("path", "unknown")
+        kind = artifact.get("kind", "unknown")
+        size_bytes = artifact.get("size_bytes")
+        sha256 = artifact.get("sha256")
+        chunks = artifact.get("text_chunks")
+        chunk_count = len(chunks) if isinstance(chunks, list) else 0
+        sha_short = sha256[:12] if isinstance(sha256, str) else "unknown"
+        lines.append(
+            f"- {kind}: {path} ({_fmt_bytes(size_bytes if isinstance(size_bytes, int) else None)}, chunks={chunk_count}, sha256={sha_short})"
+        )
+
+        if not isinstance(chunks, list):
+            continue
+
+        for chunk in chunks:
+            if not isinstance(chunk, str):
+                continue
+            for raw_line in chunk.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if interesting_pattern.search(line):
+                    snippets.append(line[:220])
+                if len(snippets) >= max_snippet_lines:
+                    break
+            if len(snippets) >= max_snippet_lines:
+                break
+        if len(snippets) >= max_snippet_lines:
+            break
+
+    if snippets:
+        lines.append("artifact snippets:")
+        for snippet in snippets:
+            lines.append(f"  {snippet}")
+
+    return "\n".join(lines)
+
+
+def format_source_tree_for_prompt(files: dict[str, str]) -> str:
+    sections: list[str] = []
+    for file_path in sorted(files.keys()):
+        content = files[file_path]
+        line_count = content.count("\n")
+        if content and not content.endswith("\n"):
+            line_count += 1
+        sections.append(
+            "\n".join(
+                [
+                    f"--- file: {file_path} ({len(content)} chars, {line_count} lines) ---",
+                    content,
+                ]
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def cluster_failures(
+    failures: list[dict[str, Any]],
+    max_examples: int = 2,
+    max_source_lines: int = 30,
+    max_clusters: int = 15,
+    max_stderr_lines: int = 5,
+) -> str:
+    """Group failures by root cause and format a compact summary for the LLM."""
+    if not failures:
+        return "No failures."
+
+    clusters: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for f in failures:
+        sig = extract_failure_signature(f)
+        clusters[sig].append(f)
+
+    # Sort largest clusters first.
+    sorted_clusters = sorted(clusters.items(), key=lambda kv: len(kv[1]), reverse=True)
+
+    parts = [f"{len(failures)} failures in {len(sorted_clusters)} categories:\n"]
+
+    for i, (sig, cases) in enumerate(sorted_clusters):
+        if i >= max_clusters:
+            remaining = sum(len(c) for _, c in sorted_clusters[i:])
+            parts.append(f"... and {len(sorted_clusters) - i} more categories ({remaining} failures)")
+            break
+
+        parts.append(f"=== {sig} ({len(cases)} failures) ===")
+
+        # Pick shortest source as representative examples.
+        by_length = sorted(cases, key=lambda c: len(c.get("c_source", "")))
+        examples = by_length[:max_examples]
+
+        for ex in examples:
+            name = ex.get("test_name", "unknown")
+            source = ex.get("c_source", "")
+            stderr = (ex.get("stderr") or "").strip()
+
+            parts.append(f"-- {name} --")
+            if source:
+                lines = source.strip().splitlines()
+                if len(lines) > max_source_lines:
+                    lines = lines[:max_source_lines] + [f"... ({len(lines) - max_source_lines} more lines)"]
+                parts.append("```c")
+                parts.append("\n".join(lines))
+                parts.append("```")
+
+            if ex.get("phase") == "verify":
+                expected = ex.get("expected_stdout", "")
+                actual = ex.get("actual_stdout", "")
+                if expected != actual:
+                    parts.append(f"expected stdout: {expected!r}")
+                    parts.append(f"actual stdout:   {actual!r}")
+
+            if stderr:
+                stderr_lines = stderr.splitlines()
+                if len(stderr_lines) > max_stderr_lines:
+                    stderr_lines = stderr_lines[:max_stderr_lines] + ["..."]
+                parts.append("stderr: " + "\n  ".join(stderr_lines))
+
+            artifact_summary = _debug_artifacts_summary_for_prompt(
+                ex.get("debug_artifacts", [])
+            )
+            if artifact_summary:
+                parts.append(artifact_summary)
+
+        # List remaining test names.
+        remaining = by_length[max_examples:]
+        if remaining:
+            names = [c.get("test_name", "?") for c in remaining]
+            if len(names) > 10:
+                shown = ", ".join(names[:10])
+                parts.append(f"Other failing tests: {shown}, ... ({len(names) - 10} more)")
+            else:
+                parts.append(f"Other failing tests: {', '.join(names)}")
+
+        parts.append("")  # blank line between clusters
+
+    return "\n".join(parts)
 
 
 def build_iteration_prompt(
@@ -116,12 +354,12 @@ def build_iteration_prompt(
     regressions: list[dict[str, Any]],
 ) -> str:
     parts = [
-        f"Previous source tree:\n{json.dumps(previous_files, indent=2)}",
-        f"\nFailing tier: {current_tier}\nFailed test cases ({len(current_tier_failures)}):\n{json.dumps(current_tier_failures, indent=2)}",
+        f"Previous source tree:\n{format_source_tree_for_prompt(previous_files)}",
+        f"\nFailing tier: {current_tier}\n{cluster_failures(current_tier_failures)}",
     ]
     if regressions:
         parts.append(
-            f"\nREGRESSIONS (previously passing tests that now FAIL — fix these first):\n{json.dumps(regressions, indent=2)}"
+            f"\nREGRESSIONS (previously passing tests that now FAIL — fix these first):\n{cluster_failures(regressions, max_examples=3)}"
         )
     parts.append(
         "\nFix the compiler. Return the COMPLETE updated project as JSON (all files, not only changed ones). ONLY JSON, no markdown, no commentary."
@@ -159,6 +397,46 @@ def normalize_files(payload: Any) -> dict[str, str]:
     return normalized
 
 
+def _phase_slug(phase: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", phase.strip().lower())
+    slug = slug.strip("-")
+    return slug or "phase"
+
+
+def save_prompt_snapshot(iteration: int, phase: str, prompt: str) -> Path:
+    PROMPT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    prompt_path = PROMPT_LOG_DIR / f"iter_{iteration:02d}_{_phase_slug(phase)}.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    return prompt_path
+
+
+def save_request_snapshot(iteration: int, phase: str, request: dict[str, Any]) -> Path:
+    PROMPT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    request_path = PROMPT_LOG_DIR / f"iter_{iteration:02d}_{_phase_slug(phase)}.request.json"
+    request_path.write_text(
+        json.dumps(request, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return request_path
+
+
+def build_llm_request(prompt: str) -> dict[str, Any]:
+    return {
+        "model": MODEL,
+        "instructions": SYSTEM_PROMPT,
+        "input": [{"role": "user", "content": prompt}],
+        "reasoning": {
+            "effort": REASONING_EFFORT,
+            "summary": "auto",
+        },
+        "text": {
+            "format": {"type": "json_object"},
+            "verbosity": VERBOSITY,
+        },
+        "stream": True,
+    }
+
+
 def write_submission(files: dict[str, str], output_dir: Path) -> None:
     for relative_path, content in files.items():
         path_obj = Path(relative_path)
@@ -187,15 +465,6 @@ def save_best_submission(files: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def load_regression_state() -> dict[str, Any]:
-    """Load the persistent regression tracker from disk."""
-    if REGRESSION_STATE_PATH.exists():
-        try:
-            return json.loads(REGRESSION_STATE_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
 
 def save_regression_state(state: dict[str, Any]) -> None:
     """Persist the regression tracker to disk."""
@@ -216,6 +485,7 @@ def detect_regressions(
                 "tier": tier,
                 "test_name": name,
                 "phase": case.get("phase", "unknown"),
+                "c_source": case.get("c_source", ""),
                 "expected_stdout": case.get("expected_stdout", ""),
                 "actual_stdout": case.get("actual_stdout", ""),
                 "expected_exit_code": case.get("expected_exit_code", 0),
@@ -244,25 +514,10 @@ def update_regression_state(
 
 async def call_llm(
     client: AsyncOpenAI,
-    prompt: str,
+    request: dict[str, Any],
     phase: str = "Generating",
 ) -> dict[str, str]:
     """Call the model and return parsed project files."""
-    request: dict[str, Any] = {
-        "model": MODEL,
-        "instructions": SYSTEM_PROMPT,
-        "input": [{"role": "user", "content": prompt}],
-        "reasoning": {
-            "effort": REASONING_EFFORT,
-            "summary": "auto",
-        },
-        "text": {
-            "format": {"type": "json_object"},
-            "verbosity": VERBOSITY,
-        },
-        "stream": True,
-    }
-
     started_at = time.monotonic()
     stream = await client.responses.create(**request)
     output_text = await stream_llm_response(stream, phase)
@@ -300,7 +555,7 @@ async def run_loop() -> None:
         f"Verbosity: {VERBOSITY}"
     )
 
-    regression_state = load_regression_state()
+    regression_state: dict[str, Any] = {}
     previous_files: dict[str, str] | None = None
     best_passed = -1
 
@@ -327,8 +582,25 @@ async def run_loop() -> None:
                     last_regressions,
                 )
 
+            request = build_llm_request(prompt)
+            prompt_path = save_prompt_snapshot(iteration, phase, prompt)
+            request_path = save_request_snapshot(iteration, phase, request)
+            if PRINT_MAIN_PROMPT:
+                print_main_prompt(
+                    phase=phase,
+                    prompt=prompt,
+                    system_prompt=SYSTEM_PROMPT,
+                    prompt_path=prompt_path,
+                    request_path=request_path,
+                    max_chars=PROMPT_PRINT_MAX_CHARS,
+                )
+            else:
+                console.print(
+                    f"[dim]Prompt saved to {prompt_path} | request saved to {request_path}[/dim]"
+                )
+
             try:
-                files = await call_llm(llm_client, prompt, phase=phase)
+                files = await call_llm(llm_client, request, phase=phase)
             except Exception as error:
                 console.print(f"[red]LLM call failed:[/red] {error}")
                 break
@@ -359,11 +631,9 @@ async def run_loop() -> None:
                         session_timeout_seconds=600,
                         submission=envoi.Documents(tmp_path),
                     ) as session:
-                        for tier_idx, tier_name in enumerate(TIER_ORDER):
-                            # Only run up to and including current focus tier.
-                            if tier_idx > current_tier_idx:
-                                break
-
+                        tier_idx = 0
+                        while tier_idx <= current_tier_idx:
+                            tier_name = TIER_ORDER[tier_idx]
                             result = await session.test(tier_name)
                             tier_cases = result.get("cases", []) if isinstance(result, dict) else []
 
@@ -406,20 +676,16 @@ async def run_loop() -> None:
                                 last_regressions.extend(tier_regressions)
                                 break
 
-                            # Tier fully passed — collect any regressions for
-                            # bookkeeping (shouldn't happen if tier passed, but
-                            # just in case) and continue to next.
+                            # Tier passed. Advance if this was the focus tier.
                             last_regressions.extend(tier_regressions)
-
-                        else:
-                            # All tiers up to current_tier_idx passed.
-                            # Advance to next tier if available.
-                            if current_tier_idx < len(TIER_ORDER) - 1:
+                            if tier_idx == current_tier_idx and current_tier_idx < len(TIER_ORDER) - 1:
                                 current_tier_idx += 1
                                 console.print(
-                                    f"[bold green]Tier {TIER_ORDER[current_tier_idx - 1]} passed! "
+                                    f"[bold green]Tier {tier_name} passed! "
                                     f"Advancing to {TIER_ORDER[current_tier_idx]}.[/bold green]"
                                 )
+
+                            tier_idx += 1
 
                 except Exception as error:
                     print_build_failure(error)

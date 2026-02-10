@@ -186,6 +186,48 @@ def print_iteration_header(iteration: int, max_iterations: int) -> None:
     )
 
 
+def print_main_prompt(
+    *,
+    phase: str,
+    prompt: str,
+    system_prompt: str | None = None,
+    prompt_path: Path | None = None,
+    request_path: Path | None = None,
+    max_chars: int | None = None,
+) -> None:
+    sections: list[str] = []
+    if system_prompt is not None:
+        sections.append(f"=== SYSTEM INSTRUCTIONS ===\n{system_prompt}")
+    sections.append(f"=== USER INPUT ===\n{prompt}")
+    full_prompt = "\n\n".join(sections)
+
+    shown_prompt = full_prompt
+    truncated = False
+    if isinstance(max_chars, int) and max_chars > 0 and len(full_prompt) > max_chars:
+        shown_prompt = full_prompt[:max_chars]
+        truncated = True
+
+    info = [f"Phase: {phase}", f"Payload chars: {len(full_prompt):,}"]
+    if system_prompt is not None:
+        info.append(f"System chars: {len(system_prompt):,}")
+    info.append(f"User chars: {len(prompt):,}")
+    if prompt_path is not None:
+        info.append(f"Prompt saved: {prompt_path}")
+    if request_path is not None:
+        info.append(f"Request JSON: {request_path}")
+    if truncated:
+        info.append(f"Showing first {len(shown_prompt):,} chars")
+
+    console.print("[magenta]=== Main LLM Prompt ===[/magenta]")
+    for line in info:
+        console.print(f"[dim]{line}[/dim]")
+    console.print()
+    console.print(shown_prompt, markup=False)
+    if truncated:
+        console.print("[dim][truncated in UI; full prompt saved to disk][/dim]")
+    console.print("[magenta]=======================[/magenta]")
+
+
 def _fmt_ms(ms: float | None) -> str:
     if ms is None:
         return "-"
@@ -200,6 +242,37 @@ def _fmt_bytes(b: int | None) -> str:
     if b >= 1024:
         return f"{b / 1024:.1f}KB"
     return f"{b}B"
+
+
+def _to_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _artifact_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _artifact_brief(artifact: dict[str, Any]) -> str:
+    path = artifact.get("path", "unknown")
+    kind = artifact.get("kind", "unknown")
+    size = _fmt_bytes(_to_int(artifact.get("size_bytes")))
+    chunks = artifact.get("text_chunks")
+    chunk_count = len(chunks) if isinstance(chunks, list) else 0
+
+    preview = ""
+    if isinstance(chunks, list) and chunks and isinstance(chunks[0], str):
+        first_non_empty = ""
+        for line in chunks[0].splitlines():
+            stripped = line.strip()
+            if stripped:
+                first_non_empty = stripped
+                break
+        if first_non_empty:
+            preview = f" | {first_non_empty[:90]}"
+
+    return f"{kind}: {path} ({size}, {chunk_count} chunk(s)){preview}"
 
 
 def print_tier_results(
@@ -241,6 +314,9 @@ def print_tier_results(
             result_str = "[red bold]REGR[/red bold]" if is_regression else "[red]FAIL[/red]"
             stderr = (case.get("stderr") or "").strip()
             detail = stderr.split("\n")[0][:50] if stderr else ""
+            artifacts = _artifact_dicts(case.get("debug_artifacts"))
+            if artifacts:
+                detail = f"{detail} [{len(artifacts)} artifacts]".strip()
 
         table.add_row(
             str(name),
@@ -262,17 +338,50 @@ def print_tier_results(
         if case.get("passed"):
             continue
         stderr = (case.get("stderr") or "").strip()
-        if not stderr:
+        artifacts = _artifact_dicts(case.get("debug_artifacts"))
+        has_artifacts = len(artifacts) > 0
+        if not stderr and not has_artifacts:
             continue
         if errors_shown >= 2:
-            remaining = sum(1 for c in cases if not c.get("passed") and (c.get("stderr") or "").strip())
+            remaining = sum(
+                1
+                for c in cases
+                if not c.get("passed")
+                and (
+                    (c.get("stderr") or "").strip()
+                    or len(_artifact_dicts(c.get("debug_artifacts"))) > 0
+                )
+            )
             if remaining > errors_shown:
-                console.print(f"[dim]  ... and {remaining - errors_shown} more errors (see table)[/dim]")
+                console.print(
+                    f"[dim]  ... and {remaining - errors_shown} more failures with stderr/artifacts (see table)[/dim]"
+                )
             break
         case_name = case.get("name", "unknown")
-        console.print(f"[dim]  stderr ({case_name}):[/dim]")
-        for line in stderr.splitlines()[:5]:
-            console.print(f"[dim]    {line}[/dim]")
+        if stderr:
+            console.print(f"[dim]  stderr ({case_name}):[/dim]")
+            for line in stderr.splitlines()[:5]:
+                console.print(f"[dim]    {line}[/dim]")
+        if has_artifacts:
+            total_bytes = sum(
+                value
+                for value in (
+                    _to_int(a.get("size_bytes"))
+                    for a in artifacts
+                )
+                if value is not None
+            )
+            console.print(
+                f"[dim]  debug_artifacts ({case_name}): {len(artifacts)} file(s), {_fmt_bytes(total_bytes)}[/dim]"
+            )
+            shown = 0
+            for artifact in artifacts:
+                console.print(f"[dim]    - {_artifact_brief(artifact)}[/dim]")
+                shown += 1
+                if shown >= 4:
+                    break
+            if len(artifacts) > shown:
+                console.print(f"[dim]    ... and {len(artifacts) - shown} more artifact file(s)[/dim]")
         errors_shown += 1
 
 

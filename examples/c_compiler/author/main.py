@@ -15,10 +15,18 @@ Test suites (run in order):
 
 Each test suite lives in tests/<name>/suite.py and exposes a run_<name>() coroutine.
 See tests/shared.py for the result models and core test runner.
+
+Debug artifact contract (optional, no flags required):
+  - The submitted compiler may write debugging output to ./debug_artifacts/.
+  - This directory is cleared before each test case.
+  - Any files written there are captured and returned in structured failure data.
+  - Suggested files include AST/IR/assembly/error traces, but naming is flexible.
 """
 
 import envoi
+
 from tests import TestResult, run_basics, run_c_testsuite, run_torture, run_wacct
+
 
 @envoi.setup
 async def build_compiler(submission: envoi.Documents) -> None:
