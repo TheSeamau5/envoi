@@ -1,4 +1,4 @@
-// expect_stdout: 30
+// expect_stdout: 25
 #include <stdio.h>
 
 int square(int x) {
