@@ -1,0 +1,11 @@
+[project]
+name = "c-compiler"
+version = "0.1.0"
+description = "Build a C compiler in Rust. Tests a submitted compiler against a suite of C programs."
+requires-python = ">=3.12"
+dependencies = [
+    "envoi",
+]
+
+[tool.uv.sources]
+envoi = { path = "../../..", editable = true }

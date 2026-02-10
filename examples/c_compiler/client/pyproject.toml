@@ -1,0 +1,12 @@
+[project]
+name = "c-compiler-client"
+version = "0.1.0"
+description = "LLM client loop for the envoi C compiler environment."
+requires-python = ">=3.12"
+dependencies = [
+    "envoi",
+    "openai>=1.0",
+]
+
+[tool.uv.sources]
+envoi = { path = "../../..", editable = true }

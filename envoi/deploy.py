@@ -31,7 +31,7 @@ def deploy(
     project_root = Path(__file__).resolve().parent.parent
 
     if build:
-        _build_runtime_image(project_root, image_name)
+        _build_runtime_image(project_root, image_name, environment_dir)
 
     environment_mount = f"{environment_dir}:/environment:ro"
     environment_file = f"/environment/{module_filename}"
@@ -46,7 +46,7 @@ def deploy(
     run_command.extend(["-p", f"{port}:{port}"])
     run_command.extend(["-v", environment_mount])
     run_command.append(image_name)
-    run_command.extend(["python", "-m", "envoi.runtime"])
+    run_command.extend(["python3", "-m", "envoi.runtime"])
     run_command.extend(["--file", environment_file])
     run_command.extend(["--host", "0.0.0.0"])
     run_command.extend(["--port", str(port)])
@@ -69,7 +69,21 @@ def deploy(
     }
 
 
-def _build_runtime_image(project_root: Path, image_name: str) -> None:
+def _build_runtime_image(project_root: Path, image_name: str, environment_dir: Path) -> None:
+    custom_dockerfile = environment_dir / "Dockerfile"
+    if custom_dockerfile.is_file():
+        build_command = [
+            "docker",
+            "build",
+            "-t",
+            image_name,
+            "-f",
+            str(custom_dockerfile),
+            str(project_root),
+        ]
+        _run_command(build_command)
+        return
+
     dockerfile = """
 FROM python:3.12-slim
 WORKDIR /app

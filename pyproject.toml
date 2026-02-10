@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-envoi = "envoi.deploy:main"
+envoi = "envoi.cli:main"
 envoi-runtime = "envoi.runtime:main"
 
 [build-system]
