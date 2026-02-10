@@ -403,6 +403,9 @@ def _fmt_bytes(b: int | None) -> str:
 
 
 def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
+    if not cases:
+        return
+
     table = Table(
         title=f"Test Tier: {tier_name}",
         box=box.SIMPLE,
@@ -444,16 +447,24 @@ def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
 
     console.print(table)
 
+    # Show at most 2 full error dumps to avoid noise
+    errors_shown = 0
     for case in cases:
         if case.get("passed"):
             continue
         stderr = (case.get("stderr") or "").strip()
         if not stderr:
             continue
+        if errors_shown >= 2:
+            remaining = sum(1 for c in cases if not c.get("passed") and (c.get("stderr") or "").strip())
+            if remaining > errors_shown:
+                console.print(f"[dim]  ... and {remaining - errors_shown} more errors (see table)[/dim]")
+            break
         case_name = case.get("name", "unknown")
         console.print(f"[dim]  stderr ({case_name}):[/dim]")
         for line in stderr.splitlines()[:5]:
             console.print(f"[dim]    {line}[/dim]")
+        errors_shown += 1
 
 
 def print_summary(passed: int, total: int, best: bool) -> None:

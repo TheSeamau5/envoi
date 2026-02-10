@@ -1,0 +1,39 @@
+"""
+GCC C Torture execute tests (standard-C subset).
+
+Source: LLVM test-suite mirror of GCC torture tests.
+~1500 total files, filtered down to ~370 that use only standard C
+(no GNU extensions). The blacklist is pre-generated and checked in
+(see generate_blacklist.py in this directory).
+
+Accepts an optional `count` parameter to limit how many tests run.
+"""
+
+from pathlib import Path
+
+from tests.shared import TestResult, run_case, to_result
+
+TORTURE_DIR = Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute")
+BLACKLIST_FILE = Path(__file__).resolve().parent / "torture-blacklist.txt"
+
+
+def _load_blacklist() -> set[str]:
+    if BLACKLIST_FILE.exists():
+        return {line.strip() for line in BLACKLIST_FILE.read_text().splitlines() if line.strip()}
+    return set()
+
+
+async def run_torture(count: int = 0) -> TestResult:
+    blacklist = _load_blacklist()
+    all_files = sorted(f for f in TORTURE_DIR.glob("*.c") if f.name not in blacklist)
+    if count > 0:
+        all_files = all_files[:count]
+    cases = []
+    for f in all_files:
+        cases.append({
+            "name": f.stem,
+            "source": f.read_text(errors="replace"),
+            "expected_stdout": "",
+            "expected_exit_code": 0,
+        })
+    return to_result([await run_case(c) for c in cases])
