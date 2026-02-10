@@ -46,9 +46,9 @@ from openai import AsyncOpenAI
 # ---------------------------------------------------------------------------
 
 ENVOI_URL = os.environ.get("ENVOI_URL", "http://localhost:8000")
-MAX_ITERATIONS = 4
+MAX_ITERATIONS = 10
 MODEL = os.environ.get("AI_MODEL", "gpt-5.2-codex")
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low")
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "xhigh")
 VERBOSITY = os.environ.get("OPENAI_VERBOSITY", "medium")
 
 TIER_ORDER = ["basics", "wacct", "c_testsuite", "torture"]
