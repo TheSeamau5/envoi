@@ -249,16 +249,15 @@ def _load_wacct_expected() -> dict:
     return {}
 
 
-@envoi.test
-async def wacct(chapter: int) -> TestResult:
-    """Valid tests from writing-a-c-compiler-tests, by chapter."""
+async def _run_wacct_valid(chapter: int) -> TestResult:
     expected_map = _load_wacct_expected()
     chapter_dir = WACCT_TESTS_DIR / f"chapter_{chapter}" / "valid"
+    if not chapter_dir.is_dir():
+        return TestResult(passed=0, failed=0, total=0, cases=[])
 
     cases = []
     for f in sorted(chapter_dir.rglob("*.c")):
         src = f.read_text()
-        # Key format in expected_results.json: "chapter_N/valid/..."
         rel = f.relative_to(WACCT_TESTS_DIR)
         entry = expected_map.get(str(rel), {})
         expected_exit = entry.get("return_code", 0) if isinstance(entry, dict) else 0
@@ -274,10 +273,10 @@ async def wacct(chapter: int) -> TestResult:
     return TestResult(passed=passed, failed=len(results) - passed, total=len(results), cases=results)
 
 
-@envoi.test
-async def wacct_invalid(chapter: int) -> TestResult:
-    """Invalid tests from writing-a-c-compiler-tests — compilation must fail."""
+async def _run_wacct_invalid(chapter: int) -> TestResult:
     chapter_dir = WACCT_TESTS_DIR / f"chapter_{chapter}"
+    if not chapter_dir.is_dir():
+        return TestResult(passed=0, failed=0, total=0, cases=[])
 
     cases = []
     for invalid_dir in sorted(chapter_dir.glob("invalid_*")):
@@ -315,3 +314,23 @@ async def wacct_invalid(chapter: int) -> TestResult:
 
     passed = sum(1 for r in results if r.passed)
     return TestResult(passed=passed, failed=len(results) - passed, total=len(results), cases=results)
+
+
+# Register one test route per wacct chapter (1-20)
+for _ch in range(1, 21):
+    def _make_valid(ch: int = _ch):
+        async def _test() -> TestResult:
+            return await _run_wacct_valid(ch)
+        _test.__name__ = f"wacct_ch{ch}"
+        _test.__qualname__ = f"wacct_ch{ch}"
+        return _test
+
+    def _make_invalid(ch: int = _ch):
+        async def _test() -> TestResult:
+            return await _run_wacct_invalid(ch)
+        _test.__name__ = f"wacct_ch{ch}_invalid"
+        _test.__qualname__ = f"wacct_ch{ch}_invalid"
+        return _test
+
+    envoi.test(_make_valid())
+    envoi.test(_make_invalid())
