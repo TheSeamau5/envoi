@@ -24,14 +24,46 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from openai import OpenAI
 
 import envoi
-from openai import OpenAI
+
+box: Any
+Console: Any
+Live: Any
+Panel: Any
+Spinner: Any
+Table: Any
+Text: Any
+
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.spinner import Spinner
+    from rich.table import Table
+    from rich.text import Text
+
+    RICH_AVAILABLE = True
+except Exception:
+    box = cast(Any, None)
+    Console = cast(Any, None)
+    Live = cast(Any, None)
+    Panel = cast(Any, None)
+    Spinner = cast(Any, None)
+    Table = cast(Any, None)
+    Text = cast(Any, None)
+    RICH_AVAILABLE = False
+
 
 ENVOI_URL = os.environ.get("ENVOI_URL", "http://localhost:8000")
 MAX_ITERATIONS = 4
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.2")
+
+console = Console() if RICH_AVAILABLE else None
 
 C_SUBSET_SPEC = """
 You are building a C compiler in Rust. The compiler binary accepts:
@@ -65,6 +97,14 @@ Compiler requirements:
 4. Call `gcc` to link (needed for libc / printf)
 5. Respect CLI: ./cc input.c -o output
 """.strip()
+
+
+def _print(message: str = "") -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        console.print(message)
+    else:
+        print(message)
 
 
 def build_initial_prompt() -> str:
@@ -146,7 +186,39 @@ def normalize_files(payload: Any) -> dict[str, str]:
     return normalized
 
 
-def call_llm(prompt: str) -> dict[str, str]:
+def _extract_stream_content(chunk: Any) -> str:
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return ""
+
+    delta = getattr(choices[0], "delta", None)
+    if delta is None:
+        return ""
+
+    content = getattr(delta, "content", None)
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+                continue
+            if isinstance(item, dict):
+                dict_text = item.get("text")
+                if isinstance(dict_text, str):
+                    parts.append(dict_text)
+        return "".join(parts)
+
+    return ""
+
+
+def call_llm(prompt: str, phase: str = "Generating") -> dict[str, str]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -155,14 +227,49 @@ def call_llm(prompt: str) -> dict[str, str]:
         )
 
     client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
+    stream = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
         temperature=0.2,
+        stream=True,
     )
 
-    content = response.choices[0].message.content
+    collected: list[str] = []
+    char_count = 0
+
+    if RICH_AVAILABLE:
+        assert console is not None
+        with Live(Spinner("dots", text=f"{phase}..."), console=console, refresh_per_second=10) as live:
+            for chunk in stream:
+                delta = _extract_stream_content(chunk)
+                if not delta:
+                    continue
+                collected.append(delta)
+                char_count += len(delta)
+                live.update(
+                    Text.assemble(
+                        ("⟳ ", "bold cyan"),
+                        (f"{phase}... ", ""),
+                        (f"{char_count:,} chars received", "dim"),
+                    )
+                )
+        console.print(f"[dim]{phase} complete ({char_count:,} chars).[/dim]")
+    else:
+        _print(f"{phase}...")
+        next_report = 500
+        for chunk in stream:
+            delta = _extract_stream_content(chunk)
+            if not delta:
+                continue
+            collected.append(delta)
+            char_count += len(delta)
+            if char_count >= next_report:
+                _print(f"  {char_count:,} chars received...")
+                next_report += 500
+        _print(f"{phase} complete ({char_count:,} chars).")
+
+    content = "".join(collected)
     if not content:
         raise RuntimeError("Model returned an empty response.")
 
@@ -214,18 +321,113 @@ def build_setup_failure(error: Exception) -> dict[str, Any]:
     }
 
 
-def print_case(case: dict[str, Any]) -> None:
-    name = case.get("name", "unknown")
-    phase = case.get("phase", "unknown")
-    if case.get("passed"):
-        print(f"  [PASS] {name}")
+def print_iteration_header(iteration: int, max_iterations: int) -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        console.print()
+        console.print(
+            Panel(
+                f"Iteration {iteration}/{max_iterations}",
+                style="bold blue",
+                expand=False,
+            )
+        )
         return
 
-    print(f"  [FAIL] {name} (phase: {phase})")
-    stderr = (case.get("stderr") or "").strip()
-    if stderr:
-        for line in stderr.splitlines()[:3]:
-            print(f"    stderr: {line}")
+    _print()
+    _print("=" * 60)
+    _print(f"Iteration {iteration}/{max_iterations}")
+    _print("=" * 60)
+
+
+def print_tier_results(tier_name: str, cases: list[dict[str, Any]]) -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        table = Table(
+            title=f"Test Tier: {tier_name}",
+            box=box.SIMPLE,
+            show_lines=False,
+        )
+        table.add_column("Test", style="bold")
+        table.add_column("Result", justify="center")
+        table.add_column("Phase", style="yellow")
+        table.add_column("Details", style="dim", max_width=70)
+
+        for case in cases:
+            name = case.get("name", "unknown")
+            passed = case.get("passed", False)
+            phase = case.get("phase", "")
+
+            if passed:
+                result_str = "[green]PASS[/green]"
+                detail = ""
+            else:
+                result_str = "[red]FAIL[/red]"
+                stderr = (case.get("stderr") or "").strip()
+                detail = stderr.split("\n")[0][:70] if stderr else ""
+
+            table.add_row(str(name), result_str, str(phase), detail)
+
+        console.print(table)
+
+        for case in cases:
+            if case.get("passed"):
+                continue
+            stderr = (case.get("stderr") or "").strip()
+            if not stderr:
+                continue
+            case_name = case.get("name", "unknown")
+            console.print(f"[dim]  stderr ({case_name}):[/dim]")
+            for line in stderr.splitlines()[:3]:
+                console.print(f"[dim]    {line}[/dim]")
+        return
+
+    _print(f"Test tier: {tier_name}")
+    for case in cases:
+        name = case.get("name", "unknown")
+        phase = case.get("phase", "")
+        if case.get("passed"):
+            _print(f"  [PASS] {name}")
+            continue
+
+        _print(f"  [FAIL] {name} (phase: {phase})")
+        stderr = (case.get("stderr") or "").strip()
+        if stderr:
+            for line in stderr.splitlines()[:3]:
+                _print(f"    stderr: {line}")
+
+
+def print_summary(passed: int, total: int, best: bool) -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        color = "green" if passed == total else ("yellow" if passed > 0 else "red")
+        message = f"[{color}]{passed}/{total} tests passed[/{color}]"
+        if best:
+            message += " [bold cyan]★ New best![/bold cyan]"
+        console.print(message)
+        return
+
+    suffix = " * New best!" if best else ""
+    _print(f"{passed}/{total} tests passed{suffix}")
+
+
+def print_final_summary(best_passed: int) -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        style = "bold green" if best_passed > 0 else "bold yellow"
+        console.print(Panel(f"Final best: {best_passed} tests passed", style=style, expand=False))
+        return
+
+    _print(f"Final best: {best_passed} tests passed")
+
+
+def print_build_failure(error: Exception) -> None:
+    if RICH_AVAILABLE:
+        assert console is not None
+        console.print(f"[red]Build/setup failed:[/red] {error}")
+        return
+
+    _print(f"Build/setup failed: {error}")
 
 
 def save_best_submission(files: dict[str, str]) -> None:
@@ -234,7 +436,12 @@ def save_best_submission(files: dict[str, str]) -> None:
         shutil.rmtree(best_dir)
     best_dir.mkdir(parents=True)
     write_submission(files, best_dir)
-    print(f"Saved best submission to: {best_dir}")
+
+    if RICH_AVAILABLE:
+        assert console is not None
+        console.print(f"[bold cyan]Saved best submission to:[/bold cyan] {best_dir}")
+    else:
+        _print(f"Saved best submission to: {best_dir}")
 
 
 async def fetch_test_names() -> list[str]:
@@ -246,47 +453,53 @@ async def fetch_test_names() -> list[str]:
 
 
 async def run_loop() -> None:
-    print(f"Connecting to envoi environment at {ENVOI_URL}...")
+    _print(f"Connecting to envoi environment at {ENVOI_URL}...")
     test_names = await fetch_test_names()
     if not test_names:
         raise RuntimeError("Environment has no tests.")
-    print(f"Available tests: {test_names}")
+    _print(f"Available tests: {test_names}")
 
     previous_files: dict[str, str] | None = None
     last_results: dict[str, Any] = {"passed": 0, "failed": 0, "total": 0, "cases": []}
     best_passed = -1
 
     for iteration in range(1, MAX_ITERATIONS + 1):
-        print(f"\n{'=' * 60}")
-        print(f"Iteration {iteration}/{MAX_ITERATIONS}")
-        print(f"{'=' * 60}")
+        print_iteration_header(iteration, MAX_ITERATIONS)
 
         if previous_files is None:
-            print("Generating initial compiler...")
+            phase = "Generating initial compiler"
             prompt = build_initial_prompt()
         else:
-            print("Improving compiler based on failures...")
+            phase = "Improving compiler"
             prompt = build_iteration_prompt(previous_files, last_results)
 
         try:
-            files = call_llm(prompt)
+            files = call_llm(prompt, phase=phase)
         except Exception as error:
-            print(f"LLM call failed: {error}")
+            if RICH_AVAILABLE:
+                assert console is not None
+                console.print(f"[red]LLM call failed:[/red] {error}")
+            else:
+                _print(f"LLM call failed: {error}")
             break
 
         previous_files = files
-        print(f"Generated {len(files)} files")
+        _print(f"Generated {len(files)} files")
 
         with tempfile.TemporaryDirectory(prefix="envoi-cc-") as tmp_dir:
             tmp_path = Path(tmp_dir)
             try:
                 write_submission(files, tmp_path)
             except Exception as error:
-                print(f"Could not write submission: {error}")
+                if RICH_AVAILABLE:
+                    assert console is not None
+                    console.print(f"[red]Could not write submission:[/red] {error}")
+                else:
+                    _print(f"Could not write submission: {error}")
                 break
 
             all_results: dict[str, Any] = {"cases": [], "passed": 0, "failed": 0, "total": 0}
-            print("Submitting project and creating session...")
+            _print("Submitting project and creating session...")
 
             try:
                 async with await envoi.connect_session(
@@ -295,35 +508,41 @@ async def run_loop() -> None:
                     submission=envoi.Documents(tmp_path),
                 ) as session:
                     for test_name in test_names:
-                        print(f"\nRunning test tier: {test_name}")
                         result = await session.test(test_name)
 
-                        cases = result.get("cases", []) if isinstance(result, dict) else []
-                        for case in cases:
+                        tier_cases = result.get("cases", []) if isinstance(result, dict) else []
+                        for case in tier_cases:
                             all_results["cases"].append(case)
                             all_results["total"] += 1
                             if case.get("passed"):
                                 all_results["passed"] += 1
                             else:
                                 all_results["failed"] += 1
-                            print_case(case)
+
+                        print_tier_results(test_name, tier_cases)
             except Exception as error:
-                print(f"Build/setup failed: {error}")
+                print_build_failure(error)
                 last_results = build_setup_failure(error)
                 continue
 
-        print(f"\nResults: {all_results['passed']}/{all_results['total']} passed")
         last_results = all_results
 
-        if all_results["passed"] > best_passed:
+        is_new_best = all_results["passed"] > best_passed
+        if is_new_best:
             best_passed = all_results["passed"]
             save_best_submission(files)
 
+        print_summary(all_results["passed"], all_results["total"], is_new_best)
+
         if all_results["failed"] == 0 and all_results["total"] > 0:
-            print("\nAll tests passed.")
+            if RICH_AVAILABLE:
+                assert console is not None
+                console.print("[bold green]All tests passed.[/bold green]")
+            else:
+                _print("All tests passed.")
             break
 
-    print(f"\nFinal best: {max(best_passed, 0)} tests passed")
+    print_final_summary(max(best_passed, 0))
 
 
 def main() -> None:
