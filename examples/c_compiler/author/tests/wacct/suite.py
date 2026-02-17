@@ -26,42 +26,39 @@ def _load_expected() -> dict:
 
 
 async def run_wacct(
+    chapter: int,
     n_tests: int = 0,
     test_name: str | None = None,
-    chapter: int | None = None,
 ) -> TestResult:
     expected_map = _load_expected()
     cases: list[dict] = []
 
-    if chapter is not None and (chapter < 1 or chapter > 20):
+    if chapter < 1 or chapter > 20:
         raise ValueError("chapter must be between 1 and 20")
 
-    chapters = [chapter] if chapter is not None else list(range(1, 21))
-    for ch in chapters:
-        # --- Valid tests: compile + run + check output ---
-        valid_dir = TESTS_DIR / f"chapter_{ch}" / "valid"
-        if valid_dir.is_dir():
-            for f in sorted(valid_dir.rglob("*.c")):
-                src = f.read_text()
-                rel = f.relative_to(TESTS_DIR)
-                entry = expected_map.get(str(rel), {})
-                expected_exit = entry.get("return_code", 0) if isinstance(entry, dict) else 0
-                expected_stdout = entry.get("stdout", "").strip() if isinstance(entry, dict) else ""
-                cases.append({
-                    "name": f"chapter_{ch}:{f.stem}",
-                    "source": src,
-                    "expected_stdout": expected_stdout,
-                    "expected_exit_code": expected_exit,
-                })
+    # --- Valid tests: compile + run + check output ---
+    valid_dir = TESTS_DIR / f"chapter_{chapter}" / "valid"
+    if valid_dir.is_dir():
+        for f in sorted(valid_dir.rglob("*.c")):
+            src = f.read_text()
+            rel = f.relative_to(TESTS_DIR)
+            entry = expected_map.get(str(rel), {})
+            expected_exit = entry.get("return_code", 0) if isinstance(entry, dict) else 0
+            expected_stdout = entry.get("stdout", "").strip() if isinstance(entry, dict) else ""
+            cases.append({
+                "name": f"chapter_{chapter}:{f.stem}",
+                "source": src,
+                "expected_stdout": expected_stdout,
+                "expected_exit_code": expected_exit,
+            })
 
-        # --- Invalid tests: should fail to compile ---
-        chapter_dir = TESTS_DIR / f"chapter_{ch}"
-        if not chapter_dir.is_dir():
-            continue
+    # --- Invalid tests: should fail to compile ---
+    chapter_dir = TESTS_DIR / f"chapter_{chapter}"
+    if chapter_dir.is_dir():
         for invalid_dir in sorted(chapter_dir.glob("invalid_*")):
             for f in sorted(invalid_dir.rglob("*.c")):
                 cases.append({
-                    "name": f"chapter_{ch}:{f.stem}",
+                    "name": f"chapter_{chapter}:{f.stem}",
                     "source": f.read_text(),
                     "expected_stdout": "",
                     "expected_exit_code": 1,
