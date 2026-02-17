@@ -5,6 +5,8 @@ Source: github.com/nlsandler/writing-a-c-compiler-tests
 20 chapters of progressively harder C features. Each chapter has:
   - valid/   — programs that should compile and produce correct output
   - invalid_*/ — programs that should be rejected at compile time
+
+run_wacct(..., chapter=N) scopes to a single chapter (1-20).
 """
 
 import json
@@ -23,11 +25,19 @@ def _load_expected() -> dict:
     return {}
 
 
-async def run_wacct(n_tests: int = 0, test_name: str | None = None) -> TestResult:
+async def run_wacct(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    chapter: int | None = None,
+) -> TestResult:
     expected_map = _load_expected()
     cases: list[dict] = []
 
-    for ch in range(1, 21):
+    if chapter is not None and (chapter < 1 or chapter > 20):
+        raise ValueError("chapter must be between 1 and 20")
+
+    chapters = [chapter] if chapter is not None else list(range(1, 21))
+    for ch in chapters:
         # --- Valid tests: compile + run + check output ---
         valid_dir = TESTS_DIR / f"chapter_{ch}" / "valid"
         if valid_dir.is_dir():
@@ -38,7 +48,7 @@ async def run_wacct(n_tests: int = 0, test_name: str | None = None) -> TestResul
                 expected_exit = entry.get("return_code", 0) if isinstance(entry, dict) else 0
                 expected_stdout = entry.get("stdout", "").strip() if isinstance(entry, dict) else ""
                 cases.append({
-                    "name": f.stem,
+                    "name": f"chapter_{ch}:{f.stem}",
                     "source": src,
                     "expected_stdout": expected_stdout,
                     "expected_exit_code": expected_exit,
@@ -51,7 +61,7 @@ async def run_wacct(n_tests: int = 0, test_name: str | None = None) -> TestResul
         for invalid_dir in sorted(chapter_dir.glob("invalid_*")):
             for f in sorted(invalid_dir.rglob("*.c")):
                 cases.append({
-                    "name": f.stem,
+                    "name": f"chapter_{ch}:{f.stem}",
                     "source": f.read_text(),
                     "expected_stdout": "",
                     "expected_exit_code": 1,

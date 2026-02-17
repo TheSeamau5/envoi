@@ -10,6 +10,7 @@ Test suites (run in order):
 
   1. basics          Hand-written tests covering core C features
   2. wacct           "Writing a C Compiler" textbook tests (20 chapters)
+                     accepts optional chapter=<1..20> to run one chapter
   3. c_testsuite     ~220 conformance tests from c-testsuite
   4. torture_execute ~370 GCC torture tests (standard-C subset)
 
@@ -43,9 +44,13 @@ async def basics(n_tests: int = 0, test_name: str | None = None) -> TestResult:
 
 
 @envoi.test
-async def wacct(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    """Writing-a-C-Compiler tests: chapters 1-20, valid + invalid programs."""
-    return await run_wacct(n_tests=n_tests, test_name=test_name)
+async def wacct(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    chapter: int | None = None,
+) -> TestResult:
+    """Writing-a-C-Compiler tests; pass chapter=1..20 to scope to a single chapter."""
+    return await run_wacct(n_tests=n_tests, test_name=test_name, chapter=chapter)
 
 
 @envoi.test
