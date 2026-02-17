@@ -1,29 +1,35 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
-import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any
 
-import httpx
-
-
-def fetch_schema(envoi_url: str) -> dict[str, Any]:
-    response = httpx.get(f"{envoi_url}/schema", timeout=30)
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("Schema response must be a JSON object.")
-    return payload
+import envoi
 
 
-def build_prompt(schema: dict[str, Any], envoi_url: str) -> str:
+async def fetch_schema(envoi_url: str) -> dict[str, object]:
+    async with await envoi.connect(envoi_url) as client:
+        return client.schema
+
+
+def test_names(schema: dict[str, object]) -> list[str]:
+    tests = schema.get("tests")
+    if not isinstance(tests, list):
+        return []
+    return [
+        item["name"]
+        for item in tests
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
+
+
+def build_prompt(schema: dict[str, object], envoi_url: str) -> str:
     return f"""Write a C compiler in Rust.
-Requirements:
+Task:
 - CLI must be: ./cc input.c -o output
 - Put source files in src/
 - Include Cargo.toml and build.sh
@@ -31,9 +37,16 @@ Requirements:
 Full envoi schema JSON:
 {json.dumps(schema, indent=2)}
 
-Testing instructions:
+How to test:
 - Create archive: tar czf submission.tar.gz build.sh Cargo.toml src/
-- Submit one test: curl -s -X POST {envoi_url}/test/{{test_name}} -F 'file=@submission.tar.gz'
+- This environment has setup, so create a session with the submission tar:
+  curl -s -X POST {envoi_url}/session -F 'file=@submission.tar.gz'
+- For each test, call:
+  curl -s -X POST {envoi_url}/session/{{session_id}}/test/{{test_name}}
+- When done, close the session:
+  curl -s -X DELETE {envoi_url}/session/{{session_id}}
+
+Rules:
 - Do not run all tests at once; they are expensive and slow.
 - Test incrementally.
 - When you fix something, re-run previously passing tests to check regressions.
@@ -48,36 +61,18 @@ def run_codex(prompt: str, workdir: Path) -> None:
     )
 
 
-def verify(schema: dict[str, Any], workdir: Path, envoi_url: str) -> dict[str, Any]:
-    archive = workdir / "submission.tar.gz"
-    with tarfile.open(archive, "w:gz") as tar:
-        for rel in ("build.sh", "Cargo.toml", "src"):
-            path = workdir / rel
-            if not path.exists():
-                raise RuntimeError(f"Missing required submission path: {rel}")
-            tar.add(path, arcname=rel)
-
-    tests = [t["name"] for t in schema.get("tests", []) if isinstance(t, dict) and isinstance(t.get("name"), str)]
-    if not tests:
-        raise RuntimeError("Schema did not include any tests.")
-
-    results: dict[str, Any] = {}
-    with httpx.Client(timeout=300) as client:
-        for test_name in tests:
-            with archive.open("rb") as file_obj:
-                response = client.post(
-                    f"{envoi_url}/test/{test_name}",
-                    files={"file": ("submission.tar.gz", file_obj)},
-                )
-            try:
-                payload: Any = response.json()
-            except ValueError:
-                payload = {"status_code": response.status_code, "body": response.text}
-            results[test_name] = payload
-            cases = payload.get("cases", []) if isinstance(payload, dict) else []
-            all_passed = bool(cases) and all(isinstance(c, dict) and c.get("passed") is True for c in cases)
-            print(f"{test_name}: all_passed={all_passed}")
-    return results
+async def verify_submission(envoi_url: str, workdir: Path, tests: list[str]) -> bool:
+    all_passed = True
+    async with await envoi.connect_session(envoi_url, submission=envoi.Documents(workdir)) as session:
+        for name in tests:
+            result = await session.test(name)
+            cases = result.get("cases", []) if isinstance(result, dict) else []
+            passed = sum(1 for case in cases if isinstance(case, dict) and case.get("passed") is True)
+            total = len(cases)
+            if total == 0 or passed != total:
+                all_passed = False
+            print(f"{name}: {passed}/{total} passed")
+    return all_passed
 
 
 def main() -> None:
@@ -89,11 +84,18 @@ def main() -> None:
     )
     args = parser.parse_args()
     envoi_url = args.envoi_url.rstrip("/")
-    schema = fetch_schema(envoi_url)
+    schema = asyncio.run(fetch_schema(envoi_url))
+    tests = test_names(schema)
+    if not tests:
+        raise RuntimeError("No tests found in schema.")
+
     with tempfile.TemporaryDirectory(prefix="envoi-codex-") as tmp:
         workdir = Path(tmp)
         run_codex(build_prompt(schema, envoi_url), workdir)
-        print(json.dumps(verify(schema, workdir, envoi_url), indent=2))
+        ok = asyncio.run(verify_submission(envoi_url, workdir, tests))
+        if not ok:
+            raise SystemExit(1)
+        print("All suites passed.")
 
 
 if __name__ == "__main__":
