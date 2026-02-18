@@ -50,24 +50,14 @@ def cases_for_part(part: int, cases: list[dict]) -> list[dict]:
     raise ValueError(f"part must be between 1 and {max_part}")
 
 
-async def run_c_testsuite(
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    cases = load_cases()
-    selected = select_cases(cases, n_tests=n_tests, test_name=test_name, offset=offset)
-    return to_result([await run_case(c) for c in selected])
-
-
 @c_testsuite.test("part_{part}")
-async def run_c_testsuite_tests(
-    part: int,
+async def run_c_testsuite(
+    part: int | None = None,
     n_tests: int = 0,
     test_name: str | None = None,
     offset: int = 0,
 ) -> TestResult:
     cases = load_cases()
-    part_cases = cases_for_part(part, cases)
-    selected = select_cases(part_cases, n_tests=n_tests, test_name=test_name, offset=offset)
+    selected_cases = cases_for_part(part, cases) if part is not None else cases
+    selected = select_cases(selected_cases, n_tests=n_tests, test_name=test_name, offset=offset)
     return to_result([await run_case(c) for c in selected])
