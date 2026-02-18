@@ -30,50 +30,46 @@ def load_blacklist() -> set[str]:
     return set()
 
 
-def list_torture_files() -> list[Path]:
+async def run_torture(
+    part: int | None = None,
+    count: int = 0,
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    part_size = 40
     blacklist = load_blacklist()
     torture_dir = Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute")
-    return sorted(source_file for source_file in torture_dir.glob("*.c") if source_file.name not in blacklist)
-
-
-def load_cases() -> list[dict]:
-    return [
+    source_files = sorted(
+        source_file for source_file in torture_dir.glob("*.c") if source_file.name not in blacklist
+    )
+    cases = [
         {
             "name": source_file.stem,
             "source": source_file.read_text(errors="replace"),
             "expected_stdout": "",
             "expected_exit_code": 0,
         }
-        for source_file in list_torture_files()
+        for source_file in source_files
     ]
 
+    if part is not None:
+        if part < 1:
+            raise ValueError("part must be >= 1")
 
-def cases_for_part(part: int, cases: list[dict]) -> list[dict]:
-    if part < 1:
-        raise ValueError("part must be >= 1")
-
-    start = (part - 1) * 40
-    end = start + 40
-    selected = cases[start:end]
-    if selected:
-        return selected
-
-    max_part = max(1, math.ceil(len(cases) / 40))
-    raise ValueError(f"part must be between 1 and {max_part}")
-
-
-async def run_torture(
-    count: int = 0,
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    cases = load_cases()
+        start = (part - 1) * part_size
+        end = start + part_size
+        selected_cases = cases[start:end]
+        if not selected_cases:
+            max_part = max(1, math.ceil(len(cases) / part_size))
+            raise ValueError(f"part must be between 1 and {max_part}")
+    else:
+        selected_cases = cases
 
     # Backward-compatible alias: `count` behaves like `n_tests` if n_tests unset.
     effective_n_tests = n_tests if n_tests > 0 else max(0, count)
     selected = select_cases(
-        cases,
+        selected_cases,
         n_tests=effective_n_tests,
         test_name=test_name,
         offset=offset,
@@ -88,7 +84,9 @@ async def run_torture_tests(
     test_name: str | None = None,
     offset: int = 0,
 ) -> TestResult:
-    cases = load_cases()
-    part_cases = cases_for_part(part, cases)
-    selected = select_cases(part_cases, n_tests=n_tests, test_name=test_name, offset=offset)
-    return to_result([await run_case(c) for c in selected])
+    return await run_torture(
+        part=part,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
