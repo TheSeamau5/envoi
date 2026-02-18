@@ -17,8 +17,6 @@ import envoi
 
 from .utils import TestResult, run_case, select_cases, to_result
 
-TESTS_DIR = Path("/opt/tests/c-testsuite/tests/single-exec")
-PART_SIZE = 48
 c_testsuite = envoi.suite("c_testsuite")
 
 
@@ -29,8 +27,11 @@ async def run_c_testsuite(
     test_name: str | None = None,
     offset: int = 0,
 ) -> TestResult:
+    tests_dir = Path("/opt/tests/c-testsuite/tests/single-exec")
+    part_size = 48
+
     cases: list[dict] = []
-    for source_file in sorted(TESTS_DIR.glob("*.c")):
+    for source_file in sorted(tests_dir.glob("*.c")):
         expected_file = source_file.parent / f"{source_file.name}.expected"
         expected_stdout = expected_file.read_text().strip() if expected_file.exists() else ""
         cases.append({
@@ -46,11 +47,11 @@ async def run_c_testsuite(
         if part < 1:
             raise ValueError("part must be >= 1")
 
-        start = (part - 1) * PART_SIZE
-        end = start + PART_SIZE
+        start = (part - 1) * part_size
+        end = start + part_size
         selected_cases = cases[start:end]
         if not selected_cases:
-            max_part = max(1, math.ceil(len(cases) / PART_SIZE))
+            max_part = max(1, math.ceil(len(cases) / part_size))
             raise ValueError(f"part must be between 1 and {max_part}")
 
     selected = select_cases(selected_cases, n_tests=n_tests, test_name=test_name, offset=offset)
