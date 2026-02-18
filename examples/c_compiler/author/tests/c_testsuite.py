@@ -6,8 +6,8 @@ Each .c file has a corresponding .c.expected file with the expected stdout.
 All tests are expected to exit 0.
 
 Routes:
-- @c_testsuite/part_{part} runs one fixed-size shard.
-- @c_testsuite runs all parts.
+- @c_testsuite/part_{part} runs one fixed-size shard when `part` is provided.
+- @c_testsuite/part_{part} with no `part` runs all shards.
 """
 
 import math

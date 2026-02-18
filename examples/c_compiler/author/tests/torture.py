@@ -9,8 +9,8 @@ Source: LLVM test-suite mirror of GCC torture tests.
 Accepts an optional `count` parameter to limit how many tests run.
 
 Routes:
-- @torture/part_N runs one fixed-size shard.
-- @torture runs all parts.
+- @torture/part_{part} runs one fixed-size shard when `part` is provided.
+- @torture/part_{part} with no `part` runs all shards.
 """
 
 import math

@@ -105,6 +105,9 @@ def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, An
         is_template = "{" in test_path and "}" in test_path
 
         if is_template:
+            if path == test_path:
+                matched[test_path] = (function, {})
+                continue
             if not path:
                 continue
             template_params = extract_template_params(test_path, path)
