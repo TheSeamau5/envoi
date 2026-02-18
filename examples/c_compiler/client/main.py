@@ -32,29 +32,6 @@ Failure feedback from previous attempt:
 """
 
 
-async def run_suite_once(
-    session: envoi.Session,
-    name: str,
-    feedback: list[str],
-    **params: object,
-) -> bool:
-    try:
-        result = await session.test(name, **params)
-    except Exception as error:
-        print(f"{name}: error")
-        feedback.append(f"{name}: {error}")
-        return False
-
-    passed = int(result.get("passed", 0)) if isinstance(result, dict) else 0
-    failed = int(result.get("failed", 1)) if isinstance(result, dict) else 1
-    total = int(result.get("total", 0)) if isinstance(result, dict) else 0
-    print(f"{name}: {passed}/{total} passed")
-    if failed > 0 or total == 0:
-        feedback.append(f"{name}: failed={failed} total={total}")
-        return False
-    return True
-
-
 async def verify(envoi_url: str, workdir: Path) -> tuple[bool, list[str]]:
     async with await envoi.connect(envoi_url) as client:
         tests = sorted(client.tests)
@@ -68,7 +45,21 @@ async def verify(envoi_url: str, workdir: Path) -> tuple[bool, list[str]]:
             feedback: list[str] = []
             all_passed = True
             for test_path in tests:
-                all_passed = await run_suite_once(session, test_path, feedback) and all_passed
+                try:
+                    result = await session.test(test_path)
+                except Exception as error:
+                    print(f"{test_path}: error")
+                    feedback.append(f"{test_path}: {error}")
+                    all_passed = False
+                    continue
+
+                passed = int(result.get("passed", 0)) if isinstance(result, dict) else 0
+                failed = int(result.get("failed", 1)) if isinstance(result, dict) else 1
+                total = int(result.get("total", 0)) if isinstance(result, dict) else 0
+                print(f"{test_path}: {passed}/{total} passed")
+                if failed > 0 or total == 0:
+                    feedback.append(f"{test_path}: failed={failed} total={total}")
+                    all_passed = False
             return all_passed, feedback
     except Exception as error:
         print(f"Session/setup failed before test execution: {error}")
