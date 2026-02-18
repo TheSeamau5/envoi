@@ -30,6 +30,7 @@ def load_blacklist() -> set[str]:
     return set()
 
 
+@torture.test("part_{part}")
 async def run_torture(
     part: int | None = None,
     count: int = 0,
@@ -75,18 +76,3 @@ async def run_torture(
         offset=offset,
     )
     return to_result([await run_case(c) for c in selected])
-
-
-@torture.test("part_{part}")
-async def run_torture_tests(
-    part: int,
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    return await run_torture(
-        part=part,
-        n_tests=n_tests,
-        test_name=test_name,
-        offset=offset,
-    )
