@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .constants import DEFAULT_PORT
+from .deploy import deploy
 
 
 def main() -> None:
@@ -16,11 +17,6 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
 
     args = parser.parse_args()
-    run_deploy(args)
-
-
-def run_deploy(args: argparse.Namespace) -> None:
-    from .deploy import deploy
 
     result = deploy(
         path=args.path,
