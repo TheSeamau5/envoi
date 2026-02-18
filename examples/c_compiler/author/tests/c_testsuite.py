@@ -22,7 +22,13 @@ PART_SIZE = 48
 c_testsuite = envoi.suite("c_testsuite")
 
 
-def load_cases() -> list[dict]:
+@c_testsuite.test("part_{part}")
+async def run_c_testsuite(
+    part: int | None = None,
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
     cases: list[dict] = []
     for source_file in sorted(TESTS_DIR.glob("*.c")):
         expected_file = source_file.parent / f"{source_file.name}.expected"
@@ -33,17 +39,7 @@ def load_cases() -> list[dict]:
             "expected_stdout": expected_stdout,
             "expected_exit_code": 0,
         })
-    return cases
 
-
-@c_testsuite.test("part_{part}")
-async def run_c_testsuite(
-    part: int | None = None,
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    cases = load_cases()
     if part is None:
         selected_cases = cases
     else:
