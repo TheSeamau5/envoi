@@ -8,8 +8,6 @@ from pathlib import Path
 
 import envoi
 
-WORKDIR = Path("/private/tmp/envoi-codex-c-compiler")
-
 
 def build_prompt(envoi_url: str, attempt: int, feedback: str) -> str:
     return f"""Build a REAL C compiler in Rust from scratch.
@@ -70,9 +68,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--envoi-url", default="http://localhost:8000")
     parser.add_argument("--max-attempts", type=int, default=6)
+    parser.add_argument("--workdir", type=Path, default=Path("/private/tmp/envoi-codex-c-compiler"))
     args = parser.parse_args()
 
-    workdir = WORKDIR
+    workdir = args.workdir
     shutil.rmtree(workdir, ignore_errors=True)
     workdir.mkdir(parents=True, exist_ok=True)
 
