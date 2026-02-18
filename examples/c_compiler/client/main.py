@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,22 +30,6 @@ Attempt number: {attempt}
 Failure feedback from previous attempt:
 {feedback}
 """
-
-
-def codex_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env.pop("VIRTUAL_ENV", None)
-    env.pop("PYTHONHOME", None)
-    env.pop("PYTHONPATH", None)
-
-    path_entries = env.get("PATH", "").split(os.pathsep)
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in path_entries
-        if "/examples/c_compiler/client/.venv/bin" not in entry
-        and "/examples/c_compiler/author/.venv/bin" not in entry
-    )
-    return env
 
 
 async def run_suite_once(
@@ -125,7 +108,6 @@ def main() -> None:
                 str(workdir),
             ],
             check=True,
-            env=codex_env(),
         )
 
         passed, failures = asyncio.run(verify(base_url, workdir))
