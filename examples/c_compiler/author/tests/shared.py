@@ -88,16 +88,19 @@ def select_cases(
     *,
     n_tests: int = 0,
     test_name: str | None = None,
+    offset: int = 0,
 ) -> list[dict]:
     """
-    Filter suite cases by optional test_name and optional n_tests limit.
+    Filter suite cases by optional test_name, optional offset, and optional n_tests limit.
 
     - If test_name is provided, run exactly one matching case.
-    - Else if n_tests > 0, run the first n_tests cases.
-    - Else run all cases.
+    - Else if n_tests > 0, run up to n_tests cases starting at offset.
+    - Else run all cases starting at offset.
     """
     if n_tests < 0:
         raise ValueError("n_tests must be >= 0")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
 
     normalized_name = (test_name or "").strip()
     if normalized_name:
@@ -107,9 +110,9 @@ def select_cases(
         return [matches[0]]
 
     if n_tests > 0:
-        return cases[:n_tests]
+        return cases[offset : offset + n_tests]
 
-    return cases
+    return cases[offset:]
 
 
 def _reset_debug_artifacts_dir(sp: Path) -> Path:

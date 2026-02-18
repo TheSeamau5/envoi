@@ -27,6 +27,7 @@ async def run_torture(
     count: int = 0,
     n_tests: int = 0,
     test_name: str | None = None,
+    offset: int = 0,
 ) -> TestResult:
     blacklist = _load_blacklist()
     all_files = sorted(f for f in TORTURE_DIR.glob("*.c") if f.name not in blacklist)
@@ -41,5 +42,10 @@ async def run_torture(
 
     # Backward-compatible alias: `count` behaves like `n_tests` if n_tests unset.
     effective_n_tests = n_tests if n_tests > 0 else max(0, count)
-    selected = select_cases(cases, n_tests=effective_n_tests, test_name=test_name)
+    selected = select_cases(
+        cases,
+        n_tests=effective_n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
     return to_result([await run_case(c) for c in selected])

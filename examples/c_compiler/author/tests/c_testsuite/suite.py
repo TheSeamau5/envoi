@@ -13,7 +13,11 @@ from tests.shared import TestResult, run_case, select_cases, to_result
 TESTS_DIR = Path("/opt/tests/c-testsuite/tests/single-exec")
 
 
-async def run_c_testsuite(n_tests: int = 0, test_name: str | None = None) -> TestResult:
+async def run_c_testsuite(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
     cases = []
     for f in sorted(TESTS_DIR.glob("*.c")):
         expected_file = f.parent / f"{f.name}.expected"
@@ -24,5 +28,5 @@ async def run_c_testsuite(n_tests: int = 0, test_name: str | None = None) -> Tes
             "expected_stdout": expected_stdout,
             "expected_exit_code": 0,
         })
-    selected = select_cases(cases, n_tests=n_tests, test_name=test_name)
+    selected = select_cases(cases, n_tests=n_tests, test_name=test_name, offset=offset)
     return to_result([await run_case(c) for c in selected])

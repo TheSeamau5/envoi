@@ -26,9 +26,9 @@ Debug artifact contract (optional, no flags required):
 
 from typing import Literal
 
-from tests import TestResult, run_basics, run_c_testsuite, run_torture, run_wacct
-
 import envoi
+
+from tests import TestResult, run_basics, run_c_testsuite, run_torture, run_wacct
 
 WACCTChapter = Literal[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
@@ -55,15 +55,20 @@ async def wacct(
     chapter: WACCTChapter,
     n_tests: int = 0,
     test_name: str | None = None,
+    offset: int = 0,
 ) -> TestResult:
-    """Writing-a-C-Compiler tests. Chunked test: call this once per chapter (chapter=1..20)."""
-    return await run_wacct(n_tests=n_tests, test_name=test_name, chapter=chapter)
+    """Writing-a-C-Compiler tests. Call chapter-by-chapter and use n_tests/offset chunks for large chapters."""
+    return await run_wacct(n_tests=n_tests, test_name=test_name, chapter=chapter, offset=offset)
 
 
 @envoi.test
-async def c_testsuite(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    """~220 single-file C conformance tests from c-testsuite."""
-    return await run_c_testsuite(n_tests=n_tests, test_name=test_name)
+async def c_testsuite(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    """~220 single-file C conformance tests from c-testsuite. Use n_tests/offset chunks to keep runs short."""
+    return await run_c_testsuite(n_tests=n_tests, test_name=test_name, offset=offset)
 
 
 @envoi.test
@@ -71,6 +76,7 @@ async def torture_execute(
     count: int = 0,
     n_tests: int = 0,
     test_name: str | None = None,
+    offset: int = 0,
 ) -> TestResult:
-    """~370 GCC torture execute tests (standard-C subset, blacklist-filtered)."""
-    return await run_torture(count=count, n_tests=n_tests, test_name=test_name)
+    """~370 GCC torture execute tests (standard-C subset, blacklist-filtered). Use n_tests/offset chunks."""
+    return await run_torture(count=count, n_tests=n_tests, test_name=test_name, offset=offset)
