@@ -82,6 +82,15 @@ class RunResult:
 working_dir: ContextVar[str] = ContextVar("envoi_working_dir")
 
 
+def session_path() -> Path:
+    """
+    Return the working directory for the current session or test.
+    Write files here in setup, read them in tests.
+    Raises LookupError outside a session or test context.
+    """
+    return Path(working_dir.get())
+
+
 async def run(
     command: str,
     cwd: str | None = None,
@@ -198,16 +207,6 @@ def build_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return request_kwargs
 
 
-def to_websocket_url(base_url: str) -> str:
-    if base_url.startswith("https://"):
-        return "wss://" + base_url[len("https://") :]
-    if base_url.startswith("http://"):
-        return "ws://" + base_url[len("http://") :]
-    raise ValueError(
-        f"Unsupported base URL '{base_url}'. Expected http:// or https://"
-    )
-
-
 def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
@@ -224,7 +223,7 @@ def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
     environment_raw = envoi_table.get("environment", {})
     environment_table = environment_raw if isinstance(environment_raw, dict) else {}
 
-    name_value = _first_non_empty_string(
+    name_value = first_non_empty_string(
         environment_table.get("name"),
         project_table.get("name"),
     )
@@ -235,14 +234,14 @@ def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
         )
     name: str = name_value
 
-    version_value = _first_non_empty_string(
+    version_value = first_non_empty_string(
         environment_table.get("version"),
         project_table.get("version"),
         "0.1.0",
     )
     version: str = version_value if version_value is not None else "0.1.0"
 
-    description_value = _first_non_empty_string(
+    description_value = first_non_empty_string(
         environment_table.get("description"),
         project_table.get("description"),
         "",
@@ -256,7 +255,7 @@ def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
     }
 
 
-def _first_non_empty_string(*values: Any) -> str | None:
+def first_non_empty_string(*values: Any) -> str | None:
     for value in values:
         if isinstance(value, str) and value.strip():
             return value.strip()

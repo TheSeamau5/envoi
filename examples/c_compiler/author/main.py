@@ -1,21 +1,20 @@
 """
 C Compiler evaluation environment.
 
-Evaluates a submitted Rust project that compiles C source code to x86_64
+Evaluates a submitted Rust project that compiles C source code to ARM64
 executables.  The submission must produce a ./cc binary via build.sh.
 
 Usage:  ./cc input.c -o output
 
 Test suites (run in order):
 
-  1. basics          Hand-written tests covering core C features
-  2. wacct           "Writing a C Compiler" textbook tests (20 chapters)
-                     requires chapter=<1..20>; run chapter-by-chapter
-  3. c_testsuite     ~220 conformance tests from c-testsuite
-  4. torture_execute ~370 GCC torture tests (standard-C subset)
+  1. basics
+  2. wacct/chapter_1 ... wacct/chapter_20 (or just "wacct" to run all chapters)
+  3. c_testsuite/part_* (or just "c_testsuite" to run all parts)
+  4. torture/part_* (or just "torture" to run all parts)
 
-Each test suite lives in tests/<name>/suite.py and exposes a run_<name>() coroutine.
-See tests/shared.py for the result models and core test runner.
+Each test suite lives in tests/<name>.py and exposes a run_<name>() coroutine.
+See tests/utils.py for the result models and core test runner.
 
 Debug artifact contract (optional, no flags required):
   - The submitted compiler may write debugging output to ./debug_artifacts/.
@@ -24,16 +23,14 @@ Debug artifact contract (optional, no flags required):
   - Suggested files include AST/IR/assembly/error traces, but naming is flexible.
 """
 
-from typing import Literal
-
 import envoi
 
-from tests import TestResult, run_basics, run_c_testsuite, run_torture, run_wacct
+from tests.basics import basics
+from tests.c_testsuite import c_testsuite
+from tests.torture import torture
+from tests.wacct import wacct
 
-WACCTChapter = Literal[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-]
+__all__ = ["basics", "c_testsuite", "torture", "wacct", "build_compiler"]
 
 
 @envoi.setup
@@ -42,41 +39,3 @@ async def build_compiler(submission: envoi.Documents) -> None:
     build = await envoi.run("chmod +x build.sh && ./build.sh", timeout_seconds=300)
     if build.exit_code != 0:
         raise RuntimeError(f"Build failed (exit {build.exit_code}).\n{build.stderr}")
-
-
-@envoi.test
-async def basics(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    """Hand-written tests: smoke, variables, control flow, functions, expressions, edge cases, stress."""
-    return await run_basics(n_tests=n_tests, test_name=test_name)
-
-
-@envoi.test
-async def wacct(
-    chapter: WACCTChapter,
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    """Writing-a-C-Compiler tests. Call chapter-by-chapter and use n_tests/offset chunks for large chapters."""
-    return await run_wacct(n_tests=n_tests, test_name=test_name, chapter=chapter, offset=offset)
-
-
-@envoi.test
-async def c_testsuite(
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    """~220 single-file C conformance tests from c-testsuite. Use n_tests/offset chunks to keep runs short."""
-    return await run_c_testsuite(n_tests=n_tests, test_name=test_name, offset=offset)
-
-
-@envoi.test
-async def torture_execute(
-    count: int = 0,
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    """~370 GCC torture execute tests (standard-C subset, blacklist-filtered). Use n_tests/offset chunks."""
-    return await run_torture(count=count, n_tests=n_tests, test_name=test_name, offset=offset)

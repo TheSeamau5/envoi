@@ -18,35 +18,34 @@ from pathlib import Path
 
 TORTURE_DIR = Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute")
 
-# Patterns that indicate GNU extensions
-GNU_PATTERNS = re.compile(
-    r"__attribute__"
-    r"|__builtin_"
-    r"|__extension__"
-    r"|__asm__"
-    r"|__typeof__"
-    r"|__label__"
-    r"|__int128"
-    r"|__complex__"
-    r"|__real__"
-    r"|__imag__"
-    r"|__auto_type"
-    r"|\btypeof\b"
-    r"|\basm\b\s*\("
-    r"|\basm\b\s*volatile"
-    r"|__attribute\s*\("
-    r"|__VA_OPT__"
-    r"|_Complex"
-    r"|_Decimal"
-    r"|__float128"
-    r"|__SIZEOF_"
-    r"|#include\s*<stdatomic\.h>"
-)
-
 def main():
     if not TORTURE_DIR.is_dir():
         print(f"ERROR: {TORTURE_DIR} not found", file=sys.stderr)
         sys.exit(1)
+
+    gnu_patterns = re.compile(
+        r"__attribute__"
+        r"|__builtin_"
+        r"|__extension__"
+        r"|__asm__"
+        r"|__typeof__"
+        r"|__label__"
+        r"|__int128"
+        r"|__complex__"
+        r"|__real__"
+        r"|__imag__"
+        r"|__auto_type"
+        r"|\btypeof\b"
+        r"|\basm\b\s*\("
+        r"|\basm\b\s*volatile"
+        r"|__attribute\s*\("
+        r"|__VA_OPT__"
+        r"|_Complex"
+        r"|_Decimal"
+        r"|__float128"
+        r"|__SIZEOF_"
+        r"|#include\s*<stdatomic\.h>"
+    )
 
     c_files = sorted(TORTURE_DIR.glob("*.c"))
     print(f"Found {len(c_files)} .c files in {TORTURE_DIR}", file=sys.stderr)
@@ -60,7 +59,7 @@ def main():
         except Exception:
             blacklisted.add(f.name)
             continue
-        if GNU_PATTERNS.search(src):
+        if gnu_patterns.search(src):
             blacklisted.add(f.name)
 
     print(f"Pass 1 (grep): {len(blacklisted)} files blacklisted", file=sys.stderr)

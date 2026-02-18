@@ -14,11 +14,7 @@ import time
 from pathlib import Path
 
 import envoi
-from envoi.utils import working_dir
 from pydantic import BaseModel, Field
-
-DEBUG_ARTIFACTS_DIR = "debug_artifacts"
-TEXT_CHUNK_CHARS = 12_000
 
 
 class DebugArtifact(BaseModel):
@@ -60,7 +56,7 @@ class TestResult(BaseModel):
 def session_path() -> Path:
     """Return the working directory for the current envoi session."""
     try:
-        return Path(working_dir.get())
+        return envoi.session_path()
     except LookupError:
         return Path.cwd()
 
@@ -115,14 +111,14 @@ def select_cases(
     return cases[offset:]
 
 
-def _reset_debug_artifacts_dir(sp: Path) -> Path:
-    debug_dir = sp / DEBUG_ARTIFACTS_DIR
+def reset_debug_artifacts_dir(sp: Path) -> Path:
+    debug_dir = sp / "debug_artifacts"
     shutil.rmtree(debug_dir, ignore_errors=True)
     debug_dir.mkdir(parents=True, exist_ok=True)
     return debug_dir
 
 
-def _split_text_chunks(text: str, max_chars: int = TEXT_CHUNK_CHARS) -> list[str]:
+def split_text_chunks(text: str, max_chars: int = 12_000) -> list[str]:
     if not text:
         return []
 
@@ -151,7 +147,7 @@ def _split_text_chunks(text: str, max_chars: int = TEXT_CHUNK_CHARS) -> list[str
     return chunks
 
 
-def _artifact_kind(path: Path, is_text: bool) -> str:
+def artifact_kind(path: Path, is_text: bool) -> str:
     suffix = path.suffix.lower()
     if suffix == ".json":
         return "json"
@@ -166,7 +162,20 @@ def _artifact_kind(path: Path, is_text: bool) -> str:
     return "text" if is_text else "binary"
 
 
-def _collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
+async def detect_elf_machine(path: Path) -> str | None:
+    probe = await envoi.run(f"readelf -h {shlex.quote(path.name)}", timeout_seconds=5)
+    if probe.exit_code != 0:
+        return None
+
+    for line in probe.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Machine:"):
+            return stripped.split(":", maxsplit=1)[1].strip()
+
+    return None
+
+
+def collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
     if not debug_dir.exists():
         return []
 
@@ -187,7 +196,7 @@ def _collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
             if text.encode("utf-8", errors="replace") != payload:
                 notes.append("Decoded as UTF-8 with replacement.")
 
-            text_chunks = _split_text_chunks(text)
+            text_chunks = split_text_chunks(text)
             line_count = text.count("\n")
             if text and not text.endswith("\n"):
                 line_count += 1
@@ -197,7 +206,7 @@ def _collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
         artifacts.append(
             DebugArtifact(
                 path=str(file_path.relative_to(debug_dir)),
-                kind=_artifact_kind(file_path, not is_binary),
+                kind=artifact_kind(file_path, not is_binary),
                 size_bytes=len(payload),
                 sha256=hashlib.sha256(payload).hexdigest(),
                 line_count=line_count,
@@ -232,7 +241,7 @@ async def run_case(case: dict) -> CaseResult:
     out_file = sp / f"test_{name}"
     gcc_out_file = sp / f"test_{name}_gcc"
     c_file.write_text(src)
-    debug_dir = _reset_debug_artifacts_dir(sp)
+    debug_dir = reset_debug_artifacts_dir(sp)
 
     t0 = time.monotonic()
     cc = await envoi.run(
@@ -268,7 +277,7 @@ async def run_case(case: dict) -> CaseResult:
             binary_size_bytes=None,
             gcc_binary_size_bytes=gcc_binary_size_bytes,
             stderr=None if passed else "expected compilation to fail but it succeeded",
-            debug_artifacts=_collect_debug_artifacts(debug_dir) if not passed else [],
+            debug_artifacts=collect_debug_artifacts(debug_dir) if not passed else [],
         )
 
     if cc.exit_code != 0:
@@ -279,7 +288,20 @@ async def run_case(case: dict) -> CaseResult:
             compile_time_ms=compile_time_ms, gcc_compile_time_ms=gcc_compile_time_ms,
             binary_size_bytes=None, gcc_binary_size_bytes=gcc_binary_size_bytes,
             stderr=(cc.stderr or cc.stdout or "compilation failed"),
-            debug_artifacts=_collect_debug_artifacts(debug_dir),
+            debug_artifacts=collect_debug_artifacts(debug_dir),
+        )
+
+    machine = await detect_elf_machine(out_file)
+    if machine is not None and machine != "AArch64":
+        return CaseResult(
+            name=name, phase="verify", passed=False, c_source=src,
+            expected_stdout=expected_stdout, actual_stdout="",
+            expected_exit_code=expected_exit, actual_exit_code=-1,
+            compile_time_ms=compile_time_ms, gcc_compile_time_ms=gcc_compile_time_ms,
+            binary_size_bytes=binary_size_bytes, gcc_binary_size_bytes=gcc_binary_size_bytes,
+            run_time_ms=None, gcc_run_time_ms=None,
+            stderr=f"wrong target architecture: expected AArch64, got {machine}",
+            debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
     t0 = time.monotonic()
@@ -321,5 +343,5 @@ async def run_case(case: dict) -> CaseResult:
         binary_size_bytes=binary_size_bytes, gcc_binary_size_bytes=gcc_binary_size_bytes,
         run_time_ms=run_time_ms, gcc_run_time_ms=gcc_run_time_ms,
         stderr=stderr,
-        debug_artifacts=_collect_debug_artifacts(debug_dir) if not passed else [],
+        debug_artifacts=collect_debug_artifacts(debug_dir) if not passed else [],
     )

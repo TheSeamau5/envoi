@@ -5,14 +5,13 @@ from .client import (
     connect_session,
 )
 from .environment import (
-    action,
     clear_environment,
-    observe,
     setup,
+    suite,
     teardown,
     test,
 )
-from .utils import Documents, RunResult, run
+from .utils import Documents, RunResult, run, session_path
 
 __all__ = [
     "Client",
@@ -20,11 +19,11 @@ __all__ = [
     "Documents",
     "RunResult",
     "test",
+    "suite",
     "setup",
     "teardown",
-    "observe",
-    "action",
     "run",
+    "session_path",
     "clear_environment",
     "connect",
     "connect_session",

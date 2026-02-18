@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,7 @@ def deploy(
     if not target_path.exists():
         raise FileNotFoundError(f"Environment path not found: {target_path}")
 
-    environment_dir, module_filename = _resolve_environment_target(
+    environment_dir, module_filename = resolve_environment_target(
         target_path=target_path,
         module=module,
     )
@@ -31,7 +30,7 @@ def deploy(
     project_root = Path(__file__).resolve().parent.parent
 
     if build:
-        _build_runtime_image(project_root, image_name, environment_dir)
+        build_runtime_image(project_root, image_name, environment_dir)
 
     environment_mount = f"{environment_dir}:/environment:ro"
     environment_file = f"/environment/{module_filename}"
@@ -53,7 +52,7 @@ def deploy(
     run_command.extend(["--port", str(port)])
 
     if detach:
-        result = _run_command(run_command, capture_output=True)
+        result = run_command_checked(run_command, capture_output=True)
         return {
             "container_id": result.stdout.strip(),
             "container_name": container_name,
@@ -61,7 +60,7 @@ def deploy(
             "url": runtime_url,
         }
 
-    _run_command(run_command)
+    run_command_checked(run_command)
     return {
         "container_id": None,
         "container_name": container_name,
@@ -70,7 +69,7 @@ def deploy(
     }
 
 
-def _build_runtime_image(project_root: Path, image_name: str, environment_dir: Path) -> None:
+def build_runtime_image(project_root: Path, image_name: str, environment_dir: Path) -> None:
     custom_dockerfile = environment_dir / "Dockerfile"
     if custom_dockerfile.is_file():
         build_command = [
@@ -82,34 +81,21 @@ def _build_runtime_image(project_root: Path, image_name: str, environment_dir: P
             str(custom_dockerfile),
             str(project_root),
         ]
-        _run_command(build_command)
+        run_command_checked(build_command)
         return
 
-    dockerfile = """
-FROM python:3.12-slim
-WORKDIR /app
-COPY pyproject.toml README.md /app/
-COPY envoi /app/envoi
-RUN pip install --no-cache-dir .
-""".strip()
+    base_dockerfile = project_root / "envoi" / "Dockerfile.base"
+    if not base_dockerfile.is_file():
+        raise FileNotFoundError(f"Missing base Dockerfile: {base_dockerfile}")
 
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".Dockerfile", delete=False
-    ) as temp_file:
-        temp_file.write(dockerfile)
-        dockerfile_path = Path(temp_file.name)
-
-    try:
-        build_command = ["docker", "build"]
-        build_command.extend(["-t", image_name])
-        build_command.extend(["-f", str(dockerfile_path)])
-        build_command.append(str(project_root))
-        _run_command(build_command)
-    finally:
-        dockerfile_path.unlink(missing_ok=True)
+    build_command = ["docker", "build"]
+    build_command.extend(["-t", image_name])
+    build_command.extend(["-f", str(base_dockerfile)])
+    build_command.append(str(project_root))
+    run_command_checked(build_command)
 
 
-def _run_command(command: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+def run_command_checked(command: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         check=True,
@@ -150,7 +136,7 @@ def main() -> None:
         print(f"Started container: {result['container_id']}")
     print(f"Runtime URL: {result['url']}")
 
-def _resolve_environment_target(
+def resolve_environment_target(
     *,
     target_path: Path,
     module: str | None,

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
-import websockets
-from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import ConnectionClosed
 
 from .constants import (
     DEFAULT_HTTP_TIMEOUT_SECONDS,
@@ -14,20 +11,18 @@ from .constants import (
 )
 from .utils import (
     build_request_kwargs,
-    schema_item_values,
     to_jsonable,
-    to_websocket_url,
 )
 
 
-def _parse_json_response(response: httpx.Response) -> Any | None:
+def parse_json_response(response: httpx.Response) -> Any | None:
     try:
         return response.json()
     except ValueError:
         return None
 
 
-def _response_error_message(response: httpx.Response, payload: Any | None) -> str:
+def response_error_message(response: httpx.Response, payload: Any | None) -> str:
     if isinstance(payload, dict):
         error_value = payload.get("error")
         if isinstance(error_value, str):
@@ -49,13 +44,30 @@ def _response_error_message(response: httpx.Response, payload: Any | None) -> st
     return response.reason_phrase or "unknown error"
 
 
-def _raise_for_response_error(response: httpx.Response, payload: Any | None) -> None:
+def raise_for_response_error(response: httpx.Response, payload: Any | None) -> None:
     has_payload_error = isinstance(payload, dict) and "error" in payload
     if response.is_error or has_payload_error:
-        message = _response_error_message(response, payload)
+        message = response_error_message(response, payload)
         raise RuntimeError(
             f"Request failed ({response.status_code}): {message}"
         )
+
+
+def schema_test_names(schema: dict[str, Any]) -> list[str]:
+    tests = schema.get("tests", [])
+    if not isinstance(tests, list):
+        return []
+
+    names: list[str] = []
+    for item in tests:
+        if isinstance(item, str):
+            names.append(item)
+            continue
+        if isinstance(item, dict):
+            name_value = item.get("name")
+            if isinstance(name_value, str):
+                names.append(name_value)
+    return names
 
 
 class Client:
@@ -66,21 +78,12 @@ class Client:
         http_client: httpx.AsyncClient,
     ) -> None:
         self.base_url = url.rstrip("/")
-        self.websocket_base_url = to_websocket_url(self.base_url)
         self.schema = schema
         self.http_client = http_client
 
     @property
     def tests(self) -> list[str]:
-        return schema_item_values(self.schema.get("tests", []), "name", str)
-
-    @property
-    def actions(self) -> list[str]:
-        return schema_item_values(self.schema.get("actions", []), "name", str)
-
-    @property
-    def observables(self) -> list[str]:
-        return schema_item_values(self.schema.get("observables", []), "name", str)
+        return schema_test_names(self.schema)
 
     @property
     def has_setup(self) -> bool:
@@ -88,16 +91,15 @@ class Client:
             return bool(self.schema.get("has_setup"))
         return self.schema.get("setup") is not None
 
-    async def test(self, name: str, **kwargs: Any) -> Any:
+    async def test(self, name: str = "", **kwargs: Any) -> Any:
         if self.has_setup:
             raise RuntimeError("This environment requires a session.")
 
+        endpoint = f"{self.base_url}/test" if not name else f"{self.base_url}/test/{name}"
         request_kwargs = build_request_kwargs(kwargs)
-        response = await self.http_client.post(
-            f"{self.base_url}/test/{name}", **request_kwargs
-        )
-        payload = _parse_json_response(response)
-        _raise_for_response_error(response, payload)
+        response = await self.http_client.post(endpoint, **request_kwargs)
+        payload = parse_json_response(response)
+        raise_for_response_error(response, payload)
         if payload is None:
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"
@@ -113,8 +115,8 @@ class Client:
         response = await self.http_client.post(
             f"{self.base_url}/session", **request_kwargs
         )
-        session_payload = _parse_json_response(response)
-        _raise_for_response_error(response, session_payload)
+        session_payload = parse_json_response(response)
+        raise_for_response_error(response, session_payload)
         if not isinstance(session_payload, dict):
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"
@@ -148,61 +150,33 @@ class Session:
         self.session_id = session_id
         self.timeout_seconds = timeout_seconds
         self.close_client_on_close = close_client_on_close
-        self.stream_connection: ClientConnection | None = None
 
-    async def test(self, name: str, **kwargs: Any) -> Any:
+    async def test(self, name: str = "", **kwargs: Any) -> Any:
+        endpoint = (
+            f"{self.client.base_url}/session/{self.session_id}/test"
+            if not name
+            else f"{self.client.base_url}/session/{self.session_id}/test/{name}"
+        )
         response = await self.client.http_client.post(
-            f"{self.client.base_url}/session/{self.session_id}/test/{name}",
+            endpoint,
             data={"params": json.dumps(to_jsonable(kwargs))} if kwargs else {},
         )
-        payload = _parse_json_response(response)
-        _raise_for_response_error(response, payload)
+        payload = parse_json_response(response)
+        raise_for_response_error(response, payload)
         if payload is None:
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"
             )
         return payload
 
-    async def observe(self, name: str | None = None) -> AsyncIterator[Any]:
-        if name is not None and name not in self.client.observables:
-            raise ValueError(f"Unknown observable: {name}")
-
-        stream_connection = await self._get_stream_connection()
-        try:
-            async for raw_message in stream_connection:
-                decoded_message = json.loads(raw_message)
-                message_type = decoded_message.get("type")
-
-                if message_type == "observe":
-                    observe_name = decoded_message.get("name")
-                    if name is None or observe_name == name:
-                        yield decoded_message.get("data")
-                elif message_type == "error":
-                    raise RuntimeError(decoded_message.get("message", "Unknown error"))
-        except ConnectionClosed:
-            return
-
-    async def action(self, name: str, **kwargs: Any) -> None:
-        stream_connection = await self._get_stream_connection()
-        payload = {
-            "type": "action",
-            "name": name,
-            "data": to_jsonable(kwargs),
-        }
-        await stream_connection.send(json.dumps(payload))
-
     async def close(self) -> None:
         try:
-            if self.stream_connection is not None:
-                await self.stream_connection.close()
-                self.stream_connection = None
-
             response = await self.client.http_client.delete(
                 f"{self.client.base_url}/session/{self.session_id}"
             )
-            payload = _parse_json_response(response)
+            payload = parse_json_response(response)
             if response.status_code != 404:
-                _raise_for_response_error(response, payload)
+                raise_for_response_error(response, payload)
         finally:
             if self.close_client_on_close:
                 self.close_client_on_close = False
@@ -214,17 +188,6 @@ class Session:
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         await self.close()
 
-    async def _get_stream_connection(self) -> ClientConnection:
-        if self.stream_connection is not None:
-            return self.stream_connection
-
-        stream_url = f"{self.client.websocket_base_url}/session/{self.session_id}/stream"
-        stream_connection = await websockets.connect(stream_url)
-        self.stream_connection = stream_connection
-
-        await stream_connection.send(json.dumps({"type": "configure"}))
-        return stream_connection
-
 
 async def connect(
     url: str, timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS
@@ -232,8 +195,8 @@ async def connect(
     http_client = httpx.AsyncClient(timeout=timeout_seconds)
     try:
         response = await http_client.get(f"{url.rstrip('/')}/schema")
-        payload = _parse_json_response(response)
-        _raise_for_response_error(response, payload)
+        payload = parse_json_response(response)
+        raise_for_response_error(response, payload)
         if not isinstance(payload, dict):
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"

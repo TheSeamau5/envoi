@@ -16,10 +16,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
 
     args = parser.parse_args()
-    _run_deploy(args)
+    run_deploy(args)
 
 
-def _run_deploy(args: argparse.Namespace) -> None:
+def run_deploy(args: argparse.Namespace) -> None:
     from .deploy import deploy
 
     result = deploy(
