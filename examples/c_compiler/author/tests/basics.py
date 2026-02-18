@@ -19,7 +19,12 @@ from .utils import TestResult, run_case, select_cases, to_result
 basics = envoi.suite("basics")
 
 
-def load_cases(categories: tuple[str, ...] | None = None) -> list[dict]:
+async def run_basics(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    *,
+    categories: tuple[str, ...] | None = None,
+) -> TestResult:
     basics_dir = Path(__file__).resolve().parent / "basics"
     category_names = categories if categories is not None else (
         "smoke",
@@ -30,7 +35,8 @@ def load_cases(categories: tuple[str, ...] | None = None) -> list[dict]:
         "edge_cases",
         "stress",
     )
-    cases: list[dict] = []
+
+    all_cases: list[dict] = []
     for category in category_names:
         category_dir = basics_dir / category
         if not category_dir.is_dir():
@@ -40,22 +46,14 @@ def load_cases(categories: tuple[str, ...] | None = None) -> list[dict]:
             source = source_file.read_text()
             stdout_lines = re.findall(r"^//\s*expect_stdout:\s*(.+)$", source, re.MULTILINE)
             exit_match = re.search(r"^//\s*expect_exit:\s*(\d+)", source, re.MULTILINE)
-            cases.append({
+            all_cases.append({
                 "name": source_file.stem,
                 "source": source,
                 "expected_stdout": "\n".join(stdout_lines),
                 "expected_exit_code": int(exit_match.group(1)) if exit_match else 0,
             })
-    return cases
 
-
-async def run_basics(
-    n_tests: int = 0,
-    test_name: str | None = None,
-    *,
-    categories: tuple[str, ...] | None = None,
-) -> TestResult:
-    cases = select_cases(load_cases(categories), n_tests=n_tests, test_name=test_name)
+    cases = select_cases(all_cases, n_tests=n_tests, test_name=test_name)
     return to_result([await run_case(c) for c in cases])
 
 
