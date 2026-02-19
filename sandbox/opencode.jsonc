@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "glm-5-free",
+  "server": {
+    "port": 4096,
+    "hostname": "0.0.0.0"
+  },
+  "mcp": {
+    "envoi-tests": {
+      "type": "local",
+      "command": ["python3", "/sandbox/mcp_server.py"],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": "allow"
+  },
+  "tools": {
+    "write": true,
+    "bash": true,
+    "edit": true
+  }
+}
