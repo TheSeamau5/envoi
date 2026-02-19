@@ -1,6 +1,14 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "glm-5-free",
+  "model": "MODEL_PLACEHOLDER",
+  "small_model": "MODEL_PLACEHOLDER",
+  "provider": {
+    "opencode": {
+      "options": {
+        "apiKey": "{env:OPENCODE_API_KEY}"
+      }
+    }
+  },
   "server": {
     "port": 4096,
     "hostname": "0.0.0.0"

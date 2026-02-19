@@ -26,13 +26,26 @@ from pydantic import BaseModel, Field
 
 app = modal.App("envoi-trace")
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "system.txt"
-SETUP_SH_PATH = Path(__file__).parent / "sandbox" / "setup.sh"
-MCP_SERVER_PATH = Path(__file__).parent / "sandbox" / "mcp_server.py"
-OPENCODE_CONFIG_PATH = Path(__file__).parent / "sandbox" / "opencode.jsonc"
+DEFAULT_MODEL = "opencode/glm-5-free"
+
+PROMPT = (Path(__file__).parent / "prompts" / "system.txt").read_text()
+SETUP_SH = (Path(__file__).parent / "sandbox" / "setup.sh").read_text()
+MCP_SERVER = (Path(__file__).parent / "sandbox" / "mcp_server.py").read_text()
+OPENCODE_CONFIG = (Path(__file__).parent / "sandbox" / "opencode.jsonc").read_text()
 ENVIRONMENT_DIR = Path(__file__).parent / "environment"
 
-DEFAULT_MODEL = "glm-5-free"
+ENVIRONMENT_PY_FILES = {
+    str(py_file.relative_to(ENVIRONMENT_DIR)): py_file.read_text()
+    for py_file in ENVIRONMENT_DIR.rglob("*.py")
+}
+ENVIRONMENT_C_FILES = {
+    str(c_file.relative_to(ENVIRONMENT_DIR)): c_file.read_text()
+    for c_file in ENVIRONMENT_DIR.rglob("*.c")
+}
+ENVIRONMENT_TXT_FILES = {
+    str(txt_file.relative_to(ENVIRONMENT_DIR)): txt_file.read_text()
+    for txt_file in ENVIRONMENT_DIR.rglob("*.txt")
+}
 
 REQUIRED_PATHS: list[str] = [
     "basics",
@@ -40,6 +53,39 @@ REQUIRED_PATHS: list[str] = [
     *[f"c_testsuite/part_{i}" for i in range(1, 6)],
     *[f"torture/part_{i}" for i in range(1, 11)],
 ]
+
+
+def resolve_model(model: str) -> str:
+    if "/" in model:
+        return model
+    return f"opencode/{model}"
+
+
+def redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, val in value.items():
+            if isinstance(key, str) and any(
+                token in key.lower() for token in ["key", "token", "secret", "password"]
+            ):
+                redacted[key] = "***redacted***" if val else val
+            else:
+                redacted[key] = redact_secrets(val)
+        return redacted
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    return value
+
+
+def truncate_text(text: str, limit: int = 4000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 
 class TestCase(BaseModel):
@@ -83,6 +129,11 @@ class TurnRecord(BaseModel):
     session_end: SessionEnd | None = None
 
 
+# ---------------------------------------------------------------------------
+# Solve tracker
+# ---------------------------------------------------------------------------
+
+
 class SolveTracker:
     def __init__(self) -> None:
         self.solved: set[str] = set()
@@ -105,6 +156,11 @@ class SolveTracker:
             if call.path == path:
                 return call
         return None
+
+
+# ---------------------------------------------------------------------------
+# Message parsing helpers
+# ---------------------------------------------------------------------------
 
 
 def extract_envoi_calls(message_parts: list[dict[str, Any]]) -> list[EnvoiCall]:
@@ -133,6 +189,10 @@ def has_tool_calls(message_parts: list[dict[str, Any]]) -> bool:
             return True
     return False
 
+
+# ---------------------------------------------------------------------------
+# S3 helpers
+# ---------------------------------------------------------------------------
 
 _s3_client = None
 
@@ -168,6 +228,7 @@ def append_jsonl_record(trajectory_id: str, record: TurnRecord) -> None:
             raise
     new_data = existing_data + line.encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=new_data)
+    print(f"[s3] appended trajectory record to s3://{bucket}/{key}")
 
 
 def upload_file(trajectory_id: str, filename: str, data: bytes) -> str:
@@ -178,7 +239,26 @@ def upload_file(trajectory_id: str, filename: str, data: bytes) -> str:
     return f"s3://{bucket}/{key}"
 
 
-function_image = modal.Image.debian_slim().pip_install("boto3")
+# ---------------------------------------------------------------------------
+# Modal images
+# ---------------------------------------------------------------------------
+
+function_image = (
+    modal.Image.debian_slim()
+    .pip_install("boto3", "pydantic")
+    .add_local_dir(
+        Path(__file__).parent / "prompts",
+        remote_path="/root/prompts",
+    )
+    .add_local_dir(
+        Path(__file__).parent / "sandbox",
+        remote_path="/root/sandbox",
+    )
+    .add_local_dir(
+        Path(__file__).parent / "environment",
+        remote_path="/root/environment",
+    )
+)
 
 sandbox_image = (
     modal.Image.from_registry("ubuntu:24.04", add_python="3.12")
@@ -205,72 +285,158 @@ sandbox_image = (
 )
 
 
-def sandbox_exec(sandbox: modal.Sandbox, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
-    result = sandbox.exec(f"bash -c {repr(cmd)}", timeout=timeout)
+# ---------------------------------------------------------------------------
+# Sandbox helpers (using Modal's sandbox.exec / sandbox.open APIs)
+# ---------------------------------------------------------------------------
+
+
+async def sandbox_run(sandbox: modal.Sandbox, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
+    """Execute a command inside the sandbox and return (exit_code, stdout, stderr)."""
+    print(f"[sandbox_run] cmd={cmd[:200]}")
+    proc = await sandbox.exec.aio("bash", "-c", cmd)
     stdout = ""
     stderr = ""
-    for line in result.stdout:
-        stdout += line
-    for line in result.stderr:
-        stderr += line
-    return result.exit_code or 0, stdout, stderr
+    async for chunk in proc.stdout:
+        stdout += chunk
+    async for chunk in proc.stderr:
+        stderr += chunk
+    await proc.wait.aio()
+    exit_code = proc.returncode or 0
+    if exit_code != 0:
+        print(f"[sandbox_run] exit_code={exit_code}")
+        if stderr:
+            print(f"[sandbox_run] stderr:\n{stderr}")
+    return exit_code, stdout, stderr
 
 
-def sandbox_run(sandbox: modal.Sandbox, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
-    return sandbox_exec(sandbox, cmd, timeout)
+async def sandbox_write_file(sandbox: modal.Sandbox, path: str, content: str) -> None:
+    """Write a file inside the sandbox using Modal's filesystem API."""
+    parent = str(Path(path).parent)
+    await sandbox_run(sandbox, f"mkdir -p '{parent}'")
+    async with await sandbox.open.aio(path, "w") as f:
+        await f.write.aio(content)
 
 
-def sandbox_write_file(sandbox: modal.Sandbox, path: str, content: str) -> None:
-    escaped = content.replace("'", "'\\''")
-    sandbox_exec(
-        sandbox, f"mkdir -p $(dirname '{path}') && echo '{escaped}' > '{path}'", timeout=30
-    )
+async def sandbox_write_bytes(sandbox: modal.Sandbox, path: str, data: bytes) -> None:
+    """Write binary data to a file inside the sandbox."""
+    parent = str(Path(path).parent)
+    await sandbox_run(sandbox, f"mkdir -p '{parent}'")
+    async with await sandbox.open.aio(path, "wb") as f:
+        await f.write.aio(data)
 
 
-def get_messages(sandbox: modal.Sandbox, session_id: str) -> list[dict[str, Any]]:
-    _, stdout, _ = sandbox_run(
+# ---------------------------------------------------------------------------
+# OpenCode API helpers (via curl inside the sandbox)
+# ---------------------------------------------------------------------------
+
+
+def summarize_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    tail = messages[-5:]
+    tail_roles = [m.get("info", {}).get("role") for m in tail]
+    tail_ids = [m.get("info", {}).get("id") for m in tail]
+    last = messages[-1] if messages else None
+    return {
+        "count": len(messages),
+        "last_role": last.get("info", {}).get("role") if last else None,
+        "last_id": last.get("info", {}).get("id") if last else None,
+        "tail_roles": tail_roles,
+        "tail_ids": tail_ids,
+    }
+
+
+async def debug_endpoint_json(
+    sandbox: modal.Sandbox,
+    label: str,
+    url: str,
+    limit: int = 4000,
+) -> None:
+    print(f"[debug] {label} -> {url}")
+    exit_code, stdout, stderr = await sandbox_run(sandbox, f"curl -sf {url}", timeout=15)
+    if exit_code != 0:
+        print(f"[debug] {label} exit_code={exit_code}")
+    if stderr:
+        print(f"[debug] {label} stderr:\n{stderr}")
+    if not stdout.strip():
+        print(f"[debug] {label} no output")
+        return
+    try:
+        data = json.loads(stdout)
+        data = redact_secrets(data)
+        text = json.dumps(data, indent=2)
+    except json.JSONDecodeError:
+        text = stdout
+    print(truncate_text(text, limit=limit))
+
+
+async def get_messages(sandbox: modal.Sandbox, session_id: str) -> list[dict[str, Any]]:
+    _, stdout, _ = await sandbox_run(
         sandbox, f"curl -sf http://localhost:4096/session/{session_id}/message", timeout=30
     )
     try:
-        return json.loads(stdout)
+        data = json.loads(stdout)
+        summary = summarize_messages(data)
+        print(
+            f"[get_messages] count={summary['count']} last_role={summary['last_role']} "
+            f"last_id={summary['last_id']} tail_roles={summary['tail_roles']}"
+        )
+        return data
     except json.JSONDecodeError:
+        print("[get_messages] failed to parse JSON")
         return []
 
 
-def send_user_message(sandbox: modal.Sandbox, session_id: str, message: str) -> None:
-    payload = json.dumps({"parts": [{"type": "text", "text": message}]})
-    escaped = payload.replace("'", "'\\''")
-    sandbox_run(
+async def send_user_message(
+    sandbox: modal.Sandbox,
+    session_id: str,
+    message: str,
+    model: str,
+) -> None:
+    payload = json.dumps({"model": model, "parts": [{"type": "text", "text": message}]})
+    await sandbox_write_file(sandbox, "/tmp/msg_payload.json", payload)
+    print(f"[send_user_message] sending prompt_async model={model}")
+    exit_code, stdout, stderr = await sandbox_run(
         sandbox,
-        f"curl -sf -X POST http://localhost:4096/session/{session_id}/message "
-        f"-H 'Content-Type: application/json' -d '{escaped}'",
-        timeout=60,
+        f"curl -sf -X POST http://localhost:4096/session/{session_id}/prompt_async "
+        f"-H 'Content-Type: application/json' -d @/tmp/msg_payload.json",
+        timeout=120,
     )
+    print(f"[send_user_message] exit={exit_code} stdout_len={len(stdout)} stderr_len={len(stderr)}")
 
 
-def create_session(sandbox: modal.Sandbox, title: str = "C Compiler Build") -> str | None:
+async def create_session(sandbox: modal.Sandbox, title: str = "C Compiler Build") -> str | None:
     payload = json.dumps({"title": title})
-    escaped = payload.replace("'", "'\\''")
-    _, stdout, _ = sandbox_run(
+    await sandbox_write_file(sandbox, "/tmp/create_session.json", payload)
+    _, stdout, _ = await sandbox_run(
         sandbox,
-        f"curl -sf -X POST http://localhost:4096/session -H 'Content-Type: application/json' -d '{escaped}'",
+        "curl -sf -X POST http://localhost:4096/session "
+        "-H 'Content-Type: application/json' -d @/tmp/create_session.json",
         timeout=30,
     )
     try:
         data = json.loads(stdout)
         return data.get("id")
     except json.JSONDecodeError:
+        print("[create_session] failed to parse JSON")
         return None
 
 
-def send_initial_prompt(sandbox: modal.Sandbox, session_id: str, prompt: str) -> None:
-    payload = json.dumps({"parts": [{"type": "text", "text": prompt}]})
-    escaped = payload.replace("'", "'\\''")
-    sandbox_run(
+async def send_initial_prompt(
+    sandbox: modal.Sandbox,
+    session_id: str,
+    prompt: str,
+    model: str,
+) -> None:
+    payload = json.dumps({"model": model, "parts": [{"type": "text", "text": prompt}]})
+    await sandbox_write_file(sandbox, "/tmp/prompt_payload.json", payload)
+    print(f"[send_initial_prompt] sending prompt_async model={model}")
+    exit_code, stdout, stderr = await sandbox_run(
         sandbox,
-        f"curl -sf -X POST http://localhost:4096/session/{session_id}/message "
-        f"-H 'Content-Type: application/json' -d '{escaped}'",
+        f"curl -sf -X POST http://localhost:4096/session/{session_id}/prompt_async "
+        f"-H 'Content-Type: application/json' -d @/tmp/prompt_payload.json",
         timeout=120,
+    )
+    print(
+        f"[send_initial_prompt] exit={exit_code} stdout_len={len(stdout)} stderr_len={len(stderr)}"
     )
 
 
@@ -291,17 +457,22 @@ def detect_new_turn(
     return None
 
 
-def is_opencode_healthy(sandbox: modal.Sandbox) -> bool:
-    _, stdout, _ = sandbox_run(sandbox, "curl -sf http://localhost:4096/global/health", timeout=10)
+async def is_opencode_healthy(sandbox: modal.Sandbox) -> bool:
+    _, stdout, _ = await sandbox_run(
+        sandbox, "curl -sf http://localhost:4096/global/health", timeout=10
+    )
     try:
         data = json.loads(stdout)
-        return data.get("healthy", False)
+        healthy = data.get("healthy", False)
+        print(f"[opencode_health] healthy={healthy}")
+        return healthy
     except json.JSONDecodeError:
+        print("[opencode_health] failed to parse JSON")
         return False
 
 
-def get_git_commit(sandbox: modal.Sandbox) -> str | None:
-    _, stdout, _ = sandbox_run(
+async def get_git_commit(sandbox: modal.Sandbox) -> str | None:
+    _, stdout, _ = await sandbox_run(
         sandbox, "cd /workspace && git rev-parse HEAD 2>/dev/null || echo 'none'", timeout=10
     )
     commit = stdout.strip()
@@ -310,9 +481,33 @@ def get_git_commit(sandbox: modal.Sandbox) -> str | None:
     return commit[:16]
 
 
-def check_git_has_changes(sandbox: modal.Sandbox) -> bool:
-    _, stdout, _ = sandbox_run(sandbox, "cd /workspace && git status --porcelain", timeout=10)
+async def check_git_has_changes(sandbox: modal.Sandbox) -> bool:
+    _, stdout, _ = await sandbox_run(sandbox, "cd /workspace && git status --porcelain", timeout=10)
     return bool(stdout.strip())
+
+
+async def tail_sandbox_logs(sandbox: modal.Sandbox) -> None:
+    print("[logs] tailing /tmp/envoi.log and /tmp/opencode.log")
+    _, stdout, _ = await sandbox_run(
+        sandbox,
+        "tail -n 20 /tmp/envoi.log /tmp/opencode.log 2>/dev/null || true",
+        timeout=10,
+    )
+    if stdout.strip():
+        print(stdout)
+    _, proc_out, _ = await sandbox_run(
+        sandbox,
+        "if [ -f /tmp/envoi.pid ]; then ps -o pid,etimes,cmd -p $(cat /tmp/envoi.pid); fi; "
+        "if [ -f /tmp/opencode.pid ]; then ps -o pid,etimes,cmd -p $(cat /tmp/opencode.pid); fi;",
+        timeout=10,
+    )
+    if proc_out.strip():
+        print("[logs] process status:\n" + proc_out)
+
+
+# ---------------------------------------------------------------------------
+# Main trajectory function
+# ---------------------------------------------------------------------------
 
 
 @app.function(
@@ -330,226 +525,272 @@ async def run_trajectory(
         trajectory_id = str(uuid.uuid4())
 
     print(f"Starting trajectory {trajectory_id}")
-    print(f"Model: {model}, max_turns: {max_turns}, timeout: {timeout_seconds}s")
+    resolved_model = resolve_model(model)
+    print(
+        f"Model: {model} (resolved: {resolved_model}), max_turns: {max_turns}, "
+        f"timeout: {timeout_seconds}s"
+    )
 
     opencode_api_key = os.environ.get("OPENCODE_API_KEY", "")
-    prompt = PROMPT_PATH.read_text()
-    setup_sh = SETUP_SH_PATH.read_text()
-    mcp_server = MCP_SERVER_PATH.read_text()
-    opencode_config = OPENCODE_CONFIG_PATH.read_text()
+    if opencode_api_key:
+        print(f"[setup] OPENCODE_API_KEY length={len(opencode_api_key)}")
+    else:
+        print("[setup] WARNING: OPENCODE_API_KEY is empty")
 
-    with modal.Sandbox.create(
+    sandbox = await modal.Sandbox.create.aio(
         "bash",
         "-c",
         "sleep infinity",
         image=sandbox_image,
         timeout=timeout_seconds,
         app=app,
-    ) as sandbox:
-        start_time = time.monotonic()
+    )
+    start_time = time.monotonic()
 
-        try:
-            await setup_sandbox(
-                sandbox, model, opencode_api_key, setup_sh, mcp_server, opencode_config, prompt
+    try:
+        await setup_sandbox(sandbox, resolved_model, opencode_api_key)
+
+        session_id = await create_session(sandbox, title=f"trajectory-{trajectory_id}")
+        if not session_id:
+            raise RuntimeError("Failed to create OpenCode session")
+
+        print(f"OpenCode session: {session_id}")
+        await send_initial_prompt(sandbox, session_id, PROMPT, resolved_model)
+        await tail_sandbox_logs(sandbox)
+
+        await debug_endpoint_json(sandbox, "config", "http://localhost:4096/config")
+        await debug_endpoint_json(sandbox, "provider", "http://localhost:4096/provider")
+        await debug_endpoint_json(sandbox, "session_status", "http://localhost:4096/session/status")
+        await debug_endpoint_json(sandbox, "session", f"http://localhost:4096/session/{session_id}")
+        await debug_endpoint_json(
+            sandbox, "messages", f"http://localhost:4096/session/{session_id}/message"
+        )
+
+        tracker = SolveTracker()
+        last_message_id: str | None = None
+        turn_count = 0
+        consecutive_idle_turns = 0
+        MAX_IDLE_TURNS = 3
+
+        while True:
+            await asyncio.sleep(5)
+
+            print(
+                f"[poll] elapsed={int(time.monotonic() - start_time)}s turn={turn_count} "
+                f"idle={consecutive_idle_turns} last_msg={last_message_id}"
             )
 
-            session_id = create_session(sandbox, title=f"trajectory-{trajectory_id}")
-            if not session_id:
-                raise RuntimeError("Failed to create OpenCode session")
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout_seconds:
+                await end_session(
+                    sandbox,
+                    trajectory_id,
+                    session_id,
+                    turn_count,
+                    "timeout",
+                    tracker,
+                    last_message_id,
+                    resolved_model,
+                )
+                return trajectory_id
 
-            print(f"OpenCode session: {session_id}")
-            send_initial_prompt(sandbox, session_id, prompt)
+            if not await is_opencode_healthy(sandbox):
+                await end_session(
+                    sandbox,
+                    trajectory_id,
+                    session_id,
+                    turn_count,
+                    "agent_error",
+                    tracker,
+                    last_message_id,
+                    resolved_model,
+                )
+                return trajectory_id
 
-            tracker = SolveTracker()
-            last_message_id: str | None = None
-            turn_count = 0
-            consecutive_idle_turns = 0
-            MAX_IDLE_TURNS = 3
+            messages = await get_messages(sandbox, session_id)
+            print(f"[poll] messages_received={len(messages)}")
+            new_turn = detect_new_turn(messages, last_message_id)
 
-            while True:
-                await asyncio.sleep(5)
+            if (time.monotonic() - start_time) % 30 < 5:
+                await tail_sandbox_logs(sandbox)
+                await debug_endpoint_json(
+                    sandbox, "session_status", "http://localhost:4096/session/status", limit=2000
+                )
 
-                elapsed = time.monotonic() - start_time
-                if elapsed > timeout_seconds:
+            if new_turn:
+                turn_count += 1
+                info = new_turn.get("info", {})
+                last_message_id = info.get("id")
+                parts = new_turn.get("parts", [])
+
+                print(
+                    f"[turn] new message id={last_message_id} parts={len(parts)} tools={has_tool_calls(parts)}"
+                )
+
+                envoi_calls = extract_envoi_calls(parts)
+                tracker.update(envoi_calls)
+
+                git_commit = await get_git_commit(sandbox)
+
+                record = TurnRecord(
+                    trajectory_id=trajectory_id,
+                    session_id=session_id,
+                    turn=turn_count,
+                    timestamp=datetime.now(UTC).isoformat(),
+                    agent_model=resolved_model,
+                    git_commit=git_commit,
+                    message_id=last_message_id,
+                    envoi_calls=envoi_calls,
+                )
+                append_jsonl_record(trajectory_id, record)
+
+                print(f"Turn {turn_count}: {len(envoi_calls)} envoi calls, commit={git_commit}")
+
+                if tracker.is_fully_solved():
                     await end_session(
                         sandbox,
                         trajectory_id,
                         session_id,
                         turn_count,
-                        "timeout",
+                        "solved",
                         tracker,
                         last_message_id,
-                        model,
+                        resolved_model,
                     )
                     return trajectory_id
 
-                if not is_opencode_healthy(sandbox):
+                if turn_count >= max_turns:
                     await end_session(
                         sandbox,
                         trajectory_id,
                         session_id,
                         turn_count,
-                        "agent_error",
+                        "turn_limit",
                         tracker,
                         last_message_id,
-                        model,
+                        resolved_model,
                     )
                     return trajectory_id
 
-                messages = get_messages(sandbox, session_id)
-                new_turn = detect_new_turn(messages, last_message_id)
+                if has_tool_calls(parts):
+                    consecutive_idle_turns = 0
+                else:
+                    consecutive_idle_turns += 1
 
-                if new_turn:
-                    turn_count += 1
-                    info = new_turn.get("info", {})
-                    last_message_id = info.get("id")
-                    parts = new_turn.get("parts", [])
+                if turn_count >= 5 and consecutive_idle_turns >= MAX_IDLE_TURNS:
+                    git_has_changes = await check_git_has_changes(sandbox)
+                    if not git_has_changes:
+                        print("Agent appears done. Running all tests...")
+                        all_results = await run_all_tests(sandbox, session_id)
 
-                    envoi_calls = extract_envoi_calls(parts)
-                    tracker.update(envoi_calls)
+                        if all_results["all_passed"]:
+                            tracker.update(all_results["calls"])
+                            if tracker.is_fully_solved():
+                                await end_session(
+                                    sandbox,
+                                    trajectory_id,
+                                    session_id,
+                                    turn_count,
+                                    "solved",
+                                    tracker,
+                                    last_message_id,
+                                    resolved_model,
+                                )
+                                return trajectory_id
 
-                    git_commit = get_git_commit(sandbox)
-
-                    record = TurnRecord(
-                        trajectory_id=trajectory_id,
-                        session_id=session_id,
-                        turn=turn_count,
-                        timestamp=datetime.now(UTC).isoformat(),
-                        agent_model=model,
-                        git_commit=git_commit,
-                        message_id=last_message_id,
-                        envoi_calls=envoi_calls,
-                    )
-                    append_jsonl_record(trajectory_id, record)
-
-                    print(f"Turn {turn_count}: {len(envoi_calls)} envoi calls, commit={git_commit}")
-
-                    if tracker.is_fully_solved():
-                        await end_session(
-                            sandbox,
-                            trajectory_id,
-                            session_id,
-                            turn_count,
-                            "solved",
-                            tracker,
-                            last_message_id,
-                            model,
-                        )
-                        return trajectory_id
-
-                    if turn_count >= max_turns:
-                        await end_session(
-                            sandbox,
-                            trajectory_id,
-                            session_id,
-                            turn_count,
-                            "turn_limit",
-                            tracker,
-                            last_message_id,
-                            model,
-                        )
-                        return trajectory_id
-
-                    if has_tool_calls(parts):
-                        consecutive_idle_turns = 0
-                    else:
-                        consecutive_idle_turns += 1
-
-                    if turn_count >= 5 and consecutive_idle_turns >= MAX_IDLE_TURNS:
-                        git_has_changes = check_git_has_changes(sandbox)
-                        if not git_has_changes:
-                            print("Agent appears done. Running all tests...")
-                            all_results = await run_all_tests(sandbox, session_id)
-
-                            if all_results["all_passed"]:
-                                tracker.update(all_results["calls"])
-                                if tracker.is_fully_solved():
-                                    await end_session(
-                                        sandbox,
-                                        trajectory_id,
-                                        session_id,
-                                        turn_count,
-                                        "solved",
-                                        tracker,
-                                        last_message_id,
-                                        model,
+                        failed_paths = tracker.get_unsolved_paths()
+                        if failed_paths:
+                            details = []
+                            for p in failed_paths[:5]:
+                                call = tracker.get_latest_call_for_path(p)
+                                if call and call.result:
+                                    details.append(
+                                        f"  - {p}: {call.result.passed}/{call.result.total}"
                                     )
-                                    return trajectory_id
+                                else:
+                                    details.append(f"  - {p}: not run")
 
-                            failed_paths = tracker.get_unsolved_paths()
-                            if failed_paths:
-                                details = []
-                                for p in failed_paths[:5]:
-                                    call = tracker.get_latest_call_for_path(p)
-                                    if call and call.result:
-                                        details.append(
-                                            f"  - {p}: {call.result.passed}/{call.result.total}"
-                                        )
-                                    else:
-                                        details.append(f"  - {p}: not run")
+                            reinject_msg = (
+                                "Some tests are still failing.\n\n"
+                                "Failed test suites:\n"
+                                + "\n".join(details)
+                                + "\n\nPlease continue working and pass ALL tests."
+                            )
+                            await send_user_message(
+                                sandbox, session_id, reinject_msg, resolved_model
+                            )
+                            consecutive_idle_turns = 0
+                            print(f"Re-injected with {len(failed_paths)} failed paths")
+            else:
+                print("[poll] no new assistant turn yet")
 
-                                reinject_msg = f"""Some tests are still failing.
-
-Failed test suites:
-{chr(10).join(details)}
-
-Please continue working and pass ALL tests."""
-                                send_user_message(sandbox, session_id, reinject_msg)
-                                consecutive_idle_turns = 0
-                                print(f"Re-injected with {len(failed_paths)} failed paths")
-
-        except Exception as e:
-            print(f"Error: {e}")
-            raise
+    except Exception as e:
+        print(f"Error: {e}")
+        raise
+    finally:
+        try:
+            await sandbox.terminate.aio()
+        except Exception:
+            pass
 
     return trajectory_id
+
+
+# ---------------------------------------------------------------------------
+# Sandbox setup
+# ---------------------------------------------------------------------------
 
 
 async def setup_sandbox(
     sandbox: modal.Sandbox,
     model: str,
     opencode_api_key: str,
-    setup_sh: str,
-    mcp_server: str,
-    opencode_config: str,
-    prompt: str,
 ) -> None:
     print("Setting up sandbox...")
+    print(f"[setup] resolved model={model}")
 
-    sandbox_write_file(sandbox, "/tmp/upload/setup.sh", setup_sh)
-    sandbox_write_file(sandbox, "/tmp/upload/mcp_server.py", mcp_server)
-    sandbox_write_file(sandbox, "/tmp/upload/opencode.jsonc", opencode_config)
-    sandbox_write_file(sandbox, "/tmp/upload/opencode_api_key.txt", opencode_api_key)
+    print("[setup] writing setup.sh")
+    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
+    print("[setup] writing mcp_server.py")
+    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
+    print("[setup] writing opencode_api_key")
+    await sandbox_write_file(sandbox, "/tmp/upload/opencode_api_key.txt", opencode_api_key)
 
-    for py_file in ENVIRONMENT_DIR.rglob("*.py"):
-        rel = py_file.relative_to(ENVIRONMENT_DIR)
-        content = py_file.read_text()
-        sandbox_write_file(sandbox, f"/environment/{rel}", content)
+    config_override = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
+    print("[setup] writing opencode config")
+    await sandbox_write_file(sandbox, "/workspace/opencode.jsonc", config_override)
 
-    for c_file in ENVIRONMENT_DIR.rglob("*.c"):
-        rel = c_file.relative_to(ENVIRONMENT_DIR)
-        content = c_file.read_text()
-        sandbox_write_file(sandbox, f"/environment/{rel}", content)
+    print(f"[setup] uploading env py files: {len(ENVIRONMENT_PY_FILES)}")
+    for rel, content in ENVIRONMENT_PY_FILES.items():
+        await sandbox_write_file(sandbox, f"/environment/{rel}", content)
 
-    for txt_file in ENVIRONMENT_DIR.rglob("*.txt"):
-        rel = txt_file.relative_to(ENVIRONMENT_DIR)
-        content = txt_file.read_text()
-        sandbox_write_file(sandbox, f"/environment/{rel}", content)
+    print(f"[setup] uploading env c files: {len(ENVIRONMENT_C_FILES)}")
+    for rel, content in ENVIRONMENT_C_FILES.items():
+        await sandbox_write_file(sandbox, f"/environment/{rel}", content)
 
-    config_override = opencode_config.replace('"model": "glm-5-free"', f'"model": "{model}"')
-    sandbox_write_file(sandbox, "/tmp/upload/opencode.jsonc", config_override)
+    print(f"[setup] uploading env txt files: {len(ENVIRONMENT_TXT_FILES)}")
+    for rel, content in ENVIRONMENT_TXT_FILES.items():
+        await sandbox_write_file(sandbox, f"/environment/{rel}", content)
 
-    exit_code, stdout, stderr = sandbox_run(sandbox, "bash /tmp/upload/setup.sh", timeout=600)
-    print(f"Setup output:\n{stdout}")
+    print("[setup] running setup.sh")
+    exit_code, stdout, stderr = await sandbox_run(sandbox, "bash /tmp/upload/setup.sh", timeout=600)
+    print(f"Setup stdout:\n{stdout}")
+    if stderr:
+        print(f"Setup stderr:\n{stderr}")
     if exit_code != 0:
-        raise RuntimeError(f"Setup failed: {stderr}")
+        raise RuntimeError(f"Setup failed (exit {exit_code}): {stderr}")
+
+
+# ---------------------------------------------------------------------------
+# Run all tests (for "agent done" detection)
+# ---------------------------------------------------------------------------
 
 
 async def run_all_tests(sandbox: modal.Sandbox, session_id: str) -> dict[str, Any]:
     calls: list[EnvoiCall] = []
 
     for path in REQUIRED_PATHS:
-        _, stdout, _ = sandbox_run(
+        _, stdout, _ = await sandbox_run(
             sandbox,
             f"curl -sf -X POST http://localhost:8000/session/{session_id}/test/{path}",
             timeout=300,
@@ -579,6 +820,11 @@ async def run_all_tests(sandbox: modal.Sandbox, session_id: str) -> dict[str, An
     }
 
 
+# ---------------------------------------------------------------------------
+# End session
+# ---------------------------------------------------------------------------
+
+
 async def end_session(
     sandbox: modal.Sandbox,
     trajectory_id: str,
@@ -591,7 +837,7 @@ async def end_session(
 ) -> None:
     print(f"Ending session: {reason}")
 
-    final_commit = get_git_commit(sandbox)
+    final_commit = await get_git_commit(sandbox)
 
     end_record = TurnRecord(
         trajectory_id=trajectory_id,
@@ -611,11 +857,11 @@ async def end_session(
     append_jsonl_record(trajectory_id, end_record)
 
     try:
-        sandbox_run(
+        await sandbox_run(
             sandbox, "cd /workspace && git bundle create /tmp/repo.bundle --all", timeout=60
         )
-        _, bundle_stdout, _ = sandbox_run(sandbox, "cat /tmp/repo.bundle | base64", timeout=60)
-        bundle_data = base64.b64decode(bundle_stdout)
+        _, bundle_b64, _ = await sandbox_run(sandbox, "base64 /tmp/repo.bundle", timeout=60)
+        bundle_data = base64.b64decode(bundle_b64.strip())
         upload_file(trajectory_id, "repo.bundle", bundle_data)
         print("Uploaded git bundle to S3")
     except Exception as e:
@@ -624,13 +870,18 @@ async def end_session(
     print(f"Session ended: {reason}, {turn_count} turns")
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+
 @app.local_entrypoint()
-def main(
+async def main(
     model: str = DEFAULT_MODEL,
     max_turns: int = 1000,
     trajectory_id: str | None = None,
 ) -> None:
-    result = run_trajectory.remote(
+    result = await run_trajectory.remote.aio(
         model=model,
         max_turns=max_turns,
         trajectory_id=trajectory_id,

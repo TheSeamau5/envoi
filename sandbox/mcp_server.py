@@ -1,9 +1,8 @@
 """
 MCP server that wraps envoi test calls.
 
-This server exposes a single tool `run_tests` that the agent can use
-to run C compiler tests. It connects to the envoi runtime running on
-localhost:8000 and forwards test requests.
+Each run_tests call creates a fresh envoi session with the current /workspace
+contents so that the latest code is always tested.
 """
 
 from __future__ import annotations
@@ -17,17 +16,7 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("envoi-tests")
 
-_envoi_session: envoi.Session | None = None
-_envoi_client: envoi.Client | None = None
-
-
-async def get_envoi_session() -> envoi.Session:
-    global _envoi_session, _envoi_client
-    if _envoi_session is None:
-        _envoi_client = await envoi.connect("http://localhost:8000")
-        docs = envoi.Documents("/workspace")
-        _envoi_session = await _envoi_client.session(timeout_seconds=7200, submission=docs)
-    return _envoi_session
+ENVOI_URL = "http://localhost:8000"
 
 
 @mcp.tool()
@@ -46,12 +35,19 @@ async def run_tests(test_path: str) -> str:
     Returns:
         JSON object with test results including passed/failed counts and details.
     """
+    print(f"[mcp] run_tests called: {test_path}")
     start_time = time.monotonic()
     timestamp = datetime.now(UTC).isoformat()
 
     try:
-        session = await get_envoi_session()
-        result = await session.test(test_path)
+        docs = envoi.Documents("/workspace")
+        async with await envoi.connect_session(
+            ENVOI_URL,
+            submission=docs,
+            session_timeout_seconds=3600,
+        ) as session:
+            result = await session.test(test_path)
+
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
         response = {
@@ -62,6 +58,7 @@ async def run_tests(test_path: str) -> str:
             "error": None,
             "result": result,
         }
+        print(f"[mcp] run_tests success: {test_path} duration_ms={duration_ms}")
     except Exception as e:
         duration_ms = int((time.monotonic() - start_time) * 1000)
         response = {
@@ -72,6 +69,7 @@ async def run_tests(test_path: str) -> str:
             "error": str(e),
             "result": None,
         }
+        print(f"[mcp] run_tests error: {test_path} duration_ms={duration_ms} error={e}")
 
     return json.dumps(response)
 
