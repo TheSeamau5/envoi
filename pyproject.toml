@@ -13,6 +13,7 @@ dependencies = [
     "boto3>=1.34.0",
     "modal>=0.60.0",
     "python-dotenv>=1.0.0",
+    "opencode-ai>=0.1.0a36",
 ]
 
 [project.optional-dependencies]
