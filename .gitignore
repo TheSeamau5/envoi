@@ -10,5 +10,5 @@ output/
 *.egg-info/
 dist/
 build/
-.envoi-repo/
+envoi-repo/
 uv.lock
