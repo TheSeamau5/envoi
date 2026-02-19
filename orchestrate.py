@@ -206,12 +206,26 @@ def extract_envoi_calls(message_parts: list[dict[str, Any]]) -> list[EnvoiCall]:
                         calls.append(EnvoiCall(**data))
                     except json.JSONDecodeError:
                         pass
+        if part.get("type") == "tool" and part.get("tool") == "run_tests":
+            state = part.get("state", {})
+            if state.get("status") == "completed":
+                output = state.get("output") or state.get("metadata", {}).get("output") or ""
+                try:
+                    if isinstance(output, str):
+                        data = json.loads(output)
+                    elif isinstance(output, dict):
+                        data = output
+                    else:
+                        data = json.loads(str(output))
+                    calls.append(EnvoiCall(**data))
+                except Exception:
+                    pass
     return calls
 
 
 def has_tool_calls(message_parts: list[dict[str, Any]]) -> bool:
     for part in message_parts:
-        if part.get("type") == "tool_use":
+        if part.get("type") in {"tool_use", "tool"}:
             return True
     return False
 
@@ -326,10 +340,16 @@ sandbox_image = (
 # ---------------------------------------------------------------------------
 
 
-async def sandbox_run(sandbox: modal.Sandbox, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
+async def sandbox_run(
+    sandbox: modal.Sandbox,
+    cmd: str,
+    timeout: int = 60,
+    quiet: bool = False,
+) -> tuple[int, str, str]:
     """Execute a command inside the sandbox and return (exit_code, stdout, stderr)."""
     start = time.monotonic()
-    print(f"[sandbox_run] start cmd={cmd[:200]}")
+    if not quiet:
+        print(f"[sandbox_run] start cmd={cmd[:200]}")
     proc = await sandbox.exec.aio("bash", "-c", cmd)
     stdout = ""
     stderr = ""
@@ -340,10 +360,11 @@ async def sandbox_run(sandbox: modal.Sandbox, cmd: str, timeout: int = 60) -> tu
     await proc.wait.aio()
     exit_code = proc.returncode or 0
     duration = time.monotonic() - start
-    print(
-        f"[sandbox_run] done exit={exit_code} duration={duration:.2f}s "
-        f"stdout_len={len(stdout)} stderr_len={len(stderr)}"
-    )
+    if not quiet:
+        print(
+            f"[sandbox_run] done exit={exit_code} duration={duration:.2f}s "
+            f"stdout_len={len(stdout)} stderr_len={len(stderr)}"
+        )
     if exit_code != 0:
         print(f"[sandbox_run] exit_code={exit_code}")
         if stderr:
@@ -403,6 +424,8 @@ def summarize_tool_input(name: str, input_data: Any) -> str:
         return truncate_text(str(input_data), limit=200)
     if name == "bash":
         return truncate_text(input_data.get("command", ""), limit=200)
+    if name == "read":
+        return str(input_data.get("filePath") or input_data.get("path") or "?")
     if name in {"write", "edit"}:
         path = input_data.get("filePath") or input_data.get("path") or "?"
         content = input_data.get("content") or input_data.get("newString") or ""
@@ -434,6 +457,17 @@ def log_message_parts(message: dict[str, Any]) -> None:
             tool_id = part.get("id", "")
             summary = summarize_tool_input(name, part.get("input", {}))
             print(f"[msg] part[{idx}] tool_use: {name} status={status} id={tool_id} {summary}")
+        elif ptype == "tool":
+            name = part.get("tool", "?")
+            call_id = part.get("callID", "")
+            state = part.get("state", {})
+            status = state.get("status", "")
+            summary = summarize_tool_input(name, state.get("input", {}))
+            output = state.get("output") or state.get("metadata", {}).get("output") or ""
+            output_preview = truncate_text(str(output), limit=300) if output else ""
+            print(f"[msg] part[{idx}] tool: {name} status={status} callID={call_id} {summary}")
+            if output_preview:
+                print(f"[msg] part[{idx}] tool_output: {output_preview}")
         elif ptype == "tool_result":
             status = part.get("status", "")
             tool_use_id = part.get("tool_use_id", "")
@@ -442,8 +476,46 @@ def log_message_parts(message: dict[str, Any]) -> None:
                 f"[msg] part[{idx}] tool_result: status={status} tool_use_id={tool_use_id} "
                 f"{truncate_text(str(content), limit=500)}"
             )
+        elif ptype == "patch":
+            files = part.get("files", [])
+            print(f"[msg] part[{idx}] patch files={files}")
+        elif ptype in {"step-start", "step-finish"}:
+            reason = part.get("reason", "")
+            print(f"[msg] part[{idx}] {ptype} reason={reason}")
         else:
             print(f"[msg] part[{idx}] {ptype}: {truncate_text(json.dumps(part), limit=500)}")
+
+
+def message_signature(message: dict[str, Any]) -> str:
+    parts = message.get("parts", [])
+    sig: list[tuple[Any, ...]] = []
+    for part in parts:
+        ptype = part.get("type", "unknown")
+        if ptype == "text":
+            text = part.get("text", "")
+            sig.append(("text", len(text)))
+        elif ptype == "tool":
+            state = part.get("state", {})
+            output = state.get("output") or state.get("metadata", {}).get("output") or ""
+            sig.append(
+                (
+                    "tool",
+                    part.get("tool"),
+                    state.get("status"),
+                    len(str(output)),
+                )
+            )
+        elif ptype == "tool_use":
+            sig.append(("tool_use", part.get("name"), part.get("status")))
+        elif ptype == "tool_result":
+            content = part.get("content", "")
+            sig.append(("tool_result", part.get("status"), len(str(content))))
+        elif ptype == "patch":
+            files = part.get("files", [])
+            sig.append(("patch", len(files)))
+        else:
+            sig.append((ptype, part.get("id")))
+    return json.dumps(sig, sort_keys=True)
 
 
 def find_messages_after(
@@ -538,33 +610,44 @@ async def ensure_opencode_auth(sandbox: modal.Sandbox, api_key: str) -> bool:
     return exit_code == 0 and status is not None and 200 <= status < 300
 
 
-async def get_messages(sandbox: modal.Sandbox, session_id: str) -> list[dict[str, Any]]:
+async def get_messages(
+    sandbox: modal.Sandbox,
+    session_id: str,
+    quiet: bool = False,
+) -> list[dict[str, Any]]:
     _, stdout, _ = await sandbox_run(
         sandbox,
         f"curl -sS -w '\nHTTP_STATUS:%{{http_code}}' http://localhost:4096/session/{session_id}/message",
         timeout=30,
+        quiet=quiet,
     )
     body, status = parse_http_status(stdout)
     if status is not None and status >= 400:
         print(f"[get_messages] http_status={status}")
     try:
         data = json.loads(body) if body.strip() else []
-        summary = summarize_messages(data)
-        print(
-            f"[get_messages] count={summary['count']} last_role={summary['last_role']} "
-            f"last_id={summary['last_id']} tail_roles={summary['tail_roles']}"
-        )
+        if not quiet:
+            summary = summarize_messages(data)
+            print(
+                f"[get_messages] count={summary['count']} last_role={summary['last_role']} "
+                f"last_id={summary['last_id']} tail_roles={summary['tail_roles']}"
+            )
         return data
     except json.JSONDecodeError:
         print("[get_messages] failed to parse JSON")
         return []
 
 
-async def get_session_status(sandbox: modal.Sandbox, session_id: str) -> str:
+async def get_session_status(
+    sandbox: modal.Sandbox,
+    session_id: str,
+    quiet: bool = False,
+) -> str:
     exit_code, stdout, stderr = await sandbox_run(
         sandbox,
         "curl -sS -w '\nHTTP_STATUS:%{http_code}' http://localhost:4096/session/status",
         timeout=10,
+        quiet=quiet,
     )
     body, status = parse_http_status(stdout)
     if exit_code != 0 or (status is not None and status >= 400):
@@ -578,7 +661,8 @@ async def get_session_status(sandbox: modal.Sandbox, session_id: str) -> str:
         print("[session_status] failed to parse JSON")
         return "unknown"
     state = data.get(session_id, {}).get("type", "idle")
-    print(f"[session_status] {session_id} -> {state}")
+    if not quiet:
+        print(f"[session_status] {session_id} -> {state}")
     return state
 
 
@@ -591,11 +675,16 @@ async def wait_for_agent_idle(
 ) -> tuple[list[dict[str, Any]], str | None, str, bool]:
     start = time.monotonic()
     poll_count = 0
-    new_messages: list[dict[str, Any]] = []
-    current_last_id = last_message_id
     status = "unknown"
     last_status = None
     timed_out = False
+    current_last_id = last_message_id
+    message_signatures: dict[str, str] = {}
+    turn_messages: dict[str, dict[str, Any]] = {}
+    last_change_time = start
+    last_change_desc = "start"
+    last_heartbeat = start
+    heartbeat_interval = 15
 
     print(
         f"[wait] starting wait_for_agent_idle poll_interval={poll_interval}s "
@@ -606,28 +695,48 @@ async def wait_for_agent_idle(
         await asyncio.sleep(poll_interval)
         poll_count += 1
 
-        status = await get_session_status(sandbox, session_id)
+        status = await get_session_status(sandbox, session_id, quiet=True)
         if status != last_status:
             print(f"[wait] status change {last_status} -> {status}")
             last_status = status
+            last_change_time = time.monotonic()
+            last_change_desc = f"status {status}"
 
-        if not await is_opencode_healthy(sandbox):
+        if not await is_opencode_healthy(sandbox, quiet=True):
             print("[wait] OpenCode unhealthy during wait")
             break
 
-        messages = await get_messages(sandbox, session_id)
-        fresh = find_messages_after(messages, current_last_id)
-        if fresh:
-            print(f"[wait] new_messages={len(fresh)} total_messages={len(messages)}")
-            for msg in fresh:
+        messages = await get_messages(sandbox, session_id, quiet=True)
+        if messages:
+            current_last_id = messages[-1].get("info", {}).get("id", current_last_id)
+        changed_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            msg_id = msg.get("info", {}).get("id", "")
+            if not msg_id:
+                continue
+            sig = message_signature(msg)
+            if message_signatures.get(msg_id) != sig:
+                message_signatures[msg_id] = sig
+                changed_messages.append(msg)
+                turn_messages[msg_id] = msg
+
+        if changed_messages:
+            print(f"[wait] message updates={len(changed_messages)} total_messages={len(messages)}")
+            for msg in changed_messages:
                 log_message_parts(msg)
-            new_messages.extend(fresh)
-            current_last_id = fresh[-1].get("info", {}).get("id", current_last_id)
-        else:
-            print(f"[wait] no new messages (total={len(messages)})")
+            current_last_id = messages[-1].get("info", {}).get("id", current_last_id)
+            last_change_time = time.monotonic()
+            last_change_desc = f"{len(changed_messages)} update(s)"
 
         elapsed = time.monotonic() - start
-        print(f"[wait] poll={poll_count} elapsed={elapsed:.1f}s status={status}")
+        if time.monotonic() - last_heartbeat >= heartbeat_interval:
+            since_change = time.monotonic() - last_change_time
+            print(
+                f"[wait] heartbeat elapsed={elapsed:.0f}s status={status} "
+                f"messages={len(messages)} last_change={since_change:.0f}s ago "
+                f"({last_change_desc})"
+            )
+            last_heartbeat = time.monotonic()
 
         if poll_count % 10 == 0:
             await tail_sandbox_logs(sandbox)
@@ -639,16 +748,26 @@ async def wait_for_agent_idle(
             timed_out = True
             break
 
-    messages = await get_messages(sandbox, session_id)
-    fresh = find_messages_after(messages, current_last_id)
-    if fresh:
-        print(f"[wait] final new_messages={len(fresh)}")
-        for msg in fresh:
+    messages = await get_messages(sandbox, session_id, quiet=True)
+    if messages:
+        current_last_id = messages[-1].get("info", {}).get("id", current_last_id)
+    changed_messages = []
+    for msg in messages:
+        msg_id = msg.get("info", {}).get("id", "")
+        if not msg_id:
+            continue
+        sig = message_signature(msg)
+        if message_signatures.get(msg_id) != sig:
+            message_signatures[msg_id] = sig
+            changed_messages.append(msg)
+            turn_messages[msg_id] = msg
+    if changed_messages:
+        print(f"[wait] final message updates={len(changed_messages)}")
+        for msg in changed_messages:
             log_message_parts(msg)
-        new_messages.extend(fresh)
-        current_last_id = fresh[-1].get("info", {}).get("id", current_last_id)
+        current_last_id = messages[-1].get("info", {}).get("id", current_last_id)
 
-    return new_messages, current_last_id, status, timed_out
+    return list(turn_messages.values()), current_last_id, status, timed_out
 
 
 async def send_user_message(
@@ -766,17 +885,19 @@ def detect_new_turn(
     return None
 
 
-async def is_opencode_healthy(sandbox: modal.Sandbox) -> bool:
+async def is_opencode_healthy(sandbox: modal.Sandbox, quiet: bool = False) -> bool:
     _, stdout, _ = await sandbox_run(
-        sandbox, "curl -sf http://localhost:4096/global/health", timeout=10
+        sandbox, "curl -sf http://localhost:4096/global/health", timeout=10, quiet=quiet
     )
     try:
         data = json.loads(stdout)
         healthy = data.get("healthy", False)
-        print(f"[opencode_health] healthy={healthy}")
+        if not quiet:
+            print(f"[opencode_health] healthy={healthy}")
         return healthy
     except json.JSONDecodeError:
-        print("[opencode_health] failed to parse JSON")
+        if not quiet:
+            print("[opencode_health] failed to parse JSON")
         return False
 
 
@@ -902,6 +1023,7 @@ async def run_trajectory(
                 f"[loop] start turn={turn_count} elapsed_total={int(elapsed_total)}s "
                 f"max_turns={max_turns}"
             )
+            print("[loop] waiting for agent idle; S3 write happens after turn completes")
 
             if elapsed_total > timeout_seconds:
                 await end_session(
