@@ -135,6 +135,21 @@ def redact_secrets(value: Any) -> Any:
     return value
 
 
+def compute_cycle_timeout_seconds(
+    *,
+    remaining_steps: int,
+    remaining_run_seconds: float,
+    message_timeout_seconds: int,
+) -> int:
+    """Derive an adaptive per-cycle timeout from remaining step and run budget."""
+    timeout_from_steps = max(
+        MIN_CYCLE_TIMEOUT_SECONDS,
+        remaining_steps * SECONDS_PER_REMAINING_STEP,
+    )
+    timeout_from_run_budget = max(1, int(remaining_run_seconds))
+    return max(1, min(message_timeout_seconds, timeout_from_steps, timeout_from_run_budget))
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -433,17 +448,28 @@ async def sandbox_run(
     cmd: str,
     timeout: int = 60,
     quiet: bool = False,
+    stream_output: bool = False,
 ) -> tuple[int, str, str]:
     """Execute a command inside the sandbox."""
     if not quiet:
         print(f"[run] {cmd[:200]}")
     proc = await sandbox.exec.aio("bash", "-c", cmd)
-    stdout, stderr = "", ""
-    async for chunk in proc.stdout:
-        stdout += chunk
-    async for chunk in proc.stderr:
-        stderr += chunk
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    async def drain_stream(stream: Any, sink: list[str]) -> None:
+        async for chunk in stream:
+            sink.append(chunk)
+            if stream_output and chunk:
+                builtins.print(chunk, end="", flush=True)
+
+    await asyncio.gather(
+        drain_stream(proc.stdout, stdout_chunks),
+        drain_stream(proc.stderr, stderr_chunks),
+    )
     await proc.wait.aio()
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
     exit_code = proc.returncode or 0
     if exit_code != 0:
         print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
@@ -475,6 +501,7 @@ async def run_opencode_client(
     *,
     timeout: int = 60,
     quiet: bool = False,
+    stream_output: bool = False,
 ) -> dict[str, Any] | None:
     command = "python3 /sandbox/opencode_client.py " + " ".join(shlex.quote(a) for a in args)
     exit_code, stdout, stderr = await sandbox_run(
@@ -482,6 +509,7 @@ async def run_opencode_client(
         command,
         timeout=timeout,
         quiet=quiet,
+        stream_output=stream_output,
     )
     if exit_code != 0:
         if stderr:
@@ -519,6 +547,7 @@ async def send_message_blocking(
     session_id: str,
     text: str,
     timeout: int = MESSAGE_TIMEOUT_SECONDS,
+    max_steps_this_cycle: int = 0,
 ) -> dict[str, Any] | None:
     prompt_path = "/tmp/prompt.txt"
     await sandbox_write_file(sandbox, prompt_path, text, ensure_dir=False)
@@ -526,8 +555,17 @@ async def send_message_blocking(
 
     response = await run_opencode_client(
         sandbox,
-        ["chat", "--session-id", session_id, "--text-file", prompt_path],
+        [
+            "chat-stream",
+            "--session-id",
+            session_id,
+            "--text-file",
+            prompt_path,
+            "--max-steps",
+            str(max_steps_this_cycle),
+        ],
         timeout=timeout,
+        stream_output=True,
     )
     if response is None:
         return None
@@ -535,15 +573,34 @@ async def send_message_blocking(
     status_code = response.get("status_code")
     ok = bool(response.get("ok"))
     body = response.get("body")
+    meta = response.get("meta")
+    meta_obj = meta if isinstance(meta, dict) else {}
+    aborted_for_step_limit = bool(meta_obj.get("aborted_for_step_limit"))
     print(f"[prompt] done http={status_code} ok={ok}")
 
     if not ok:
+        if aborted_for_step_limit:
+            print("[prompt] step limit reached during stream; ending current cycle")
+            if isinstance(body, dict):
+                stream_meta = body.get("_stream")
+                stream_obj = stream_meta if isinstance(stream_meta, dict) else {}
+                stream_obj.update(meta_obj)
+                body["_stream"] = stream_obj
+                return body
+            return {"_stream": dict(meta_obj)}
         print(f"[prompt] ERROR: {truncate_text(str(response.get('error') or body), limit=1000)}")
         return None
 
     if not isinstance(body, dict):
+        if aborted_for_step_limit:
+            return {"_stream": dict(meta_obj)}
         print(f"[prompt] unexpected response type: {type(body).__name__}")
         return None
+
+    stream_meta = body.get("_stream")
+    stream_obj = stream_meta if isinstance(stream_meta, dict) else {}
+    stream_obj.update(meta_obj)
+    body["_stream"] = stream_obj
 
     return body
 
@@ -954,6 +1011,7 @@ async def run_trajectory(
     model: str = DEFAULT_MODEL,
     max_steps: int = 1000,
     max_turns: int | None = None,  # deprecated; kept for backward compatibility
+    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
 ) -> str:
@@ -964,7 +1022,10 @@ async def run_trajectory(
 
     resolved_model = resolve_model(model)
     print(f"Starting trajectory {trajectory_id}")
-    print(f"model={resolved_model} max_steps={effective_max_steps} timeout={timeout_seconds}s")
+    print(
+        f"model={resolved_model} max_steps={effective_max_steps} "
+        f"timeout={timeout_seconds}s message_timeout={message_timeout_seconds}s"
+    )
 
     opencode_api_key = os.environ.get("OPENCODE_API_KEY", "")
     if not opencode_api_key:
@@ -1013,11 +1074,19 @@ async def run_trajectory(
                 if elapsed > timeout_seconds:
                     end_reason = "timeout"
                     break
+                remaining_run_seconds = timeout_seconds - elapsed
+                remaining_steps = max(1, effective_max_steps - step_count)
+                cycle_timeout_seconds = compute_cycle_timeout_seconds(
+                    remaining_steps=remaining_steps,
+                    remaining_run_seconds=remaining_run_seconds,
+                    message_timeout_seconds=message_timeout_seconds,
+                )
 
                 print(f"\n{'=' * 60}")
                 print(
                     f"CYCLE {cycle_count + 1}  "
-                    f"(steps {step_count}/{effective_max_steps}, elapsed {int(elapsed)}s)"
+                    f"(steps {step_count}/{effective_max_steps}, "
+                    f"timeout {cycle_timeout_seconds}s, elapsed {int(elapsed)}s)"
                 )
                 print(f"{'=' * 60}")
 
@@ -1028,7 +1097,8 @@ async def run_trajectory(
                     sandbox,
                     session_id,
                     prompt_text,
-                    timeout=MESSAGE_TIMEOUT_SECONDS,
+                    timeout=cycle_timeout_seconds,
+                    max_steps_this_cycle=remaining_steps,
                 )
 
                 if response is None:
@@ -1071,8 +1141,13 @@ async def run_trajectory(
                 )
                 git_commit = checkpoint.commit_after or checkpoint.commit_before
 
-                new_steps = count_step_finishes(new_messages)
-                if new_steps == 0:
+                stream_meta = response.get("_stream", {}) if isinstance(response, dict) else {}
+                stream_meta_obj = stream_meta if isinstance(stream_meta, dict) else {}
+                streamed_steps = int(stream_meta_obj.get("step_finishes_seen", 0) or 0)
+                step_limit_abort = bool(stream_meta_obj.get("aborted_for_step_limit"))
+
+                new_steps = max(count_step_finishes(new_messages), streamed_steps)
+                if new_steps == 0 and not step_limit_abort:
                     # Fallback for providers that do not emit explicit step markers.
                     new_steps = 1
                 step_count += new_steps
@@ -1109,6 +1184,10 @@ async def run_trajectory(
 
                 if tracker.is_fully_solved():
                     end_reason = "solved"
+                    break
+
+                if step_limit_abort:
+                    end_reason = "step_limit"
                     break
 
                 if step_count >= effective_max_steps:
@@ -1196,12 +1275,14 @@ async def main(
     model: str = DEFAULT_MODEL,
     max_steps: int = 1000,
     max_turns: int | None = None,
+    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     trajectory_id: str | None = None,
 ) -> None:
     result = await run_trajectory.remote.aio(
         model=model,
         max_steps=max_steps,
         max_turns=max_turns,
+        message_timeout_seconds=message_timeout_seconds,
         trajectory_id=trajectory_id,
     )
     print(f"Completed trajectory: {result}")

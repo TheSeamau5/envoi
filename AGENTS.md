@@ -92,8 +92,10 @@ Behavior:
 - Use `uv` for local Python workflows.
 - Main run command:
   ```bash
-  modal run orchestrate.py --model opencode/<model> --max-steps <n>
+  modal run orchestrate.py --max-steps <n>
   ```
+  - Default model: `opencode/gpt-5-nano`
+  - Override model when needed: `--model opencode/<model>`
 - Lint/check:
   ```bash
   uv run ruff check orchestrate.py sandbox/opencode_client.py offline_replay.py
