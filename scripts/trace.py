@@ -24,7 +24,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
         command.append("--detach")
     command.extend(
         [
-            "orchestrate.py",
+            "runner.py",
             "--agent",
             args.agent,
             "--max-parts",
@@ -46,7 +46,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Launch orchestrate.py with short defaults.",
+        description="Launch runner.py with short defaults.",
     )
     parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
     parser.add_argument("--model", default=None)

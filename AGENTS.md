@@ -49,13 +49,15 @@ Schema policy:
 - Artifact and replay contracts are keyed to part indices (`checkout-part`, `part_to_commit`).
 
 ## Architecture At A Glance
-- `orchestrate.py`: main controller. Starts sandbox services, runs turns, captures trace, checkpoints git, uploads artifacts.
-- `sandbox/setup.sh`: boots envoi runtime (`:8000`) and OpenCode server (`:4096`) inside sandbox.
-- `sandbox/mcp_server.py`: exposes `run_tests(test_path)` via MCP; runs envoi tests against `/workspace`.
-- `sandbox/opencode_client.py`: Python SDK CLI wrapper around OpenCode API (`opencode_ai`), returns stable JSON.
+- `task.py`: canonical agent definition (shared system prompt).
+- `runner.py`: main controller. Starts Modal sandbox runtime, runs agent turns, captures trace, checkpoints git, uploads artifacts.
+- `sandbox/modal/setup.sh`: boots envoi runtime (`:8000`) and agent runtime tooling inside Modal sandbox.
+- `sandbox/modal/mcp_server.py`: exposes `run_tests(test_path)` via MCP; runs envoi tests against `/workspace`.
+- `agents/opencode.py`: OpenCode agent client wrapper (stable JSON surface + inline OpenCode config template).
+- `agents/codex.py`: Codex agent client wrapper (stable JSON surface).
 - `environment/main.py`: envoi environment entrypoint (build + test suites).
 - `environment/tests/*`: suite implementations (`basics`, `wacct`, `c_testsuite`, `torture`).
-- `offline_replay.py`: offline artifact consumer (reconstruct repo at part `p`, replay tests by commit).
+- `scripts/offline_replay.py`: offline artifact consumer (reconstruct repo at part `p`, replay tests by commit).
 
 ## Big Technical Decisions (Intent)
 - Single trace object (`agent_trace.json`) instead of append-only JSONL:
@@ -65,7 +67,7 @@ Schema policy:
   - Checkpoint commits happen only when files changed (no duplicate commit noise).
   - Final `repo.bundle` makes full history portable.
 - SDK isolation:
-  - OpenCode API access is centralized in `sandbox/opencode_client.py`.
+  - OpenCode API access is centralized in `agents/opencode.py`.
   - Orchestrator talks to one JSON CLI surface, decoupled from SDK internals.
 
 ## Artifact Contract (S3)
@@ -135,10 +137,10 @@ uv run graph_trace <trajectory_id> --part <p>
 ```
 
 ## How To Reconstruct Repo At Part `p`
-Use `offline_replay.py` directly when you need full control:
+Use the `replay` CLI (implemented in `scripts/offline_replay.py`) when you need full control:
 
 ```bash
-uv run python offline_replay.py \
+uv run replay \
   --mode checkout-part \
   --trajectory-id <trajectory_id> \
   --part <p> \
@@ -152,9 +154,9 @@ What it does:
 3. Clones bundle and checks out that commit.
 
 ## How To Replay Tests Offline
-Use `offline_replay.py` directly when you need full control:
+Use the `replay` CLI (implemented in `scripts/offline_replay.py`) when you need full control:
 ```bash
-uv run python offline_replay.py \
+uv run replay \
   --mode evaluate \
   --trajectory-id <trajectory_id> \
   --output output/offline_eval.json
@@ -166,13 +168,14 @@ Behavior:
 - Maps results back onto each part (`part_to_commit`, `part_evaluations`).
 
 ## Where To Edit What
-- Trace schema/capture behavior: `orchestrate.py` (`PartRecord`, `TurnRecord`, `make_stream_part_callback`, main loop).
-- OpenCode API interactions: `sandbox/opencode_client.py`.
-- Codex stream interactions: `sandbox/codex_client.py`.
-- Sandbox boot/runtime services: `sandbox/setup.sh`.
-- Tool exposure: `sandbox/opencode.jsonc` and `sandbox/mcp_server.py`.
+- Agent definition (shared prompt): `task.py`.
+- Trace schema/capture behavior: `runner.py` (`PartRecord`, `TurnRecord`, `make_stream_part_callback`, main loop).
+- OpenCode agent integration: `agents/opencode.py`.
+- Codex agent integration: `agents/codex.py`.
+- Sandbox boot/runtime services: `sandbox/modal/setup.sh`.
+- Tool exposure: `agents/opencode.py` (inline config template) and `sandbox/modal/mcp_server.py`.
 - Test suite behavior: `environment/tests/*.py`.
-- Offline reconstruction/reporting: `offline_replay.py`.
+- Offline reconstruction/reporting: `scripts/offline_replay.py`.
 - Short launchers: `scripts/trace.py`, `scripts/graph_trace.py`.
 
 ## Operational Notes
@@ -194,11 +197,11 @@ Behavior:
   ```
 - Direct Modal command (full control):
   ```bash
-  modal run orchestrate.py --agent codex --max-parts <n>
+  modal run runner.py --agent codex --max-parts <n>
   ```
 - Lint/check:
   ```bash
-  uv run ruff check orchestrate.py sandbox/opencode_client.py offline_replay.py
+  uv run ruff check task.py runner.py agents/opencode.py agents/codex.py scripts/offline_replay.py scripts/trace.py scripts/graph_trace.py
   ```
 
 ## Important Gotchas

@@ -5,8 +5,8 @@ Given:
 - agent_trace.json (local path or s3:// URI)
 - repo.bundle (local path or s3:// URI)
 
-This script reconstructs repository state per part, evaluates the compiler
-for each unique commit, and writes a machine-readable JSON report.
+This script reconstructs repository state per part, evaluates each unique
+commit in the current task environment, and writes a machine-readable report.
 """
 
 from __future__ import annotations
@@ -30,20 +30,11 @@ import boto3
 import envoi
 import httpx
 
-REQUIRED_PATHS: list[str] = [
-    "basics",
-    *[f"wacct/chapter_{i}" for i in range(1, 21)],
-    *[f"c_testsuite/part_{i}" for i in range(1, 6)],
-    *[f"torture/part_{i}" for i in range(1, 11)],
-]
+from task import TASK_HEAVY_TEST_ROOTS, TASK_REQUIRED_TEST_PATHS, TASK_SUITE_PATHS
 
-HEAVY_TEST_ROOTS: dict[str, Path] = {
-    "wacct": Path("/opt/tests/wacct/tests"),
-    "c_testsuite": Path("/opt/tests/c-testsuite/tests/single-exec"),
-    "torture": Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute"),
-}
-
-SUITE_PATHS: list[str] = ["basics", "wacct", "c_testsuite", "torture"]
+REQUIRED_PATHS: list[str] = list(TASK_REQUIRED_TEST_PATHS)
+HEAVY_TEST_ROOTS: dict[str, Path] = {k: Path(v) for k, v in TASK_HEAVY_TEST_ROOTS.items()}
+SUITE_PATHS: list[str] = list(TASK_SUITE_PATHS)
 
 
 @dataclass
@@ -177,18 +168,10 @@ def checkout_commit(repo_path: Path, commit: str) -> None:
 
 def has_required_test_fixtures(test_paths: list[str]) -> tuple[bool, list[str]]:
     missing: list[str] = []
-    needs_wacct = any(path.startswith("wacct/") for path in test_paths)
-    needs_c_testsuite = any(path.startswith("c_testsuite/") for path in test_paths)
-    needs_torture = any(path.startswith("torture/") for path in test_paths)
-
-    checks = [
-        ("wacct", needs_wacct),
-        ("c_testsuite", needs_c_testsuite),
-        ("torture", needs_torture),
-    ]
-    for key, needed in checks:
-        if needed and not HEAVY_TEST_ROOTS[key].exists():
-            missing.append(str(HEAVY_TEST_ROOTS[key]))
+    for key, root in HEAVY_TEST_ROOTS.items():
+        needed = any(path == key or path.startswith(f"{key}/") for path in test_paths)
+        if needed and not root.exists():
+            missing.append(str(root))
     return len(missing) == 0, missing
 
 
@@ -643,11 +626,9 @@ def build_summary_rows(
 
 def format_summary_table(rows: list[dict[str, Any]]) -> str:
     """Render summary rows as a fixed-width ASCII table."""
-    headers = [
-        "Turn", "Parts", "Commit", "Elapsed",
-        "Tokens(in/out)", "Basics", "WACCT", "C-Suite", "Torture", "Total",
-    ]
-    widths = [5, 9, 10, 8, 15, 9, 9, 9, 9, 9]
+    suite_headers = [suite.replace("_", "-")[:10] for suite in SUITE_PATHS]
+    headers = ["Turn", "Parts", "Commit", "Elapsed", "Tokens(in/out)", *suite_headers, "Total"]
+    widths = [5, 9, 10, 8, 15, *[10 for _ in SUITE_PATHS], 10]
 
     def fmt_suite(suites: dict, name: str) -> str:
         s = suites.get(name, {})
@@ -682,10 +663,7 @@ def format_summary_table(rows: list[dict[str, Any]]) -> str:
             commit,
             row.get("elapsed_human", "?"),
             tok_str,
-            fmt_suite(suites, "basics"),
-            fmt_suite(suites, "wacct"),
-            fmt_suite(suites, "c_testsuite"),
-            fmt_suite(suites, "torture"),
+            *[fmt_suite(suites, suite) for suite in SUITE_PATHS],
             f"{row.get('total_passed', 0)}/{row.get('total_tests', 0)}",
         ]
         lines.append("  ".join(c.ljust(w) for c, w in zip(cols, widths, strict=False)))

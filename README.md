@@ -1,86 +1,106 @@
 # envoi-trace
 
-Environment for iterative agent runs to build a C compiler against an envoi test harness.
+This repo runs agent trajectories where the agent tries to build a real C compiler and improve it against the envoi test harness.
 
-## North Star
-Get the agent to pass all C-compiler suites by iterating on code:
-`edit -> run_tests -> inspect failures -> fix -> repeat`.
+The practical loop is:
+`run agent -> collect trace/artifacts -> analyze -> adjust -> run again`.
 
-## Purpose
-This repo is for running an agent repeatedly in a controlled sandbox so it can:
-- write compiler code,
-- run envoi test suites,
-- fix failures,
-- and progress toward passing all suites.
+## 1) Prerequisites
 
-Tracing and git checkpoints exist to make that iterative process observable and reproducible.
+- Python 3.12+
+- `uv` installed
+- Modal CLI installed and authenticated (`modal setup`)
+- AWS credentials with S3 access (for trace + bundle upload)
+- Agent credentials for whichever backend you use:
+  - Codex: `~/.codex/auth.json` (default path used by `uv run trace`)
+    - fallback: `CODEX_API_KEY` or `OPENAI_API_KEY`
+  - OpenCode: `OPENCODE_API_KEY`
 
-This is not a generic tracing project. The tracing exists to support compiler progress and replay.
+## 2) Setup
 
-## Core Loop
-1. Start a trajectory (`uv run trace`).
-2. Agent edits compiler code in `/workspace`.
-3. Agent calls `run_tests` via MCP against envoi suites.
-4. Every meaningful assistant part is recorded.
-5. Any workspace file changes are checkpointed in git immediately.
-6. Trace + repo history are uploaded to S3 for replay/analysis.
+From repo root:
 
-## Daily Commands
-Run trajectory (defaults: `--agent codex --max-parts 1000`):
+```bash
+uv sync
+cp .env.example .env
+```
+
+Edit `.env` and fill values:
+
+```env
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=...
+AWS_S3_BUCKET=...
+
+OPENCODE_API_KEY=...
+```
+
+Notes:
+- `OPENCODE_API_KEY` is only required when using `--agent opencode`.
+- If you plan to run local analysis commands (`uv run graph_trace`, `uv run replay`), make sure your shell has the same env vars from `.env`.
+
+## 3) Run A Trajectory
+
+Default run (recommended starting point):
 
 ```bash
 uv run trace
 ```
 
-Common run:
+Defaults:
+- agent: `codex`
+- max parts: `1000`
 
-```bash
-uv run trace --agent codex --max-parts 100 --detach
-```
-
-At startup, `trace` prints:
+The launcher prints these immediately at startup:
 - `TRAJECTORY_ID`
 - `TRACE_S3_URI`
 - `BUNDLE_S3_URI`
 
-Typical loop:
-1. `uv run trace --detach`
-2. Copy `TRAJECTORY_ID` from startup logs
-3. `uv run graph_trace <trajectory_id>`
-4. Use results to tune prompt/config and run again
+Save the `TRAJECTORY_ID`; you use it for analysis.
 
-Analyze trajectory by ID:
+Useful options:
+
+```bash
+uv run trace --detach
+uv run trace --max-parts 200
+uv run trace --agent opencode --model opencode/gpt-5-nano
+```
+
+## 4) Analyze A Trajectory
+
+Given a trajectory id:
 
 ```bash
 uv run graph_trace <trajectory_id>
 ```
 
-Checkout repo at a specific part:
+Checkout repository state at a specific part:
 
 ```bash
 uv run graph_trace <trajectory_id> --part <p>
 ```
 
-## Stored Artifacts
-For trajectory `<id>`:
+## 5) What Gets Stored
+
+For trajectory `<id>`, artifacts are uploaded to:
+
 - `s3://<bucket>/trajectories/<id>/agent_trace.json`
 - `s3://<bucket>/trajectories/<id>/repo.bundle`
 
-`agent_trace.json` is part-centric:
-- top-level `parts` is source of truth,
-- each part captures role/type/content summary, timing, repo state, and testing state at that part.
+`agent_trace.json` is part-centric and records per-part timing, content summary, repo checkpoint state, and test call state.
 
-`repo.bundle` is the source of truth for repository reconstruction.
+## 6) Where To Change Behavior
 
-## Full-Control Mode
-For advanced/offline workflows:
+- Task definition and prompt: `task.py`
+- Main orchestration: `runner.py`
+- Agent backends: `agents/codex.py`, `agents/opencode.py`
+- Modal sandbox runtime: `sandbox/modal/setup.sh`
+- Test MCP server: `sandbox/modal/mcp_server.py`
+- Offline replay/analysis engine: `scripts/offline_replay.py`
 
-```bash
-uv run python offline_replay.py --help
-```
-
-## Dev Check
+## 7) Quick Dev Check
 
 ```bash
-uv run ruff check orchestrate.py sandbox/opencode_client.py sandbox/codex_client.py offline_replay.py scripts/trace.py scripts/graph_trace.py
+uv run ruff check task.py runner.py agents/opencode.py agents/codex.py scripts/offline_replay.py scripts/trace.py scripts/graph_trace.py
 ```

@@ -2,7 +2,7 @@
 Minimal Codex CLI wrapper for non-interactive turns.
 
 This script runs inside the Modal sandbox and executes `codex exec --json`,
-then normalizes JSONL events into a message-like structure used by orchestrate.py.
+then normalizes JSONL events into a message-like structure used by runner.py.
 """
 
 from __future__ import annotations

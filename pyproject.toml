@@ -4,7 +4,6 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "envoi @ git+https://github.com/TheSeamau5/envoi.git",
-    "e2b-code-interpreter>=1.0.0",
     "httpx>=0.27.0",
     "aiohttp>=3.10.0",
     "aiofiles>=24.0.0",
@@ -26,6 +25,7 @@ dev = [
 [project.scripts]
 graph_trace = "scripts.graph_trace:main"
 trace = "scripts.trace:main"
+replay = "scripts.offline_replay:main"
 
 [build-system]
 requires = ["hatchling"]

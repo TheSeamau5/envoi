@@ -22,15 +22,10 @@ ENVOI_URL = "http://localhost:8000"
 @mcp.tool()
 async def run_tests(test_path: str) -> str:
     """
-    Run C compiler tests against a test suite.
+    Run task tests against a suite path.
 
     Args:
-        test_path: Test suite path. Options:
-            - "basics" (all basics tests)
-            - "basics/smoke", "basics/variables", "basics/control_flow", etc.
-            - "wacct" (all chapters) or "wacct/chapter_1" through "wacct/chapter_20"
-            - "c_testsuite" (all shards) or "c_testsuite/part_<n>"
-            - "torture" (all shards) or "torture/part_<n>"
+        test_path: Suite path understood by the current envoi environment.
 
     Returns:
         JSON object with test results including passed/failed counts and details.

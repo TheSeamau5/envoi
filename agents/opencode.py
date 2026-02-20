@@ -24,8 +24,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
-from opencode_ai import APIConnectionError, APIStatusError, AsyncOpencode
+try:
+    import httpx
+    from opencode_ai import APIConnectionError, APIStatusError, AsyncOpencode
+except Exception:  # pragma: no cover - runner imports this module for config only
+    httpx = None
+    APIConnectionError = Exception
+    APIStatusError = Exception
+    AsyncOpencode = None
 
 # Suppress noisy forward-compat serializer warnings from SDK model unions.
 warnings.filterwarnings(
@@ -44,6 +50,40 @@ MEANINGFUL_PART_TYPES: set[str] = {
     "patch",
 }
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
+
+OPENCODE_CONFIG_TEMPLATE = """{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "MODEL_PLACEHOLDER",
+  "small_model": "MODEL_PLACEHOLDER",
+  "provider": {
+    "opencode": {
+      "options": {
+        "apiKey": "{env:OPENCODE_API_KEY}"
+      }
+    }
+  },
+  "server": {
+    "port": 4096,
+    "hostname": "0.0.0.0"
+  },
+  "mcp": {
+    "tests": {
+      "type": "local",
+      "command": ["python3", "/sandbox/mcp_server.py"],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": "allow"
+  },
+  "tools": {
+    "write": true,
+    "bash": true,
+    "edit": true
+  }
+}
+"""
 
 
 def to_jsonable(value: Any) -> Any:
@@ -65,11 +105,19 @@ def to_jsonable(value: Any) -> Any:
 
 async def raw_request_with_client(
     *,
-    client: AsyncOpencode,
+    client: Any,
     method: str,
     path: str,
     request_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if httpx is None:
+        return {
+            "ok": False,
+            "status_code": None,
+            "body": None,
+            "error": "OpenCode SDK dependencies are not available in this environment",
+        }
+
     if method == "GET":
         response = await client.get(path, cast_to=httpx.Response)
     elif method == "POST":
@@ -103,6 +151,14 @@ async def raw_request(
     path: str,
     request_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if AsyncOpencode is None:
+        return {
+            "ok": False,
+            "status_code": None,
+            "body": None,
+            "error": "OpenCode SDK dependencies are not available in this environment",
+        }
+
     base_url = os.environ.get("OPENCODE_BASE_URL", "http://localhost:4096")
     timeout = float(os.environ.get("OPENCODE_TIMEOUT_SECONDS", "600"))
 
@@ -349,7 +405,7 @@ def stream_part_summary(part: dict[str, Any]) -> str | None:
 
 async def stream_session_events(
     *,
-    client: AsyncOpencode,
+    client: Any,
     session_id: str,
     done_event: asyncio.Event,
     max_parts: int = 0,
@@ -475,6 +531,14 @@ async def chat_with_stream(
     text: str,
     max_parts: int = 0,
 ) -> dict[str, Any]:
+    if AsyncOpencode is None:
+        return {
+            "ok": False,
+            "status_code": None,
+            "body": None,
+            "error": "OpenCode SDK dependencies are not available in this environment",
+        }
+
     base_url = os.environ.get("OPENCODE_BASE_URL", "http://localhost:4096")
     timeout = float(os.environ.get("OPENCODE_TIMEOUT_SECONDS", "600"))
     payload = {"parts": [{"type": "text", "text": text}]}

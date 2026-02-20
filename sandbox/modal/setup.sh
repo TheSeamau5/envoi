@@ -4,44 +4,10 @@ set -e
 # Rust cargo is installed in the image but not on PATH by default
 export PATH="$HOME/.cargo/bin:$PATH"
 AGENT_KIND="${AGENT_KIND:-opencode}"
-
-ensure_c_compiler_fixtures() {
-    echo "=== Ensuring C compiler test fixtures under /opt/tests ==="
-    mkdir -p /opt/tests
-
-    if [ ! -d /opt/tests/c-testsuite/tests/single-exec ] || ! ls /opt/tests/c-testsuite/tests/single-exec/*.c >/dev/null 2>&1; then
-        echo "[fixtures] syncing c-testsuite..."
-        rm -rf /opt/tests/c-testsuite
-        git clone --depth 1 https://github.com/c-testsuite/c-testsuite.git /opt/tests/c-testsuite
-    else
-        echo "[fixtures] c-testsuite already present"
-    fi
-
-    if [ ! -d /opt/tests/wacct/tests ] || [ ! -f /opt/tests/wacct/expected_results.json ]; then
-        echo "[fixtures] syncing writing-a-c-compiler-tests..."
-        rm -rf /opt/tests/wacct
-        git clone --depth 1 https://github.com/nlsandler/writing-a-c-compiler-tests.git /opt/tests/wacct
-    else
-        echo "[fixtures] wacct already present"
-    fi
-
-    local TORTURE_EXEC_DIR="/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute"
-    if [ ! -d "$TORTURE_EXEC_DIR" ] || ! ls "$TORTURE_EXEC_DIR"/*.c >/dev/null 2>&1; then
-        echo "[fixtures] syncing llvm-test-suite torture execute shard..."
-        rm -rf /opt/tests/llvm-test-suite
-        mkdir -p /opt/tests/llvm-test-suite
-        cd /opt/tests/llvm-test-suite
-        git init
-        git remote add origin https://github.com/llvm/llvm-test-suite.git
-        git config core.sparseCheckout true
-        echo "SingleSource/Regression/C/gcc-c-torture/execute/" > .git/info/sparse-checkout
-        git pull --depth 1 origin main
-    else
-        echo "[fixtures] torture execute shard already present"
-    fi
-}
-
-ensure_c_compiler_fixtures
+if [ -f /tmp/upload/task_setup.sh ]; then
+    echo "=== Running task setup ==="
+    bash /tmp/upload/task_setup.sh
+fi
 
 echo "=== Starting envoi runtime ==="
 cd /environment

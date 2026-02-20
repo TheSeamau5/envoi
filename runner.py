@@ -1,14 +1,14 @@
 """
 Main orchestrator for envoi-trace.
 
-Drives OpenCode with a part budget and saves a full `agent_trace.json` artifact
-containing all newly observed messages (including child sessions), per-part
-git checkpoints, and parsed envoi test calls.
+Runs an agent backend with a part budget and saves a full `agent_trace.json`
+artifact containing per-part records, git checkpoints, and parsed envoi test
+calls.
 
 Usage:
-    modal run orchestrate.py --agent opencode --max-parts 1000 --model opencode/gpt-5-nano
-    modal run orchestrate.py --agent codex --max-parts 1000
-    modal run orchestrate.py --agent codex --max-parts 1000 --codex-auth-file /path/to/auth.json
+    modal run runner.py --agent opencode --max-parts 1000 --model opencode/gpt-5-nano
+    modal run runner.py --agent codex --max-parts 1000
+    modal run runner.py --agent codex --max-parts 1000 --codex-auth-file /path/to/auth.json
 """
 
 from __future__ import annotations
@@ -29,6 +29,14 @@ from typing import Any, Literal, Protocol
 import boto3
 import modal
 from pydantic import BaseModel, Field
+
+from agents.opencode import OPENCODE_CONFIG_TEMPLATE
+from task import (
+    TASK_REQUIRED_TEST_PATHS,
+    TASK_SANDBOX_SETUP_SH,
+    TASK_SYSTEM_PROMPT,
+    build_followup_prompt,
+)
 
 app = modal.App("envoi-trace")
 
@@ -70,12 +78,11 @@ print = tprint
 # Load files at import time (Modal serializes these into the function image)
 # ---------------------------------------------------------------------------
 
-PROMPT = (Path(__file__).parent / "prompts" / "system.txt").read_text()
-SETUP_SH = (Path(__file__).parent / "sandbox" / "setup.sh").read_text()
-MCP_SERVER = (Path(__file__).parent / "sandbox" / "mcp_server.py").read_text()
-OPENCODE_CLIENT = (Path(__file__).parent / "sandbox" / "opencode_client.py").read_text()
-CODEX_CLIENT = (Path(__file__).parent / "sandbox" / "codex_client.py").read_text()
-OPENCODE_CONFIG = (Path(__file__).parent / "sandbox" / "opencode.jsonc").read_text()
+SETUP_SH = (Path(__file__).parent / "sandbox" / "modal" / "setup.sh").read_text()
+MCP_SERVER = (Path(__file__).parent / "sandbox" / "modal" / "mcp_server.py").read_text()
+OPENCODE_CLIENT = (Path(__file__).parent / "agents" / "opencode.py").read_text()
+CODEX_CLIENT = (Path(__file__).parent / "agents" / "codex.py").read_text()
+OPENCODE_CONFIG = OPENCODE_CONFIG_TEMPLATE
 ENVIRONMENT_DIR = Path(__file__).parent / "environment"
 
 ENVIRONMENT_PY_FILES = {
@@ -90,13 +97,6 @@ ENVIRONMENT_TXT_FILES = {
     str(txt_file.relative_to(ENVIRONMENT_DIR)): txt_file.read_text()
     for txt_file in ENVIRONMENT_DIR.rglob("*.txt")
 }
-
-REQUIRED_PATHS: list[str] = [
-    "basics",
-    *[f"wacct/chapter_{i}" for i in range(1, 21)],
-    *[f"c_testsuite/part_{i}" for i in range(1, 6)],
-    *[f"torture/part_{i}" for i in range(1, 11)],
-]
 
 WORKSPACE_GITIGNORE = """\
 target/
@@ -366,7 +366,9 @@ class AgentBackend(Protocol):
 
 
 class SolveTracker:
-    def __init__(self) -> None:
+    def __init__(self, required_paths: list[str]) -> None:
+        self.required_paths = required_paths
+        self.required_paths_set = set(required_paths)
         self.solved: set[str] = set()
         self.all_calls: list[EnvoiCall] = []
         self._seen_call_keys: set[str] = set()
@@ -385,10 +387,10 @@ class SolveTracker:
                 self.solved.add(call.path)
 
     def is_fully_solved(self) -> bool:
-        return self.solved >= set(REQUIRED_PATHS)
+        return self.solved >= self.required_paths_set
 
     def get_unsolved_paths(self) -> list[str]:
-        return [p for p in REQUIRED_PATHS if p not in self.solved]
+        return [p for p in self.required_paths if p not in self.solved]
 
     def get_latest_call_for_path(self, path: str) -> EnvoiCall | None:
         for call in reversed(self.all_calls):
@@ -402,7 +404,7 @@ class SolveTracker:
         latest_total = latest.result.total if latest and latest.result else None
         return TestingState(
             solved_paths=len(self.solved),
-            total_paths=len(REQUIRED_PATHS),
+            total_paths=len(self.required_paths),
             latest_path=latest.path if latest else None,
             latest_passed=latest_passed,
             latest_total=latest_total,
@@ -633,7 +635,8 @@ def artifact_uri(trajectory_id: str, filename: str) -> str:
 function_image = (
     modal.Image.debian_slim()
     .pip_install("boto3", "pydantic")
-    .add_local_dir(Path(__file__).parent / "prompts", remote_path="/root/prompts")
+    .add_local_file(Path(__file__).parent / "task.py", remote_path="/root/task.py")
+    .add_local_dir(Path(__file__).parent / "agents", remote_path="/root/agents")
     .add_local_dir(Path(__file__).parent / "sandbox", remote_path="/root/sandbox")
     .add_local_dir(Path(__file__).parent / "environment", remote_path="/root/environment")
 )
@@ -1240,6 +1243,7 @@ async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
 async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
     print(f"[setup] agent=opencode model={model}")
     await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
+    await sandbox_write_file(sandbox, "/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH)
     await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
     await sandbox_write_file(sandbox, "/sandbox/opencode_client.py", OPENCODE_CLIENT)
     await sandbox_write_file(sandbox, "/tmp/upload/opencode_api_key.txt", api_key)
@@ -1259,6 +1263,7 @@ async def setup_sandbox_codex(
 ) -> None:
     print(f"[setup] agent=codex model={model}")
     await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
+    await sandbox_write_file(sandbox, "/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH)
     await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
     await sandbox_write_file(sandbox, "/sandbox/codex_client.py", CODEX_CLIENT)
     if api_key:
@@ -1785,11 +1790,11 @@ async def _run_trajectory_impl(
         save_agent_trace_snapshot(trajectory_id, agent_trace)
 
         # --- Main loop: blocking message calls with part budget ---
-        tracker = SolveTracker()
+        tracker = SolveTracker(list(TASK_REQUIRED_TEST_PATHS))
         seen_message_ids: set[str] = set()
         turn_count = 0
         part_count = 0
-        prompt_text = PROMPT
+        prompt_text = TASK_SYSTEM_PROMPT
         end_reason: str | None = None
 
         try:
@@ -1973,7 +1978,7 @@ async def _run_trajectory_impl(
                 save_agent_trace_snapshot(trajectory_id, agent_trace)
 
                 solved_count = len(tracker.solved)
-                total_count = len(REQUIRED_PATHS)
+                total_count = len(tracker.required_paths)
                 print(
                     f"[progress] turn={turn_count} commit={git_commit} "
                     f"parts=+{new_parts} total={part_count}/{effective_max_parts} "
@@ -2005,9 +2010,7 @@ async def _run_trajectory_impl(
                     else:
                         details.append(f"  - {p}: not run")
 
-                prompt_text = "Continue working on the compiler. Run tests and pass ALL suites."
-                if details:
-                    prompt_text += "\n\nCurrent test status:\n" + "\n".join(details)
+                prompt_text = build_followup_prompt(details)
 
             if end_reason is None:
                 end_reason = "part_limit"

@@ -18,7 +18,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from offline_replay import (
+from scripts.offline_replay import (
     analyze_trace,
     artifact_uri,
     download_if_needed,
