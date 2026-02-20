@@ -18,18 +18,41 @@ import asyncio
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
 import httpx
 from opencode_ai import APIConnectionError, APIStatusError, AsyncOpencode
 
+# Suppress noisy forward-compat serializer warnings from SDK model unions.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Pydantic serializer warnings:.*",
+    category=UserWarning,
+)
+
+
+MEANINGFUL_PART_TYPES: set[str] = {
+    "reasoning",
+    "text",
+    "tool",
+    "tool_use",
+    "tool_result",
+    "patch",
+}
+
 
 def to_jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        # OpenCode can emit newer union variants (e.g. reasoning parts) than the
+        # pinned SDK models know about. Keep serialization resilient and quiet.
+        try:
+            return value.model_dump(mode="json", warnings=False)
+        except TypeError:
+            return value.model_dump()
     if hasattr(value, "to_dict"):
         return value.to_dict()
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
     if isinstance(value, dict):
         return {k: to_jsonable(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -95,16 +118,16 @@ async def raw_request(
     except APIStatusError as error:
         status_code = getattr(error, "status_code", None)
         response = getattr(error, "response", None)
-        error_body: Any = None
+        status_error_body: Any = None
         if response is not None:
             try:
-                error_body = response.json()
+                status_error_body = response.json()
             except Exception:
-                error_body = response.text
+                status_error_body = response.text
         return {
             "ok": False,
             "status_code": status_code,
-            "body": to_jsonable(error_body),
+            "body": to_jsonable(status_error_body),
             "error": str(error),
         }
     except APIConnectionError as error:
@@ -161,12 +184,12 @@ def summarize_event(event: dict[str, Any]) -> str | None:
         if not isinstance(part, dict):
             return None
         part_type = part.get("type")
-        if part_type == "step-start":
-            snapshot = str(part.get("snapshot", ""))
-            return f"step-start {snapshot[:12]}"
-        if part_type == "step-finish":
-            reason = part.get("reason", "?")
-            return f"step-finish reason={reason}"
+        if part_type in {"reasoning", "text", "snapshot"}:
+            return None
+        if isinstance(part_type, str) and (
+            part_type.endswith("-start") or part_type.endswith("-finish")
+        ):
+            return None
         if part_type == "tool":
             tool = part.get("tool", "?")
             state = part.get("state")
@@ -174,8 +197,19 @@ def summarize_event(event: dict[str, Any]) -> str | None:
             return f"tool {tool} status={status}"
         if part_type == "patch":
             files = part.get("files")
-            file_count = len(files) if isinstance(files, list) else 0
-            return f"patch files={file_count}"
+            if not isinstance(files, list):
+                return "patch files=0"
+            names: list[str] = []
+            for f in files:
+                if isinstance(f, str):
+                    names.append(f)
+                elif isinstance(f, dict):
+                    name = f.get("path") or f.get("filename") or f.get("name") or "?"
+                    names.append(str(name))
+            if len(names) <= 5:
+                return f"patch {', '.join(names)} ({len(names)} files)"
+            shown = ", ".join(names[:5])
+            return f"patch {shown}, ... ({len(names)} files)"
         return None
 
     if event_type == "session.idle":
@@ -187,16 +221,32 @@ def summarize_event(event: dict[str, Any]) -> str | None:
     return None
 
 
+def part_identifier(part: dict[str, Any], fallback: str) -> str:
+    for key in ("id", "callID", "hash", "snapshot"):
+        value = part.get(key)
+        if isinstance(value, str) and value:
+            return value
+    metadata = part.get("metadata")
+    if isinstance(metadata, dict):
+        opencode_meta = metadata.get("opencode")
+        if isinstance(opencode_meta, dict):
+            item_id = opencode_meta.get("itemId")
+            if isinstance(item_id, str) and item_id:
+                return item_id
+    return fallback
+
+
 async def stream_session_events(
     *,
     client: AsyncOpencode,
     session_id: str,
     done_event: asyncio.Event,
-    max_steps: int = 0,
+    max_parts: int = 0,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     events: list[dict[str, Any]] = []
-    step_finishes_seen = 0
-    aborted_for_step_limit = False
+    meaningful_parts_seen = 0
+    meaningful_part_ids_seen: set[str] = set()
+    aborted_for_part_limit = False
     try:
         stream = await client.event.list()
         async with stream:
@@ -219,18 +269,26 @@ async def stream_session_events(
                 if event_obj.get("type") == "message.part.updated":
                     properties = event_obj.get("properties")
                     part = properties.get("part") if isinstance(properties, dict) else None
-                    if isinstance(part, dict) and part.get("type") == "step-finish":
-                        step_finishes_seen += 1
+                    if isinstance(part, dict):
+                        part_type = part.get("type")
+                        if part_type in MEANINGFUL_PART_TYPES:
+                            part_id = part_identifier(
+                                part,
+                                fallback=f"{len(events)}:{part_type}",
+                            )
+                            if part_id not in meaningful_part_ids_seen:
+                                meaningful_part_ids_seen.add(part_id)
+                                meaningful_parts_seen += 1
                         if (
-                            max_steps > 0
-                            and step_finishes_seen >= max_steps
-                            and not aborted_for_step_limit
+                            max_parts > 0
+                            and meaningful_parts_seen >= max_parts
+                            and not aborted_for_part_limit
                         ):
-                            aborted_for_step_limit = True
+                            aborted_for_part_limit = True
                             print(
                                 (
-                                    "[stream] step budget reached "
-                                    f"({step_finishes_seen}/{max_steps}), aborting session"
+                                    "[stream] part budget reached "
+                                    f"({meaningful_parts_seen}/{max_parts}), aborting session"
                                 ),
                                 file=sys.stderr,
                                 flush=True,
@@ -250,14 +308,14 @@ async def stream_session_events(
         raise
     except Exception as error:  # noqa: BLE001
         print(f"[stream] warning: {error}", file=sys.stderr, flush=True)
-    return events, step_finishes_seen, aborted_for_step_limit
+    return events, meaningful_parts_seen, aborted_for_part_limit
 
 
 async def chat_with_stream(
     *,
     session_id: str,
     text: str,
-    max_steps: int = 0,
+    max_parts: int = 0,
 ) -> dict[str, Any]:
     base_url = os.environ.get("OPENCODE_BASE_URL", "http://localhost:4096")
     timeout = float(os.environ.get("OPENCODE_TIMEOUT_SECONDS", "600"))
@@ -275,7 +333,7 @@ async def chat_with_stream(
                     client=client,
                     session_id=session_id,
                     done_event=done_event,
-                    max_steps=max_steps,
+                    max_parts=max_parts,
                 )
             )
             try:
@@ -319,10 +377,10 @@ async def chat_with_stream(
                 done_event.set()
 
             events: list[dict[str, Any]] = []
-            step_finishes_seen = 0
-            aborted_for_step_limit = False
+            meaningful_parts_seen = 0
+            aborted_for_part_limit = False
             try:
-                events, step_finishes_seen, aborted_for_step_limit = await asyncio.wait_for(
+                events, meaningful_parts_seen, aborted_for_part_limit = await asyncio.wait_for(
                     stream_task,
                     timeout=2.0,
                 )
@@ -338,8 +396,8 @@ async def chat_with_stream(
             body = result.get("body")
             meta = {
                 "events_observed": len(events),
-                "step_finishes_seen": step_finishes_seen,
-                "aborted_for_step_limit": aborted_for_step_limit,
+                "meaningful_parts_seen": meaningful_parts_seen,
+                "aborted_for_part_limit": aborted_for_part_limit,
             }
             result["meta"] = meta
             if isinstance(body, dict):
@@ -351,22 +409,22 @@ async def chat_with_stream(
                 stream_stats.update(meta)
                 body["_stream"] = stream_stats
                 result["body"] = body
-            elif meta["aborted_for_step_limit"]:
+            elif meta["aborted_for_part_limit"]:
                 result["body"] = {"_stream": dict(meta)}
             return result
     except APIStatusError as error:
         status_code = getattr(error, "status_code", None)
         response = getattr(error, "response", None)
-        error_body: Any = None
+        api_status_body: Any = None
         if response is not None:
             try:
-                error_body = response.json()
+                api_status_body = response.json()
             except Exception:
-                error_body = response.text
+                api_status_body = response.text
         return {
             "ok": False,
             "status_code": status_code,
-            "body": to_jsonable(error_body),
+            "body": to_jsonable(api_status_body),
             "error": str(error),
         }
     except APIConnectionError as error:
@@ -399,7 +457,7 @@ async def main() -> None:
     chat_stream_parser = subparsers.add_parser("chat-stream")
     chat_stream_parser.add_argument("--session-id", required=True)
     chat_stream_parser.add_argument("--text-file", required=True)
-    chat_stream_parser.add_argument("--max-steps", type=int, default=0)
+    chat_stream_parser.add_argument("--max-parts", type=int, default=0)
 
     list_messages_parser = subparsers.add_parser("list-messages")
     list_messages_parser.add_argument("--session-id", required=True)
@@ -434,7 +492,7 @@ async def main() -> None:
         result = await chat_with_stream(
             session_id=args.session_id,
             text=text,
-            max_steps=max(0, args.max_steps),
+            max_parts=max(0, args.max_parts),
         )
         print(json.dumps(result))
         return

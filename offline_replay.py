@@ -5,7 +5,7 @@ Given:
 - agent_trace.json (local path or s3:// URI)
 - repo.bundle (local path or s3:// URI)
 
-This script reconstructs repository state per step, evaluates the compiler
+This script reconstructs repository state per part, evaluates the compiler
 for each unique commit, and writes a machine-readable JSON report.
 """
 
@@ -85,8 +85,8 @@ def load_agent_trace(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError("agent_trace.json must contain a JSON object")
-    if not isinstance(data.get("steps"), list) and not isinstance(data.get("turns"), list):
-        raise ValueError("agent_trace.json missing both 'steps' and 'turns' lists")
+    if not isinstance(data.get("parts"), list) and not isinstance(data.get("turns"), list):
+        raise ValueError("agent_trace.json missing both 'parts' and 'turns' lists")
     return data
 
 
@@ -190,12 +190,12 @@ def has_required_test_fixtures(test_paths: list[str]) -> tuple[bool, list[str]]:
     return len(missing) == 0, missing
 
 
-def parse_commit_from_step(step: dict[str, Any]) -> str | None:
+def parse_commit_from_part(part: dict[str, Any]) -> str | None:
     for key in ("git_commit",):
-        value = step.get(key)
+        value = part.get(key)
         if isinstance(value, str) and value:
             return value
-    repo_checkpoint = step.get("repo_checkpoint")
+    repo_checkpoint = part.get("repo_checkpoint")
     if isinstance(repo_checkpoint, dict):
         for key in ("commit_after", "commit_before"):
             value = repo_checkpoint.get(key)
@@ -204,33 +204,50 @@ def parse_commit_from_step(step: dict[str, Any]) -> str | None:
     return None
 
 
-def get_step_records(trace: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_steps = trace.get("steps")
-    if isinstance(raw_steps, list):
-        return [step for step in raw_steps if isinstance(step, dict)]
+def get_part_records(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_parts = trace.get("parts")
+    if isinstance(raw_parts, list):
+        return [part for part in raw_parts if isinstance(part, dict)]
+
     raw_turns = trace.get("turns")
     if isinstance(raw_turns, list):
-        return [step for step in raw_turns if isinstance(step, dict)]
+        flattened_parts: list[dict[str, Any]] = []
+        for turn in raw_turns:
+            if not isinstance(turn, dict):
+                continue
+            turn_number = turn.get("turn")
+            turn_parts = turn.get("parts")
+            if isinstance(turn_parts, list) and turn_parts:
+                for part in turn_parts:
+                    if not isinstance(part, dict):
+                        continue
+                    merged = dict(part)
+                    if merged.get("turn") is None and isinstance(turn_number, int):
+                        merged["turn"] = turn_number
+                    flattened_parts.append(merged)
+            else:
+                # Legacy traces where `turns` held part-like rows directly.
+                flattened_parts.append(turn)
+        return flattened_parts
     return []
 
 
-def extract_step_rows(trace: dict[str, Any]) -> list[dict[str, Any]]:
-    steps_raw = [
-        step
-        for step in get_step_records(trace)
-        if step.get("step") is not None or step.get("turn") is not None
+def extract_part_rows(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    parts_raw = [
+        part
+        for part in get_part_records(trace)
+        if part.get("part") is not None or part.get("turn") is not None
     ]
-    steps_raw.sort(key=lambda step: int(step.get("step") or step.get("turn") or 0))
+    parts_raw.sort(key=lambda part: int(part.get("part") or part.get("turn") or 0))
 
     rows: list[dict[str, Any]] = []
-    for step in steps_raw:
-        step_number = int(step.get("step") or step.get("turn") or 0)
+    for part in parts_raw:
+        part_number = int(part.get("part") or part.get("turn") or 0)
         rows.append(
             {
-                "step": step_number,
-                "turn": step_number,  # backward compatibility for old consumers
-                "commit": parse_commit_from_step(step),
-                "timestamp": step.get("timestamp"),
+                "part": part_number,
+                "commit": parse_commit_from_part(part),
+                "timestamp": part.get("timestamp"),
             }
         )
     return rows
@@ -245,15 +262,15 @@ def get_unique_commits(rows: list[dict[str, Any]]) -> list[str]:
     return commit_order
 
 
-def resolve_step_commit(trace: dict[str, Any], step_number: int) -> tuple[str, dict[str, Any]]:
-    for row in extract_step_rows(trace):
-        if row["step"] != step_number:
+def resolve_part_commit(trace: dict[str, Any], part_number: int) -> tuple[str, dict[str, Any]]:
+    for row in extract_part_rows(trace):
+        if row["part"] != part_number:
             continue
         commit = row.get("commit")
         if not isinstance(commit, str) or not commit:
-            raise ValueError(f"Step {step_number} has no commit recorded")
+            raise ValueError(f"Part {part_number} has no commit recorded")
         return commit, row
-    raise ValueError(f"Step {step_number} not found in trace")
+    raise ValueError(f"Part {part_number} not found in trace")
 
 
 async def evaluate_commit(
@@ -322,23 +339,22 @@ async def evaluate_commit(
     }
 
 
-def reconstruct_repo_at_step(
+def reconstruct_repo_at_part(
     *,
     trace_path: Path,
     bundle_path: Path,
-    step: int,
+    part: int,
     destination: Path,
 ) -> dict[str, Any]:
     trace = load_agent_trace(trace_path)
-    commit, row = resolve_step_commit(trace, step)
+    commit, row = resolve_part_commit(trace, part)
     destination.parent.mkdir(parents=True, exist_ok=True)
     clone_bundle(bundle_path, destination)
     checkout_commit(destination, commit)
     return {
         "trajectory_id": trace.get("trajectory_id"),
         "session_id": trace.get("session_id"),
-        "step": step,
-        "turn": step,
+        "part": part,
         "timestamp": row.get("timestamp"),
         "commit": commit,
         "repo_path": str(destination),
@@ -354,11 +370,11 @@ async def replay_trace(
     test_paths: list[str],
 ) -> dict[str, Any]:
     trace = load_agent_trace(trace_path)
-    steps = extract_step_rows(trace)
-    commit_order = get_unique_commits(steps)
+    parts = extract_part_rows(trace)
+    commit_order = get_unique_commits(parts)
 
     if not commit_order:
-        raise ValueError("No commits found in trace steps")
+        raise ValueError("No commits found in trace parts")
 
     fixtures_ok, missing_fixtures = has_required_test_fixtures(test_paths)
     if not fixtures_ok:
@@ -386,17 +402,16 @@ async def replay_trace(
         stop_runtime(runtime)
         shutil.rmtree(workspace_root, ignore_errors=True)
 
-    step_evals: list[dict[str, Any]] = []
-    for step in steps:
-        commit = step["commit"]
-        step_result = {
-            "step": step["step"],
-            "turn": step["step"],
-            "timestamp": step["timestamp"],
+    part_evals: list[dict[str, Any]] = []
+    for part in parts:
+        commit = part["commit"]
+        part_result = {
+            "part": part["part"],
+            "timestamp": part["timestamp"],
             "commit": commit,
             "evaluation": commit_evals.get(commit),
         }
-        step_evals.append(step_result)
+        part_evals.append(part_result)
 
     report = {
         "trajectory_id": trace.get("trajectory_id"),
@@ -410,10 +425,8 @@ async def replay_trace(
         },
         "commits_evaluated": commit_order,
         "commit_evaluations": commit_evals,
-        "step_to_commit": {str(s["step"]): s.get("commit") for s in steps},
-        "step_evaluations": step_evals,
-        "turn_to_commit": {str(s["step"]): s.get("commit") for s in steps},
-        "turn_evaluations": step_evals,
+        "part_to_commit": {str(s["part"]): s.get("commit") for s in parts},
+        "part_evaluations": part_evals,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -423,16 +436,15 @@ async def replay_trace(
 
 async def async_main() -> None:
     parser = argparse.ArgumentParser(
-        description="Replay trajectory artifacts, evaluate tests, or reconstruct repo at step t.",
+        description="Replay trajectory artifacts, evaluate tests, or reconstruct repo at part t.",
     )
     parser.add_argument(
         "--mode",
-        choices=["evaluate", "checkout-step", "checkout-turn"],
+        choices=["evaluate", "checkout-part"],
         default="evaluate",
         help=(
             "evaluate: run tests for all unique commits; "
-            "checkout-step: materialize repo at a specific step. "
-            "checkout-turn is a deprecated alias."
+            "checkout-part: materialize repo at a specific part."
         ),
     )
     parser.add_argument(
@@ -460,20 +472,18 @@ async def async_main() -> None:
         default="output/offline_eval.json",
         help=(
             "Where to write JSON output. For --mode evaluate this is the evaluation report; "
-            "for --mode checkout-step this is checkout metadata."
+            "for --mode checkout-part this is checkout metadata."
         ),
     )
     parser.add_argument(
-        "--step",
-        "--turn",
-        dest="step",
+        "--part",
         type=int,
-        help="Step number (required for --mode checkout-step; --turn is deprecated alias)",
+        help="Part number (required for --mode checkout-part)",
     )
     parser.add_argument(
         "--checkout-dest",
         default=None,
-        help="Destination directory for --mode checkout-step (default: output/repo_step_<step>)",
+        help="Destination directory for --mode checkout-part (default: output/repo_part_<part>)",
     )
     parser.add_argument(
         "--environment-file",
@@ -508,25 +518,25 @@ async def async_main() -> None:
 
         output_path = Path(args.output).expanduser().resolve()
 
-        if args.mode in {"checkout-step", "checkout-turn"}:
-            if args.step is None:
-                parser.error("--step is required when --mode checkout-step")
+        if args.mode == "checkout-part":
+            if args.part is None:
+                parser.error("--part is required when --mode checkout-part")
 
             checkout_dest = (
                 Path(args.checkout_dest).expanduser().resolve()
                 if args.checkout_dest
-                else Path(f"output/repo_step_{args.step}").expanduser().resolve()
+                else Path(f"output/repo_part_{args.part}").expanduser().resolve()
             )
-            metadata = reconstruct_repo_at_step(
+            metadata = reconstruct_repo_at_part(
                 trace_path=trace_path,
                 bundle_path=bundle_path,
-                step=args.step,
+                part=args.part,
                 destination=checkout_dest,
             )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(metadata, indent=2))
             print(
-                f"[done] checked out step {args.step} at commit {metadata['commit']} "
+                f"[done] checked out part {args.part} at commit {metadata['commit']} "
                 f"to {checkout_dest}"
             )
             print(f"[done] wrote checkout metadata to {output_path}")
@@ -548,7 +558,7 @@ async def async_main() -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
     print(
-        f"[done] wrote {len(report['step_evaluations'])} step evaluations "
+        f"[done] wrote {len(report['part_evaluations'])} part evaluations "
         f"to {Path(args.output).expanduser().resolve()}"
     )
 
