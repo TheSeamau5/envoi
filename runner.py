@@ -55,6 +55,7 @@ SECONDS_PER_REMAINING_PART = int(
     os.environ.get("SECONDS_PER_REMAINING_PART", "60")
 )  # adaptive cap as part budget gets tight
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
+SETUP_UPLOAD_CONCURRENCY = max(1, int(os.environ.get("SETUP_UPLOAD_CONCURRENCY", "8")))
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +779,54 @@ async def sandbox_write_file(
         await f.write.aio(content)
 
 
+def environment_upload_items() -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for rel, content in ENVIRONMENT_PY_FILES.items():
+        items.append((f"/environment/{rel}", content))
+    for rel, content in ENVIRONMENT_C_FILES.items():
+        items.append((f"/environment/{rel}", content))
+    for rel, content in ENVIRONMENT_TXT_FILES.items():
+        items.append((f"/environment/{rel}", content))
+    return items
+
+
+async def upload_files_parallel(
+    sandbox: modal.Sandbox,
+    uploads: list[tuple[str, str]],
+    *,
+    concurrency: int = SETUP_UPLOAD_CONCURRENCY,
+    log_upload: bool = True,
+) -> None:
+    if not uploads:
+        return
+
+    bounded = max(1, concurrency)
+    dirs = sorted({str(Path(path).parent) for path, _ in uploads})
+    if dirs:
+        mkdir_cmd = "mkdir -p " + " ".join(shlex.quote(d) for d in dirs)
+        await sandbox_run(sandbox, mkdir_cmd, quiet=True)
+
+    print(
+        f"[setup] uploading {len(uploads)} files with concurrency={bounded}"
+    )
+
+    semaphore = asyncio.Semaphore(bounded)
+
+    async def _upload(path: str, content: str) -> None:
+        if log_upload:
+            print(f"[setup][upload] {path}")
+        async with semaphore:
+            await sandbox_write_file(
+                sandbox,
+                path,
+                content,
+                ensure_dir=False,
+                log_upload=False,
+            )
+
+    await asyncio.gather(*[_upload(path, content) for path, content in uploads])
+
+
 # ---------------------------------------------------------------------------
 # OpenCode API helpers — Python SDK wrapper
 # ---------------------------------------------------------------------------
@@ -1213,39 +1262,11 @@ async def ensure_provider_connected(sandbox: modal.Sandbox, api_key: str) -> Non
 
 
 async def upload_environment_files(sandbox: modal.Sandbox) -> None:
-    env_paths = (
-        [f"/environment/{r}" for r in ENVIRONMENT_PY_FILES]
-        + [f"/environment/{r}" for r in ENVIRONMENT_C_FILES]
-        + [f"/environment/{r}" for r in ENVIRONMENT_TXT_FILES]
+    await upload_files_parallel(
+        sandbox,
+        environment_upload_items(),
+        log_upload=True,
     )
-    env_dirs = sorted({str(Path(p).parent) for p in env_paths})
-    if env_dirs:
-        await sandbox_run(sandbox, f"mkdir -p {' '.join(repr(d) for d in env_dirs)}", quiet=True)
-
-    for rel, content in ENVIRONMENT_PY_FILES.items():
-        await sandbox_write_file(
-            sandbox,
-            f"/environment/{rel}",
-            content,
-            ensure_dir=False,
-            log_upload=True,
-        )
-    for rel, content in ENVIRONMENT_C_FILES.items():
-        await sandbox_write_file(
-            sandbox,
-            f"/environment/{rel}",
-            content,
-            ensure_dir=False,
-            log_upload=True,
-        )
-    for rel, content in ENVIRONMENT_TXT_FILES.items():
-        await sandbox_write_file(
-            sandbox,
-            f"/environment/{rel}",
-            content,
-            ensure_dir=False,
-            log_upload=True,
-        )
 
     print(
         f"[setup] uploaded {len(ENVIRONMENT_PY_FILES)} py, "
@@ -1281,38 +1302,18 @@ async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
 
 async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
     print(f"[setup] agent=opencode model={model}")
-    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH, log_upload=True)
-    await sandbox_write_file(
-        sandbox,
-        "/tmp/upload/task_setup.sh",
-        TASK_SANDBOX_SETUP_SH,
-        log_upload=True,
-    )
-    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER, log_upload=True)
-    await sandbox_write_file(
-        sandbox,
-        "/sandbox/opencode_client.py",
-        OPENCODE_CLIENT,
-        log_upload=True,
-    )
-    await sandbox_write_file(
-        sandbox,
-        "/tmp/upload/opencode_api_key.txt",
-        api_key,
-        log_upload=True,
-    )
-
     config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
-    await sandbox_write_file(
+    await upload_files_parallel(
         sandbox,
-        "/workspace/opencode.jsonc",
-        config,
-        log_upload=True,
-    )
-    await sandbox_write_file(
-        sandbox,
-        "/workspace/.gitignore",
-        WORKSPACE_GITIGNORE,
+        [
+            ("/tmp/upload/setup.sh", SETUP_SH),
+            ("/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH),
+            ("/sandbox/mcp_server.py", MCP_SERVER),
+            ("/sandbox/opencode_client.py", OPENCODE_CLIENT),
+            ("/tmp/upload/opencode_api_key.txt", api_key),
+            ("/workspace/opencode.jsonc", config),
+            ("/workspace/.gitignore", WORKSPACE_GITIGNORE),
+        ],
         log_upload=True,
     )
     await upload_environment_files(sandbox)
@@ -1326,46 +1327,23 @@ async def setup_sandbox_codex(
     auth_json: str | None = None,
 ) -> None:
     print(f"[setup] agent=codex model={model}")
-    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH, log_upload=True)
-    await sandbox_write_file(
-        sandbox,
-        "/tmp/upload/task_setup.sh",
-        TASK_SANDBOX_SETUP_SH,
-        log_upload=True,
-    )
-    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER, log_upload=True)
-    await sandbox_write_file(
-        sandbox,
-        "/sandbox/codex_client.py",
-        CODEX_CLIENT,
-        log_upload=True,
-    )
-    if api_key:
-        await sandbox_write_file(
-            sandbox,
-            "/tmp/upload/codex_api_key.txt",
-            api_key,
-            log_upload=True,
-        )
-
     codex_config = CODEX_CONFIG_TOML.replace("MODEL_PLACEHOLDER", model)
-    await sandbox_write_file(
-        sandbox,
-        f"{CODEX_HOME_DIR}/config.toml",
-        codex_config,
-        log_upload=True,
-    )
+    setup_uploads: list[tuple[str, str]] = [
+        ("/tmp/upload/setup.sh", SETUP_SH),
+        ("/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH),
+        ("/sandbox/mcp_server.py", MCP_SERVER),
+        ("/sandbox/codex_client.py", CODEX_CLIENT),
+        (f"{CODEX_HOME_DIR}/config.toml", codex_config),
+        ("/workspace/.gitignore", WORKSPACE_GITIGNORE),
+    ]
+    if api_key:
+        setup_uploads.append(("/tmp/upload/codex_api_key.txt", api_key))
     if auth_json:
-        await sandbox_write_file(
-            sandbox,
-            f"{CODEX_HOME_DIR}/auth.json",
-            auth_json,
-            log_upload=True,
-        )
-    await sandbox_write_file(
+        setup_uploads.append((f"{CODEX_HOME_DIR}/auth.json", auth_json))
+
+    await upload_files_parallel(
         sandbox,
-        "/workspace/.gitignore",
-        WORKSPACE_GITIGNORE,
+        setup_uploads,
         log_upload=True,
     )
     await upload_environment_files(sandbox)
