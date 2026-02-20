@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import warnings
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +175,7 @@ def event_session_id(event: dict[str, Any]) -> str | None:
 
 
 def summarize_event(event: dict[str, Any]) -> str | None:
+    """Return a short human-readable summary, or None to suppress."""
     event_type = event.get("type")
     properties = event.get("properties")
     if not isinstance(properties, dict):
@@ -194,22 +196,28 @@ def summarize_event(event: dict[str, Any]) -> str | None:
             tool = part.get("tool", "?")
             state = part.get("state")
             status = state.get("status", "?") if isinstance(state, dict) else "?"
-            return f"tool {tool} status={status}"
+            # Only show completed (skip pending/running noise)
+            if status != "completed":
+                return None
+            return f"[tool] {tool}"
         if part_type == "patch":
             files = part.get("files")
             if not isinstance(files, list):
-                return "patch files=0"
+                return "[patch] (0 files)"
             names: list[str] = []
             for f in files:
                 if isinstance(f, str):
                     names.append(f)
                 elif isinstance(f, dict):
-                    name = f.get("path") or f.get("filename") or f.get("name") or "?"
+                    name = (
+                        f.get("path") or f.get("filename")
+                        or f.get("name") or "?"
+                    )
                     names.append(str(name))
             if len(names) <= 5:
-                return f"patch {', '.join(names)} ({len(names)} files)"
-            shown = ", ".join(names[:5])
-            return f"patch {shown}, ... ({len(names)} files)"
+                return f"[patch] {' '.join(names)} ({len(names)} files)"
+            shown = " ".join(names[:5])
+            return f"[patch] {shown} ... ({len(names)} files)"
         return None
 
     if event_type == "session.idle":
@@ -264,7 +272,17 @@ async def stream_session_events(
                 events.append(event_obj)
                 summary = summarize_event(event_obj)
                 if summary:
-                    print(f"[stream] {summary}", file=sys.stderr, flush=True)
+                    ts = datetime.now(UTC).strftime("%H:%M:%S")
+                    budget = (
+                        f"[{meaningful_parts_seen}/{max_parts}]"
+                        if max_parts > 0
+                        else f"[{meaningful_parts_seen}]"
+                    )
+                    print(
+                        f"[{ts}] {budget} {summary}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
                 if event_obj.get("type") == "message.part.updated":
                     properties = event_obj.get("properties")
@@ -285,11 +303,10 @@ async def stream_session_events(
                             and not aborted_for_part_limit
                         ):
                             aborted_for_part_limit = True
+                            ts = datetime.now(UTC).strftime("%H:%M:%S")
                             print(
-                                (
-                                    "[stream] part budget reached "
-                                    f"({meaningful_parts_seen}/{max_parts}), aborting session"
-                                ),
+                                f"[{ts}] [{meaningful_parts_seen}/{max_parts}]"
+                                " part budget reached, aborting session",
                                 file=sys.stderr,
                                 flush=True,
                             )
@@ -297,7 +314,7 @@ async def stream_session_events(
                                 await client.session.abort(session_id)
                             except Exception as error:  # noqa: BLE001
                                 print(
-                                    f"[stream] abort warning: {error}",
+                                    f"abort warning: {error}",
                                     file=sys.stderr,
                                     flush=True,
                                 )
@@ -307,7 +324,7 @@ async def stream_session_events(
     except asyncio.CancelledError:
         raise
     except Exception as error:  # noqa: BLE001
-        print(f"[stream] warning: {error}", file=sys.stderr, flush=True)
+        print(f"stream warning: {error}", file=sys.stderr, flush=True)
     return events, meaningful_parts_seen, aborted_for_part_limit
 
 

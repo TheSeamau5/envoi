@@ -1016,7 +1016,6 @@ async def end_session(
         "part_patch_prefix": part_patch_prefix,
     }
     save_agent_trace_snapshot(agent_trace.trajectory_id, agent_trace)
-    print(f"[s3] saved artifacts manifest to {manifest_s3_uri}")
 
     print(
         f"[end] session ended: {reason}, {part_count} parts, "

@@ -43,6 +43,8 @@ HEAVY_TEST_ROOTS: dict[str, Path] = {
     "torture": Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute"),
 }
 
+SUITE_PATHS: list[str] = ["basics", "wacct", "c_testsuite", "torture"]
+
 
 @dataclass
 class RuntimeHandle:
@@ -339,6 +341,70 @@ async def evaluate_commit(
     }
 
 
+async def evaluate_commit_by_suite(
+    *,
+    envoi_url: str,
+    repo_path: Path,
+) -> dict[str, Any]:
+    """Evaluate all tests grouped by suite. Returns per-suite and total counts."""
+    started_at = time.monotonic()
+    suite_results: dict[str, Any] = {}
+    total_passed = 0
+    total_failed = 0
+    total_tests = 0
+
+    docs = envoi.Documents(repo_path)
+    async with await envoi.connect_session(
+        envoi_url,
+        submission=docs,
+        session_timeout_seconds=7200,
+    ) as session:
+        for suite_path in SUITE_PATHS:
+            try:
+                result = await session.test(suite_path)
+            except Exception as error:  # noqa: BLE001
+                suite_results[suite_path] = {
+                    "ok": False,
+                    "error": str(error),
+                    "passed": 0,
+                    "failed": 0,
+                    "total": 0,
+                }
+                continue
+
+            if not isinstance(result, dict):
+                suite_results[suite_path] = {
+                    "ok": False,
+                    "error": f"Unexpected result type: {type(result).__name__}",
+                    "passed": 0,
+                    "failed": 0,
+                    "total": 0,
+                }
+                continue
+
+            passed = int(result.get("passed", 0))
+            failed = int(result.get("failed", 0))
+            total = int(result.get("total", 0))
+            suite_results[suite_path] = {
+                "ok": failed == 0 and total > 0,
+                "passed": passed,
+                "failed": failed,
+                "total": total,
+            }
+            total_passed += passed
+            total_failed += failed
+            total_tests += total
+
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    return {
+        "duration_ms": duration_ms,
+        "passed": total_passed,
+        "failed": total_failed,
+        "total": total_tests,
+        "suite_results": suite_results,
+    }
+
+
 def reconstruct_repo_at_part(
     *,
     trace_path: Path,
@@ -434,17 +500,291 @@ async def replay_trace(
     return report
 
 
+# ---------------------------------------------------------------------------
+# Analyze helpers: token/timing extraction and table formatting
+# ---------------------------------------------------------------------------
+
+
+def iso_to_epoch_ms(iso_str: str) -> int | None:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return int(dt.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return None
+
+
+def format_elapsed(ms: int | None) -> str:
+    if ms is None or ms < 0:
+        return "?"
+    seconds = ms // 1000
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    remaining = seconds % 60
+    if minutes < 60:
+        return f"{minutes}m{remaining:02d}s"
+    hours = minutes // 60
+    remaining_minutes = minutes % 60
+    return f"{hours}h{remaining_minutes:02d}m"
+
+
+def format_token_count(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
+def extract_turn_stats(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    """Walk turns in the trace and extract token/timing data per turn."""
+    started_at = trace.get("started_at")
+    start_epoch_ms = iso_to_epoch_ms(started_at) if isinstance(started_at, str) else None
+
+    turns = trace.get("turns", [])
+    stats: list[dict[str, Any]] = []
+    cumulative_input = 0
+    cumulative_output = 0
+
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+
+        commit = parse_commit_from_part(turn)
+        timestamp = turn.get("timestamp")
+
+        turn_input = 0
+        turn_output = 0
+        turn_reasoning = 0
+        turn_total = 0
+
+        for msg in turn.get("new_messages", []):
+            if not isinstance(msg, dict):
+                continue
+            info = msg.get("info", {})
+            if not isinstance(info, dict):
+                continue
+            if info.get("role") != "assistant":
+                continue
+            tokens = info.get("tokens", {})
+            if not isinstance(tokens, dict):
+                continue
+            turn_input += int(tokens.get("input", 0) or 0)
+            turn_output += int(tokens.get("output", 0) or 0)
+            turn_reasoning += int(tokens.get("reasoning", 0) or 0)
+            turn_total += int(tokens.get("total", 0) or 0)
+
+        cumulative_input += turn_input
+        cumulative_output += turn_output
+
+        elapsed_ms = None
+        if start_epoch_ms and isinstance(timestamp, str):
+            turn_epoch_ms = iso_to_epoch_ms(timestamp)
+            if turn_epoch_ms:
+                elapsed_ms = turn_epoch_ms - start_epoch_ms
+
+        stats.append({
+            "turn": turn.get("turn"),
+            "part_start": turn.get("part_start"),
+            "part_end": turn.get("part_end"),
+            "commit": commit,
+            "timestamp": timestamp,
+            "elapsed_ms": elapsed_ms,
+            "tokens": {
+                "input": turn_input,
+                "output": turn_output,
+                "reasoning": turn_reasoning,
+                "total": turn_total,
+                "cumulative_input": cumulative_input,
+                "cumulative_output": cumulative_output,
+            },
+        })
+
+    return stats
+
+
+def build_summary_rows(
+    trace: dict[str, Any],
+    turn_stats: list[dict[str, Any]],
+    commit_evals: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Join turn stats with per-commit evaluation results."""
+    rows: list[dict[str, Any]] = []
+    last_eval: dict[str, Any] = {}
+
+    for ts in turn_stats:
+        commit = ts.get("commit")
+        if commit and commit in commit_evals:
+            last_eval = commit_evals[commit]
+        eval_data = last_eval
+
+        suite_results = eval_data.get("suite_results", {})
+        rows.append({
+            "turn": ts["turn"],
+            "part_start": ts.get("part_start"),
+            "part_end": ts.get("part_end"),
+            "commit": commit,
+            "elapsed_ms": ts.get("elapsed_ms"),
+            "elapsed_human": format_elapsed(ts.get("elapsed_ms")),
+            "tokens": ts.get("tokens", {}),
+            "suites": {
+                suite: {
+                    "passed": suite_results.get(suite, {}).get("passed", 0),
+                    "total": suite_results.get(suite, {}).get("total", 0),
+                }
+                for suite in SUITE_PATHS
+            },
+            "total_passed": eval_data.get("passed", 0),
+            "total_tests": eval_data.get("total", 0),
+        })
+
+    return rows
+
+
+def format_summary_table(rows: list[dict[str, Any]]) -> str:
+    """Render summary rows as a fixed-width ASCII table."""
+    headers = [
+        "Turn", "Parts", "Commit", "Elapsed",
+        "Tokens(in/out)", "Basics", "WACCT", "C-Suite", "Torture", "Total",
+    ]
+    widths = [5, 9, 10, 8, 15, 9, 9, 9, 9, 9]
+
+    def fmt_suite(suites: dict, name: str) -> str:
+        s = suites.get(name, {})
+        return f"{s.get('passed', 0)}/{s.get('total', 0)}"
+
+    lines: list[str] = []
+    sep = "  ".join("-" * w for w in widths)
+    header_line = "  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=False))
+    lines.append(header_line)
+    lines.append(sep)
+
+    for row in rows:
+        parts_str = ""
+        ps, pe = row.get("part_start"), row.get("part_end")
+        if ps is not None and pe is not None:
+            parts_str = f"{ps}-{pe}" if ps != pe else str(ps)
+        elif ps is not None:
+            parts_str = str(ps)
+
+        commit = (row.get("commit") or "")[:8]
+
+        tokens = row.get("tokens", {})
+        tok_str = (
+            f"{format_token_count(tokens.get('cumulative_input', 0))}"
+            f"/{format_token_count(tokens.get('cumulative_output', 0))}"
+        )
+
+        suites = row.get("suites", {})
+        cols = [
+            str(row.get("turn", "")),
+            parts_str,
+            commit,
+            row.get("elapsed_human", "?"),
+            tok_str,
+            fmt_suite(suites, "basics"),
+            fmt_suite(suites, "wacct"),
+            fmt_suite(suites, "c_testsuite"),
+            fmt_suite(suites, "torture"),
+            f"{row.get('total_passed', 0)}/{row.get('total_tests', 0)}",
+        ]
+        lines.append("  ".join(c.ljust(w) for c, w in zip(cols, widths, strict=False)))
+
+    return "\n".join(lines)
+
+
+async def analyze_trace(
+    *,
+    trace_path: Path,
+    bundle_path: Path,
+    output_path: Path,
+    environment_file: Path,
+) -> dict[str, Any]:
+    """Pull trace + bundle, evaluate every commit by suite, produce summary table."""
+    trace = load_agent_trace(trace_path)
+    turn_stats = extract_turn_stats(trace)
+
+    # Get unique commits from turns (in order)
+    turn_commits: list[dict[str, Any]] = [
+        {"commit": ts["commit"]} for ts in turn_stats if ts.get("commit")
+    ]
+    commit_order = get_unique_commits(turn_commits)
+
+    if not commit_order:
+        raise ValueError("No commits found in trace turns")
+
+    fixtures_ok, missing_fixtures = has_required_test_fixtures(SUITE_PATHS)
+    if not fixtures_ok:
+        missing = "\n".join(f"- {p}" for p in missing_fixtures)
+        raise RuntimeError(f"Missing required test fixtures:\n{missing}")
+
+    workspace_root = Path(tempfile.mkdtemp(prefix="envoi-analyze-")).resolve()
+    repo_path = workspace_root / "repo"
+    clone_bundle(bundle_path, repo_path)
+
+    runtime_port = find_free_port()
+    runtime = await start_runtime(environment_file=environment_file, port=runtime_port)
+
+    commit_evals: dict[str, Any] = {}
+    try:
+        for index, commit in enumerate(commit_order, start=1):
+            print(f"[analyze] evaluating commit {index}/{len(commit_order)}: {commit[:10]}")
+            checkout_commit(repo_path, commit)
+            commit_evals[commit] = await evaluate_commit_by_suite(
+                envoi_url=runtime.url,
+                repo_path=repo_path,
+            )
+            suite_results = commit_evals[commit].get("suite_results", {})
+            passed = commit_evals[commit].get("passed", 0)
+            total = commit_evals[commit].get("total", 0)
+            dur = commit_evals[commit].get("duration_ms", 0)
+            suites_summary = "  ".join(
+                f"{s}={suite_results.get(s, {}).get('passed', 0)}"
+                f"/{suite_results.get(s, {}).get('total', 0)}"
+                for s in SUITE_PATHS
+            )
+            print(
+                f"[analyze]   {passed}/{total} passed  ({dur}ms)  {suites_summary}"
+            )
+    finally:
+        stop_runtime(runtime)
+        shutil.rmtree(workspace_root, ignore_errors=True)
+
+    summary_rows = build_summary_rows(trace, turn_stats, commit_evals)
+
+    table_str = format_summary_table(summary_rows)
+    print()
+    print(table_str)
+    print()
+
+    report = {
+        "trajectory_id": trace.get("trajectory_id"),
+        "agent_model": trace.get("agent_model"),
+        "started_at": trace.get("started_at"),
+        "generated_at": now_iso(),
+        "summary": summary_rows,
+        "commits_evaluated": commit_order,
+        "commit_evaluations": commit_evals,
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2))
+
+    return report
+
+
 async def async_main() -> None:
     parser = argparse.ArgumentParser(
         description="Replay trajectory artifacts, evaluate tests, or reconstruct repo at part t.",
     )
     parser.add_argument(
         "--mode",
-        choices=["evaluate", "checkout-part"],
+        choices=["evaluate", "checkout-part", "analyze"],
         default="evaluate",
         help=(
             "evaluate: run tests for all unique commits; "
-            "checkout-part: materialize repo at a specific part."
+            "checkout-part: materialize repo at a specific part; "
+            "analyze: evaluate by suite and print summary table with tokens/timing."
         ),
     )
     parser.add_argument(
@@ -545,22 +885,33 @@ async def async_main() -> None:
         environment_file = Path(args.environment_file).expanduser().resolve()
         if not environment_file.exists():
             raise FileNotFoundError(f"Environment file not found: {environment_file}")
-        test_paths = args.test_paths if args.test_paths else list(REQUIRED_PATHS)
 
-        report = await replay_trace(
-            trace_path=trace_path,
-            bundle_path=bundle_path,
-            output_path=output_path,
-            environment_file=environment_file,
-            test_paths=test_paths,
-        )
+        if args.mode == "analyze":
+            report = await analyze_trace(
+                trace_path=trace_path,
+                bundle_path=bundle_path,
+                output_path=output_path,
+                environment_file=environment_file,
+            )
+        else:
+            test_paths = args.test_paths if args.test_paths else list(REQUIRED_PATHS)
+            report = await replay_trace(
+                trace_path=trace_path,
+                bundle_path=bundle_path,
+                output_path=output_path,
+                environment_file=environment_file,
+                test_paths=test_paths,
+            )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    print(
-        f"[done] wrote {len(report['part_evaluations'])} part evaluations "
-        f"to {Path(args.output).expanduser().resolve()}"
-    )
+    if args.mode == "analyze":
+        print(f"[done] wrote analysis to {Path(args.output).expanduser().resolve()}")
+    else:
+        print(
+            f"[done] wrote {len(report['part_evaluations'])} part evaluations "
+            f"to {Path(args.output).expanduser().resolve()}"
+        )
 
 
 def main() -> None:
