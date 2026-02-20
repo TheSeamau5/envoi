@@ -9,8 +9,8 @@ Source: LLVM test-suite mirror of GCC torture tests.
 Accepts an optional `count` parameter to limit how many tests run.
 
 Routes:
-- @torture/part_{part} runs one fixed-size shard when `part` is provided.
-- @torture/part_{part} with no `part` runs all shards.
+- @torture runs all shards.
+- @torture/part_{part} runs one fixed-size shard.
 """
 
 from __future__ import annotations
@@ -32,6 +32,22 @@ def load_blacklist() -> set[str]:
     return set()
 
 
+@torture.test()
+async def run_torture_all(
+    count: int = 0,
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_torture(
+        part=None,
+        count=count,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
+
+
 @torture.test("part_{part}")
 async def run_torture(
     part: int | None = None,
@@ -43,9 +59,13 @@ async def run_torture(
     part_size = 40
     blacklist = load_blacklist()
     torture_dir = Path("/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute")
+    if not torture_dir.is_dir():
+        raise RuntimeError(f"Missing torture fixtures directory: {torture_dir}")
     source_files = sorted(
         source_file for source_file in torture_dir.glob("*.c") if source_file.name not in blacklist
     )
+    if not source_files:
+        raise RuntimeError(f"No torture test files found in fixtures directory: {torture_dir}")
     cases = [
         {
             "name": source_file.stem,

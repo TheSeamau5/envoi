@@ -21,6 +21,7 @@ import os
 import shlex
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -41,10 +42,11 @@ MESSAGE_TIMEOUT_SECONDS = int(
 )  # hard cap per message turn
 MIN_TURN_TIMEOUT_SECONDS = int(
     os.environ.get("MIN_TURN_TIMEOUT_SECONDS", "45")
-)  # don't go lower than this for healthy round-trips
+)  # don't go lower than this for healthy request/response exchanges
 SECONDS_PER_REMAINING_PART = int(
     os.environ.get("SECONDS_PER_REMAINING_PART", "60")
 )  # adaptive cap as part budget gets tight
+TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +138,12 @@ def resolve_model(agent: str, model: str | None) -> str:
     if agent == "codex":
         return model or DEFAULT_CODEX_MODEL
     raise ValueError(f"Unsupported agent: {agent}")
+
+
+def iso_from_epoch_ms(epoch_ms: int | None) -> str:
+    if isinstance(epoch_ms, int) and epoch_ms > 0:
+        return datetime.fromtimestamp(epoch_ms / 1000, UTC).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def decode_b64_to_text(encoded: str, *, label: str) -> str:
@@ -238,7 +246,6 @@ class RepoCheckpoint(BaseModel):
     commit_after: str | None = None
     committed: bool = False
     changed_files: list[str] = Field(default_factory=list)
-    patch_s3_uri: str | None = None
 
 
 class PartRecord(BaseModel):
@@ -334,6 +341,7 @@ class AgentBackend(Protocol):
         seen_message_ids: set[str],
         timeout: int,
         remaining_parts_budget: int,
+        on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentTurnOutcome | None:
         ...
 
@@ -667,6 +675,7 @@ async def sandbox_run(
     timeout: int = 60,
     quiet: bool = False,
     stream_output: bool = False,
+    on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[int, str, str]:
     """Execute a command inside the sandbox."""
     if not quiet:
@@ -675,15 +684,34 @@ async def sandbox_run(
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
-    async def drain_stream(stream: Any, sink: list[str], live: bool = False) -> None:
+    async def drain_stream(
+        stream: Any,
+        sink: list[str],
+        live: bool = False,
+        line_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        line_buffer = ""
         async for chunk in stream:
             sink.append(chunk)
             if live and chunk:
                 builtins.print(chunk, end="", flush=True)
+            if line_callback is None:
+                continue
+            line_buffer += chunk
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                await line_callback(line.rstrip("\r"))
+        if line_callback is not None and line_buffer:
+            await line_callback(line_buffer.rstrip("\r"))
 
     await asyncio.gather(
         drain_stream(proc.stdout, stdout_chunks),
-        drain_stream(proc.stderr, stderr_chunks, live=stream_output),
+        drain_stream(
+            proc.stderr,
+            stderr_chunks,
+            live=stream_output,
+            line_callback=on_stderr_line,
+        ),
     )
 
     await proc.wait.aio()
@@ -723,6 +751,7 @@ async def run_opencode_client(
     timeout: int = 60,
     quiet: bool = False,
     stream_output: bool = False,
+    on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     command = "python3 /sandbox/opencode_client.py " + " ".join(shlex.quote(a) for a in args)
     exit_code, stdout, stderr = await sandbox_run(
@@ -731,6 +760,7 @@ async def run_opencode_client(
         timeout=timeout,
         quiet=quiet,
         stream_output=stream_output,
+        on_stderr_line=on_stderr_line,
     )
     if exit_code != 0:
         if stderr:
@@ -751,6 +781,7 @@ async def run_codex_client(
     timeout: int = 60,
     quiet: bool = False,
     stream_output: bool = False,
+    on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     command = "python3 -u /sandbox/codex_client.py " + " ".join(shlex.quote(a) for a in args)
     exit_code, stdout, stderr = await sandbox_run(
@@ -759,6 +790,7 @@ async def run_codex_client(
         timeout=timeout,
         quiet=quiet,
         stream_output=stream_output,
+        on_stderr_line=on_stderr_line,
     )
     if exit_code != 0:
         if stderr:
@@ -796,10 +828,27 @@ async def send_message_blocking(
     text: str,
     timeout: int = MESSAGE_TIMEOUT_SECONDS,
     remaining_parts_budget: int = 0,
+    on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     prompt_path = "/tmp/prompt.txt"
     await sandbox_write_file(sandbox, prompt_path, text, ensure_dir=False)
     print(f"[prompt] sending message ({len(text)} chars), waiting up to {timeout}s...")
+
+    async def handle_stderr_line(line: str) -> None:
+        if on_stream_part is None:
+            return
+        stripped = line.strip()
+        if not stripped.startswith(TRACE_EVENT_PREFIX):
+            return
+        payload = stripped[len(TRACE_EVENT_PREFIX):].strip()
+        if not payload:
+            return
+        try:
+            event_obj = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        if isinstance(event_obj, dict):
+            await on_stream_part(event_obj)
 
     response = await run_opencode_client(
         sandbox,
@@ -814,6 +863,7 @@ async def send_message_blocking(
         ],
         timeout=timeout,
         stream_output=True,
+        on_stderr_line=handle_stderr_line,
     )
     if response is None:
         return None
@@ -1042,7 +1092,6 @@ async def create_part_checkpoint(
             commit_after=commit_before,
             committed=False,
             changed_files=[],
-            patch_s3_uri=None,
         )
 
     commit_message = f"part {part} checkpoint"
@@ -1059,23 +1108,9 @@ async def create_part_checkpoint(
             commit_after=commit_before,
             committed=False,
             changed_files=changed_files,
-            patch_s3_uri=None,
         )
 
     commit_after = await get_git_commit(sandbox)
-    patch_s3_uri: str | None = None
-    if commit_after:
-        _, patch_text, _ = await sandbox_run(
-            sandbox,
-            "cd /workspace && git show --binary --format=fuller --no-color HEAD",
-            quiet=True,
-        )
-        if patch_text.strip():
-            patch_s3_uri = upload_file(
-                trajectory_id,
-                f"parts/{part:04d}.patch",
-                patch_text.encode("utf-8"),
-            )
 
     print(f"[git] committed part {part}: {commit_after} files={len(changed_files)}")
     return RepoCheckpoint(
@@ -1083,7 +1118,6 @@ async def create_part_checkpoint(
         commit_after=commit_after,
         committed=True,
         changed_files=changed_files,
-        patch_s3_uri=patch_s3_uri,
     )
 
 
@@ -1145,7 +1179,7 @@ async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
     exit_code, stdout, stderr = await sandbox_run(
         sandbox,
         f"AGENT_KIND={shlex.quote(agent)} bash /tmp/upload/setup.sh",
-        timeout=900,
+        timeout=1800,
     )
     if exit_code != 0:
         print(f"[setup] FAILED:\n{stdout}\n{stderr}")
@@ -1224,6 +1258,7 @@ class OpenCodeBackend:
         seen_message_ids: set[str],
         timeout: int,
         remaining_parts_budget: int,
+        on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentTurnOutcome | None:
         response = await send_message_blocking(
             sandbox,
@@ -1231,6 +1266,7 @@ class OpenCodeBackend:
             prompt_text,
             timeout=timeout,
             remaining_parts_budget=remaining_parts_budget,
+            on_stream_part=on_stream_part,
         )
         if response is None:
             return None
@@ -1295,6 +1331,7 @@ class CodexBackend:
         seen_message_ids: set[str],
         timeout: int,
         remaining_parts_budget: int,
+        on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentTurnOutcome | None:
         prompt_path = "/tmp/prompt.txt"
         await sandbox_write_file(sandbox, prompt_path, prompt_text, ensure_dir=False)
@@ -1311,11 +1348,28 @@ class CodexBackend:
         ]
         if self._api_key_file:
             args.extend(["--api-key-file", self._api_key_file])
+        async def handle_stderr_line(line: str) -> None:
+            if on_stream_part is None:
+                return
+            stripped = line.strip()
+            if not stripped.startswith(TRACE_EVENT_PREFIX):
+                return
+            payload = stripped[len(TRACE_EVENT_PREFIX):].strip()
+            if not payload:
+                return
+            try:
+                event_obj = json.loads(payload)
+            except json.JSONDecodeError:
+                return
+            if isinstance(event_obj, dict):
+                await on_stream_part(event_obj)
+
         response = await run_codex_client(
             sandbox,
             args,
             timeout=timeout,
             stream_output=True,
+            on_stderr_line=handle_stderr_line,
         )
         if response is None:
             return None
@@ -1386,6 +1440,93 @@ def get_agent_backend(agent: str) -> AgentBackend:
 
 
 # ---------------------------------------------------------------------------
+# Stream callback
+# ---------------------------------------------------------------------------
+
+
+def make_stream_part_callback(
+    *,
+    sandbox: modal.Sandbox,
+    trajectory_id: str,
+    agent_trace: AgentTrace,
+    agent_name: str,
+    resolved_model: str,
+    effective_max_parts: int,
+    part_counter: list[int],
+    git_commit_ref: list[str | None],
+    turn_record: TurnRecord | None,
+    session_id: str,
+    prompt_text: str,
+    part_start: int,
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    async def on_stream_part(stream_event: dict[str, Any]) -> None:
+        if turn_record is None:
+            return
+        if stream_event.get("event") != "part.completed":
+            return
+        if part_counter[0] >= effective_max_parts:
+            return
+
+        try:
+            part_counter[0] += 1
+            absolute_part = part_counter[0]
+            raw_files = stream_event.get("files")
+            files = (
+                [f for f in raw_files if isinstance(f, str) and f]
+                if isinstance(raw_files, list)
+                else []
+            )
+            has_file_change = bool(stream_event.get("has_file_change"))
+            checkpoint: RepoCheckpoint | None = None
+            if has_file_change:
+                checkpoint = await create_part_checkpoint(
+                    sandbox=sandbox,
+                    trajectory_id=trajectory_id,
+                    part=absolute_part,
+                )
+                if files and not checkpoint.changed_files:
+                    checkpoint.changed_files = files
+                git_commit_ref[0] = (
+                    checkpoint.commit_after
+                    or checkpoint.commit_before
+                    or git_commit_ref[0]
+                )
+
+            part_record = PartRecord(
+                trajectory_id=trajectory_id,
+                session_id=session_id,
+                agent=agent_name,
+                part=absolute_part,
+                timestamp=iso_from_epoch_ms(
+                    stream_event.get("timestamp_ms")
+                    if isinstance(stream_event.get("timestamp_ms"), int)
+                    else None
+                ),
+                agent_model=resolved_model,
+                prompt=(prompt_text if absolute_part == part_start + 1 else None),
+                git_commit=git_commit_ref[0],
+                message_id=None,
+                sessions=[],
+                session_ids=[],
+                new_messages=[],
+                envoi_calls=[],
+                repo_checkpoint=checkpoint,
+            )
+            turn_record.parts.append(part_record)
+            if turn_record.part_start is None:
+                turn_record.part_start = absolute_part
+            turn_record.part_end = absolute_part
+            turn_record.git_commit = git_commit_ref[0]
+            if checkpoint is not None:
+                turn_record.repo_checkpoint = checkpoint
+            save_agent_trace_snapshot(trajectory_id, agent_trace)
+        except Exception as callback_err:
+            print(f"[stream] failed to process live part event: {callback_err}")
+
+    return on_stream_part
+
+
+# ---------------------------------------------------------------------------
 # End session
 # ---------------------------------------------------------------------------
 
@@ -1438,12 +1579,9 @@ async def end_session(
     except Exception as e:
         print(f"[bundle] failed: {e}")
 
-    part_patch_prefix = artifact_uri(agent_trace.trajectory_id, "parts/")
-
     agent_trace.artifacts = {
         "agent_trace": trace_s3_uri,
         "repo_bundle": bundle_s3_uri,
-        "part_patch_prefix": part_patch_prefix,
     }
     save_agent_trace_snapshot(agent_trace.trajectory_id, agent_trace)
 
@@ -1537,13 +1675,12 @@ async def _run_trajectory_impl(
         )
         save_agent_trace_snapshot(trajectory_id, agent_trace)
 
-        # --- Main loop: blocking message turns with part budget ---
+        # --- Main loop: blocking message calls with part budget ---
         tracker = SolveTracker()
         last_message_id: str | None = None
         seen_message_ids: set[str] = set()
         turn_count = 0
         part_count = 0
-        no_progress_turns = 0
         prompt_text = PROMPT
         end_reason: str | None = None
 
@@ -1577,6 +1714,57 @@ async def _run_trajectory_impl(
                 builtins.print(banner, flush=True)
 
                 turn_started_at = datetime.now(UTC).isoformat()
+                per_call_parts_budget = remaining_parts
+                previous_part_count = part_count
+                streamed_parts = 0
+                observed_parts = 0
+                part_limit_abort = False
+                git_commit = await get_git_commit(sandbox)
+                turn_record: TurnRecord | None = None
+
+                turn_count += 1
+                turn_record = TurnRecord(
+                    trajectory_id=trajectory_id,
+                    session_id=session_id,
+                    agent=agent,
+                    turn=turn_count,
+                    part_start=None,
+                    part_end=None,
+                    timestamp=turn_started_at,
+                    agent_model=resolved_model,
+                    prompt=prompt_text,
+                    git_commit=git_commit,
+                    message_id=None,
+                    sessions=[],
+                    session_ids=[],
+                    new_messages=[],
+                    envoi_calls=[],
+                    repo_checkpoint=None,
+                    parts=[],
+                )
+                agent_trace.turns.append(turn_record)
+
+                current_turn_record = turn_record
+                current_session_id = session_id
+                current_prompt_text = prompt_text
+                current_part_start = previous_part_count
+                stream_part_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+                stream_part_counter: list[int] = [part_count]
+                stream_git_commit_ref: list[str | None] = [git_commit]
+                stream_part_cb = make_stream_part_callback(
+                    sandbox=sandbox,
+                    trajectory_id=trajectory_id,
+                    agent_trace=agent_trace,
+                    agent_name=agent,
+                    resolved_model=resolved_model,
+                    effective_max_parts=effective_max_parts,
+                    part_counter=stream_part_counter,
+                    git_commit_ref=stream_git_commit_ref,
+                    turn_record=current_turn_record,
+                    session_id=current_session_id,
+                    prompt_text=current_prompt_text,
+                    part_start=current_part_start,
+                )
 
                 # Send message and BLOCK until agent finishes
                 turn_outcome = await backend.run_turn(
@@ -1586,11 +1774,16 @@ async def _run_trajectory_impl(
                     prompt_text=prompt_text,
                     seen_message_ids=seen_message_ids,
                     timeout=turn_timeout_seconds,
-                    remaining_parts_budget=remaining_parts,
+                    remaining_parts_budget=per_call_parts_budget,
+                    on_stream_part=stream_part_cb,
                 )
+                part_count = stream_part_counter[0]
+                git_commit = stream_git_commit_ref[0]
 
                 if turn_outcome is None:
-                    print("[turn] no response from agent")
+                    if turn_record is not None and not turn_record.parts:
+                        agent_trace.turns.pop()
+                    print("[progress] no response from agent")
                     await dump_sandbox_logs(sandbox, agent=agent)
                     end_reason = "agent_error"
                     break
@@ -1600,19 +1793,17 @@ async def _run_trajectory_impl(
                 if agent_trace.session_id != session_id:
                     agent_trace.session_id = session_id
 
-                turn_count += 1
-
                 # Log what the agent did
                 info = response.get("info", {})
                 parts = response.get("parts", [])
                 last_message_id = info.get("id")
-                print(f"[turn] response id={last_message_id} parts={len(parts)}")
+                print(f"[progress] response id={last_message_id} parts={len(parts)}")
                 log_message_parts(response)
 
                 session_objects = turn_outcome.session_objects
                 session_ids = turn_outcome.session_ids
                 new_messages = turn_outcome.new_messages
-                print(f"[turn] new_messages={len(new_messages)} sessions={len(session_ids)}")
+                print(f"[progress] new_messages={len(new_messages)} sessions={len(session_ids)}")
 
                 # Extract envoi calls from newly observed messages only.
                 new_envoi_calls: list[EnvoiCall] = []
@@ -1628,87 +1819,67 @@ async def _run_trajectory_impl(
                 streamed_parts = int(stream_meta_obj.get("meaningful_parts_seen", 0) or 0)
                 part_limit_abort = bool(stream_meta_obj.get("aborted_for_part_limit"))
                 observed_parts = count_meaningful_parts(new_messages)
-                new_parts = min(max(observed_parts, streamed_parts), remaining_parts)
-                if new_parts == 0:
-                    no_progress_turns += 1
-                else:
-                    no_progress_turns = 0
-                previous_part_count = part_count
-                part_count += new_parts
 
-                checkpoint = await create_part_checkpoint(
-                    sandbox=sandbox,
-                    trajectory_id=trajectory_id,
-                    part=part_count,
-                )
-                git_commit = checkpoint.commit_after or checkpoint.commit_before
-
-                part_numbers = range(previous_part_count + 1, part_count + 1)
-                part_records_for_turn: list[PartRecord] = []
-                for absolute_part in part_numbers:
-                    is_last_part_in_turn = absolute_part == part_count
-                    part_record = PartRecord(
-                        trajectory_id=trajectory_id,
-                        session_id=session_id,
-                        agent=agent,
-                        part=absolute_part,
-                        timestamp=datetime.now(UTC).isoformat(),
-                        agent_model=resolved_model,
-                        prompt=prompt_text if absolute_part == previous_part_count + 1 else None,
-                        git_commit=(
-                            git_commit
-                            if is_last_part_in_turn
-                            else (checkpoint.commit_before or git_commit)
-                        ),
-                        message_id=last_message_id if is_last_part_in_turn else None,
-                        sessions=session_objects if is_last_part_in_turn else [],
-                        session_ids=session_ids if is_last_part_in_turn else [],
-                        new_messages=new_messages if is_last_part_in_turn else [],
-                        envoi_calls=new_envoi_calls if is_last_part_in_turn else [],
-                        repo_checkpoint=checkpoint if is_last_part_in_turn else None,
-                    )
-                    part_records_for_turn.append(part_record)
-
-                turn_record = TurnRecord(
-                    trajectory_id=trajectory_id,
-                    session_id=session_id,
-                    agent=agent,
-                    turn=turn_count,
-                    part_start=(previous_part_count + 1) if new_parts > 0 else None,
-                    part_end=None,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    agent_model=resolved_model,
-                    prompt=prompt_text,
-                    git_commit=git_commit if new_parts == 0 else None,
-                    message_id=last_message_id if new_parts == 0 else None,
-                    sessions=session_objects if new_parts == 0 else [],
-                    session_ids=session_ids if new_parts == 0 else [],
-                    new_messages=new_messages if new_parts == 0 else [],
-                    envoi_calls=new_envoi_calls if new_parts == 0 else [],
-                    repo_checkpoint=checkpoint if new_parts == 0 else None,
-                    parts=[],
-                )
-                agent_trace.turns.append(turn_record)
-                if part_records_for_turn:
-                    for part_record in part_records_for_turn:
-                        turn_record.parts.append(part_record)
-                        turn_record.part_end = part_record.part
-                        if part_record.message_id is not None:
-                            turn_record.git_commit = part_record.git_commit
-                            turn_record.message_id = part_record.message_id
-                            turn_record.sessions = part_record.sessions
-                            turn_record.session_ids = part_record.session_ids
-                            turn_record.new_messages = part_record.new_messages
-                            turn_record.envoi_calls = part_record.envoi_calls
-                            turn_record.repo_checkpoint = part_record.repo_checkpoint
+                new_parts = part_count - previous_part_count
+                if turn_record is not None:
+                    target_parts = min(max(observed_parts, streamed_parts), remaining_parts)
+                    missing_stream_parts = max(0, target_parts - new_parts)
+                    while missing_stream_parts > 0 and part_count < effective_max_parts:
+                        part_count += 1
+                        absolute_part = part_count
+                        placeholder = PartRecord(
+                            trajectory_id=trajectory_id,
+                            session_id=session_id,
+                            agent=agent,
+                            part=absolute_part,
+                            timestamp=datetime.now(UTC).isoformat(),
+                            agent_model=resolved_model,
+                            prompt=(
+                                prompt_text
+                                if absolute_part == previous_part_count + 1
+                                else None
+                            ),
+                            git_commit=git_commit,
+                            message_id=None,
+                            sessions=[],
+                            session_ids=[],
+                            new_messages=[],
+                            envoi_calls=[],
+                            repo_checkpoint=None,
+                        )
+                        turn_record.parts.append(placeholder)
+                        if turn_record.part_start is None:
+                            turn_record.part_start = absolute_part
+                        turn_record.part_end = absolute_part
                         save_agent_trace_snapshot(trajectory_id, agent_trace)
-                else:
-                    save_agent_trace_snapshot(trajectory_id, agent_trace)
+                        missing_stream_parts -= 1
+                    new_parts = part_count - previous_part_count
+
+                    turn_record.session_id = session_id
+                    turn_record.message_id = last_message_id
+                    turn_record.sessions = session_objects
+                    turn_record.session_ids = session_ids
+                    turn_record.new_messages = new_messages
+                    turn_record.envoi_calls = new_envoi_calls
+                    for record in turn_record.parts:
+                        record.session_id = session_id
+                    if turn_record.parts:
+                        last_part_record = turn_record.parts[-1]
+                        last_part_record.message_id = last_message_id
+                        last_part_record.sessions = session_objects
+                        last_part_record.session_ids = session_ids
+                        last_part_record.new_messages = new_messages
+                        last_part_record.envoi_calls = new_envoi_calls
+                        if turn_record.git_commit is None:
+                            turn_record.git_commit = last_part_record.git_commit
+                    else:
+                        turn_record.git_commit = git_commit
+                save_agent_trace_snapshot(trajectory_id, agent_trace)
 
                 solved_count = len(tracker.solved)
                 total_count = len(REQUIRED_PATHS)
                 print(
-                    f"[turn] turn={turn_count} commit={git_commit} "
+                    f"[progress] turn={turn_count} commit={git_commit} "
                     f"parts=+{new_parts} total={part_count}/{effective_max_parts} "
                     f"(observed_parts={observed_parts} streamed_parts={streamed_parts}) "
                     f"envoi_calls={len(new_envoi_calls)} "
@@ -1726,11 +1897,6 @@ async def _run_trajectory_impl(
 
                 if part_count >= effective_max_parts:
                     end_reason = "part_limit"
-                    break
-
-                if no_progress_turns >= 3:
-                    print("[turn] no meaningful parts observed for 3 consecutive turns; stopping")
-                    end_reason = "agent_error"
                     break
 
                 # Build re-injection prompt for next turn

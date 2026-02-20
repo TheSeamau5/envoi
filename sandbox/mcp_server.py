@@ -28,9 +28,9 @@ async def run_tests(test_path: str) -> str:
         test_path: Test suite path. Options:
             - "basics" (all basics tests)
             - "basics/smoke", "basics/variables", "basics/control_flow", etc.
-            - "wacct/chapter_1" through "wacct/chapter_20"
-            - "c_testsuite/part_1" through "c_testsuite/part_5"
-            - "torture/part_1" through "torture/part_10"
+            - "wacct" (all chapters) or "wacct/chapter_1" through "wacct/chapter_20"
+            - "c_testsuite" (all shards) or "c_testsuite/part_<n>"
+            - "torture" (all shards) or "torture/part_<n>"
 
     Returns:
         JSON object with test results including passed/failed counts and details.

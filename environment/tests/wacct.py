@@ -5,8 +5,8 @@ Source: github.com/nlsandler/writing-a-c-compiler-tests
 20 chapters of progressively harder C features.
 
 Routes:
-- @wacct/chapter_{chapter} runs one chapter when `chapter` is provided.
-- @wacct/chapter_{chapter} with no `chapter` runs all chapters.
+- @wacct runs all chapters.
+- @wacct/chapter_{chapter} runs one chapter.
 """
 
 from __future__ import annotations
@@ -21,6 +21,20 @@ from .utils import TestResult, run_case, select_cases, to_result
 wacct = envoi.suite("wacct")
 
 
+@wacct.test()
+async def run_wacct_all(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_wacct_tests(
+        chapter=None,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
+
+
 @wacct.test("chapter_{chapter}")
 async def run_wacct_tests(
     chapter: int | None = None,
@@ -30,6 +44,10 @@ async def run_wacct_tests(
 ) -> TestResult:
     tests_dir = Path("/opt/tests/wacct/tests")
     expected_path = Path("/opt/tests/wacct/expected_results.json")
+    if not tests_dir.is_dir():
+        raise RuntimeError(f"Missing WACCT fixtures directory: {tests_dir}")
+    if not expected_path.is_file():
+        raise RuntimeError(f"Missing WACCT expected results file: {expected_path}")
     expected_map = json.loads(expected_path.read_text()) if expected_path.exists() else {}
 
     if chapter is not None and not 1 <= chapter <= 20:
@@ -80,4 +98,9 @@ async def run_wacct_tests(
                     )
 
     selected = select_cases(cases, n_tests=n_tests, test_name=test_name, offset=offset)
+    if not selected and n_tests == 0 and test_name is None and offset == 0:
+        chapter_label = f"chapter_{chapter}" if chapter is not None else "all chapters"
+        raise RuntimeError(
+            f"No WACCT cases discovered for {chapter_label}; check fixtures under {tests_dir}"
+        )
     return to_result([await run_case(c) for c in selected])

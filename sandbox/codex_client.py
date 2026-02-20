@@ -26,6 +26,8 @@ MEANINGFUL_PART_TYPES: set[str] = {
     "patch",
 }
 
+TRACE_EVENT_PREFIX = "TRACE_EVENT "
+
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
@@ -148,7 +150,10 @@ def format_run_tests_output(value: Any) -> str:
                     lines.append(f"  - {name} ({phase})")
                     stderr_value = case.get("stderr")
                     if isinstance(stderr_value, str) and stderr_value.strip():
-                        lines.append(f"    stderr: {stderr_value.strip()}")
+                        stderr_lines = stderr_value.strip().splitlines()
+                        lines.append(f"    stderr: {stderr_lines[0]}")
+                        for extra_line in stderr_lines[1:]:
+                            lines.append(f"      {extra_line}")
             elif isinstance(passed, int) and isinstance(total, int) and passed == total:
                 lines.append("failed_cases: []")
 
@@ -161,7 +166,10 @@ def format_mcp_output_for_log(tool_name: str, result: Any, error: Any) -> str:
     if isinstance(error, dict) and error:
         return format_generic_structured(error)
     if tool_name == "run_tests":
-        return format_run_tests_output(result)
+        # Normalize through mcp_output_payload first so wrapper shapes like
+        # {"content":[...], "structured_content": {...}} collapse consistently.
+        normalized = mcp_output_payload(result, error)
+        return format_run_tests_output(normalized)
     return format_generic_structured(mcp_output_payload(result, error))
 
 
@@ -397,6 +405,57 @@ def parse_line_events_and_meaningful_count(line: str) -> tuple[list[dict[str, An
     return parsed_events, meaningful_parts
 
 
+def files_from_item(item: dict[str, Any], part: dict[str, Any]) -> list[str]:
+    files: list[str] = []
+    changes = item.get("changes")
+    if isinstance(changes, list):
+        for change in changes:
+            if isinstance(change, dict):
+                path = change.get("path")
+                if isinstance(path, str) and path:
+                    files.append(path)
+    if files:
+        return files
+
+    part_files = part.get("files")
+    if isinstance(part_files, list):
+        for entry in part_files:
+            if isinstance(entry, str) and entry:
+                files.append(entry)
+    return files
+
+
+def emit_trace_event(payload: dict[str, Any]) -> None:
+    print(f"{TRACE_EVENT_PREFIX}{_json_dumps(payload)}", file=sys.stderr, flush=True)
+
+
+def trace_event_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    if event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    part = part_from_item(item)
+    if not isinstance(part, dict):
+        return None
+    part_type = part.get("type")
+    if part_type not in MEANINGFUL_PART_TYPES:
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        item_type = "unknown"
+    has_file_change = item_type == "file_change" or part_type == "patch"
+    files = files_from_item(item, part) if has_file_change else []
+    return {
+        "event": "part.completed",
+        "part_type": part_type,
+        "item_type": item_type,
+        "has_file_change": has_file_change,
+        "files": files,
+        "timestamp_ms": int(time.time() * 1000),
+    }
+
+
 def summarize_event(event: dict[str, Any]) -> tuple[str, str | None] | None:
     event_type = event.get("type")
     if not isinstance(event_type, str):
@@ -532,6 +591,10 @@ def run_codex_turn(
             if parsed_events:
                 events.extend(parsed_events)
                 progress_stats["events"] = len(events)
+                for event in parsed_events:
+                    trace_event = trace_event_from_event(event)
+                    if trace_event is not None:
+                        emit_trace_event(trace_event)
             meaningful_parts_seen += meaningful_from_line
             progress_stats["meaningful_parts"] = meaningful_parts_seen
             if parsed_events:

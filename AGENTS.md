@@ -9,6 +9,16 @@ Core job:
 3. Capture repository state at high granularity via git commits when code changed.
 4. Persist artifacts to S3 for offline replay and analysis.
 
+Hard requirement:
+- Persist `agent_trace.json` after every recorded part.
+- Create a git checkpoint immediately for any part that changed files.
+
+Schema policy:
+- No deprecated fields, aliases, compatibility shims, or dual schemas.
+- Do not keep old names alive after renames.
+- If a schema or term changes, migrate and delete the old one.
+- Rule: fix or delete.
+
 ## Vocabulary (Canonical)
 - `part`:
   - Most granular observable unit in the trace.
@@ -16,22 +26,20 @@ Core job:
   - Global part index is the authoritative progress counter.
   - Budgeting and limits are based on parts (`--max-parts`).
 - `turn`:
-  - One message round-trip in the orchestrator loop.
+  - One request/response loop in the orchestrator.
   - A turn can contain many parts, one part, or zero meaningful parts.
-  - Turns are useful for grouping, but not for progress budgeting.
-- `step` (legacy term):
-  - Old vocabulary from earlier schema/flags.
-  - Treat legacy `step` fields as historical aliases for part-like progression.
-  - Do not introduce new `step` terminology in code, docs, flags, logs, or artifacts.
+  - Turns are grouping metadata only, not budgeting/accounting units.
+- `step`:
+  - Forbidden term. Do not use in code/docs/logs/schema/flags/artifacts.
 - `cycle`:
-  - Do not use this term in code/docs/logs/schema.
+  - Forbidden term. Do not use in code/docs/logs/schema/flags/artifacts.
   - Use `turn` for loop iterations and `part` for progress/accounting.
 
 ## Why Parts Are The Source Of Truth
 - Parts are the highest-fidelity unit we can observe and count consistently across providers.
 - A very capable model can do huge work in one turn; turn-count budgets miss this entirely.
 - Part-level indexing gives better recovery and replay granularity than turn-only indexing.
-- Artifact and replay contracts are keyed to parts (`parts/####.patch`, `checkout-part`, `part_to_commit`).
+- Artifact and replay contracts are keyed to part indices (`checkout-part`, `part_to_commit`).
 
 ## Architecture At A Glance
 - `orchestrate.py`: main controller. Starts sandbox services, runs turns, captures trace, checkpoints git, uploads artifacts.
@@ -48,7 +56,6 @@ Core job:
   - One canonical JSON document per trajectory.
 - Git-first state capture:
   - Checkpoint commits happen only when files changed (no duplicate commit noise).
-  - Patch snapshots are uploaded under `parts/` when a commit is created.
   - Final `repo.bundle` makes full history portable.
 - Capture full session family, not only root session:
   - Per turn, `list-sessions` + parent graph traversal captures root + child + deeper sessions.
@@ -61,12 +68,14 @@ Core job:
 For trajectory `<id>`, artifacts are stored under:
 - `trajectories/<id>/agent_trace.json` (canonical trace)
 - `trajectories/<id>/repo.bundle` (git history)
-- `trajectories/<id>/artifacts.json` (artifact manifest)
-- `trajectories/<id>/parts/####.patch` (per-part patch snapshot when a commit was made)
+
+Code-state source of truth:
+- `repo.bundle` contains full git history and is the canonical source for repository reconstruction.
+- `agent_trace.json` maps each part to commit metadata (`git_commit` / `repo_checkpoint`).
 
 `agent_trace.json` shape:
-- `turns`: list of turns
-- each turn includes:
+- `turns`: list of turn records
+- each turn record includes:
   - `turn` (global turn index)
   - `part_start`, `part_end`
   - `parts`: list of per-part records for that turn
@@ -75,7 +84,7 @@ Each part record includes:
 - `part` (global part index), `timestamp`, `prompt`, `message_id`
 - `sessions`, `session_ids`, `new_messages`
 - `envoi_calls`
-- `repo_checkpoint`: `commit_before`, `commit_after`, `changed_files`, optional `patch_s3_uri`
+- `repo_checkpoint`: `commit_before`, `commit_after`, `changed_files`
 - `git_commit` (effective commit)
 
 Top-level session summary includes:
@@ -134,7 +143,6 @@ Behavior:
   ```
 
 ## Important Gotchas
-- `trajectory.jsonl` is not authoritative; use `agent_trace.json`.
 - A turn may produce no new commit when files did not change.
 - `repo.bundle` is uploaded at end-of-run; if run dies early, bundle may be missing.
 - Full offline evaluation requires heavy fixtures at `/opt/tests/...`.

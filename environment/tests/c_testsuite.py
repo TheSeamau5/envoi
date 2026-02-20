@@ -6,8 +6,8 @@ Each .c file has a corresponding .c.expected file with the expected stdout.
 All tests are expected to exit 0.
 
 Routes:
-- @c_testsuite/part_{part} runs one fixed-size shard when `part` is provided.
-- @c_testsuite/part_{part} with no `part` runs all shards.
+- @c_testsuite runs all shards.
+- @c_testsuite/part_{part} runs one fixed-size shard.
 """
 
 from __future__ import annotations
@@ -22,6 +22,20 @@ from .utils import TestResult, run_case, select_cases, to_result
 c_testsuite = envoi.suite("c_testsuite")
 
 
+@c_testsuite.test()
+async def run_c_testsuite_all(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_c_testsuite(
+        part=None,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
+
+
 @c_testsuite.test("part_{part}")
 async def run_c_testsuite(
     part: int | None = None,
@@ -31,6 +45,8 @@ async def run_c_testsuite(
 ) -> TestResult:
     tests_dir = Path("/opt/tests/c-testsuite/tests/single-exec")
     part_size = 48
+    if not tests_dir.is_dir():
+        raise RuntimeError(f"Missing c-testsuite fixtures directory: {tests_dir}")
 
     cases: list[dict] = []
     for source_file in sorted(tests_dir.glob("*.c")):
@@ -44,6 +60,8 @@ async def run_c_testsuite(
                 "expected_exit_code": 0,
             }
         )
+    if not cases:
+        raise RuntimeError(f"No c-testsuite cases found in fixtures directory: {tests_dir}")
 
     if part is None:
         selected_cases = cases

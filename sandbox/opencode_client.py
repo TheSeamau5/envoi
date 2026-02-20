@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,7 @@ MEANINGFUL_PART_TYPES: set[str] = {
     "tool_result",
     "patch",
 }
+TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
 
 def to_jsonable(value: Any) -> Any:
@@ -320,6 +322,36 @@ async def stream_session_events(
                             if part_id not in meaningful_part_ids_seen:
                                 meaningful_part_ids_seen.add(part_id)
                                 meaningful_parts_seen += 1
+                                files: list[str] = []
+                                if part_type == "patch":
+                                    raw_files = part.get("files")
+                                    if isinstance(raw_files, list):
+                                        for entry in raw_files:
+                                            if isinstance(entry, str) and entry:
+                                                files.append(entry)
+                                            elif isinstance(entry, dict):
+                                                name = (
+                                                    entry.get("path")
+                                                    or entry.get("filename")
+                                                    or entry.get("name")
+                                                )
+                                                if isinstance(name, str) and name:
+                                                    files.append(name)
+                                trace_event = {
+                                    "event": "part.completed",
+                                    "part_type": part_type,
+                                    "has_file_change": part_type == "patch",
+                                    "files": files,
+                                    "timestamp_ms": int(time.time() * 1000),
+                                }
+                                print(
+                                    (
+                                        f"{TRACE_EVENT_PREFIX}"
+                                        f"{json.dumps(trace_event, separators=(',', ':'))}"
+                                    ),
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                         if (
                             max_parts > 0
                             and meaningful_parts_seen >= max_parts
