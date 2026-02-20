@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -186,14 +187,7 @@ def extract_turn_failure(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def run_codex_turn(
-    *,
-    session_id: str | None,
-    text: str,
-    model: str,
-    api_key: str | None,
-    max_parts: int = 0,
-) -> dict[str, Any]:
+def build_codex_exec_command(*, session_id: str | None, model: str) -> list[str]:
     command: list[str] = [
         "codex",
         "exec",
@@ -209,13 +203,65 @@ def run_codex_turn(
     ]
     if session_id and not session_id.startswith("pending-"):
         command.extend(["resume", session_id])
+    return command
 
+
+def build_codex_env(api_key: str | None) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("CODEX_HOME", "/workspace/.codex")
     env.setdefault("RUST_LOG", "error")
     if api_key:
         env["CODEX_API_KEY"] = api_key
         env["OPENAI_API_KEY"] = api_key
+    return env
+
+
+def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread | None:
+    if stream is None:
+        return None
+
+    def _drain() -> None:
+        for line in stream:
+            sink.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    return reader
+
+
+def meaningful_part_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    if event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    part = part_from_item(item)
+    if not isinstance(part, dict):
+        return None
+    if part.get("type") not in MEANINGFUL_PART_TYPES:
+        return None
+    return part
+
+
+def parse_line_events_and_meaningful_count(line: str) -> tuple[list[dict[str, Any]], int]:
+    parsed_events = parse_jsonl_events(line)
+    meaningful_parts = 0
+    for event in parsed_events:
+        if meaningful_part_from_event(event) is not None:
+            meaningful_parts += 1
+    return parsed_events, meaningful_parts
+
+
+def run_codex_turn(
+    *,
+    session_id: str | None,
+    text: str,
+    model: str,
+    api_key: str | None,
+    max_parts: int = 0,
+) -> dict[str, Any]:
+    command = build_codex_exec_command(session_id=session_id, model=model)
+    env = build_codex_env(api_key)
 
     proc = subprocess.Popen(
         command,
@@ -232,33 +278,22 @@ def run_codex_turn(
 
     events: list[dict[str, Any]] = []
     stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
     aborted_for_part_limit = False
     meaningful_parts_seen = 0
+
+    stderr_reader = start_stream_drain_thread(proc.stderr, stderr_lines)
 
     if proc.stdout is not None:
         for line in proc.stdout:
             stdout_lines.append(line)
-            parsed_events = parse_jsonl_events(line)
-            if not parsed_events:
-                continue
-            for event in parsed_events:
-                events.append(event)
-                if event.get("type") != "item.completed":
-                    continue
-                item = event.get("item")
-                if not isinstance(item, dict):
-                    continue
-                part = part_from_item(item)
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") not in MEANINGFUL_PART_TYPES:
-                    continue
-                meaningful_parts_seen += 1
-                if max_parts > 0 and meaningful_parts_seen >= max_parts:
-                    aborted_for_part_limit = True
-                    proc.terminate()
-                    break
-            if aborted_for_part_limit:
+            parsed_events, meaningful_from_line = parse_line_events_and_meaningful_count(line)
+            if parsed_events:
+                events.extend(parsed_events)
+            meaningful_parts_seen += meaningful_from_line
+            if max_parts > 0 and meaningful_parts_seen >= max_parts:
+                aborted_for_part_limit = True
+                proc.terminate()
                 break
 
     if proc.stdout is not None:
@@ -273,9 +308,10 @@ def run_codex_turn(
         proc.kill()
         return_code = proc.wait()
 
-    stderr_text = ""
-    if proc.stderr is not None:
-        stderr_text = proc.stderr.read()
+    if stderr_reader is not None:
+        stderr_reader.join(timeout=2)
+
+    stderr_text = "".join(stderr_lines)
 
     if not events and stdout_lines:
         events = parse_jsonl_events("".join(stdout_lines))

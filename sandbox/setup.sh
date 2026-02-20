@@ -32,6 +32,10 @@ git config user.email "agent@example.com"
 git config user.name "Agent"
 git commit --allow-empty -m "Initial empty commit"
 
+echo "=== Installing common CLI tools ==="
+apt-get update -qq
+apt-get install -y -qq ripgrep
+
 if [ "$AGENT_KIND" = "opencode" ]; then
     echo "=== Installing Node.js ==="
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -

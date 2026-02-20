@@ -429,14 +429,18 @@ def log_message_parts(message: dict[str, Any]) -> None:
             summary = summarize_tool_input(name, state.get("input", {}))
             output = state.get("output") or state.get("metadata", {}).get("output") or ""
             output_str = truncate_text(str(output), limit=200) if output else ""
-            print(f"  [{role}] {name} ({status}) {summary}")
+            print(f"  [{role}] {name} ({status})")
+            if summary:
+                print(f"         input: {summary}")
             if output_str and status == "completed":
                 print(f"         -> {output_str}")
         elif ptype == "tool_use":
             name = part.get("name", "?")
             status = part.get("status", "?")
             summary = summarize_tool_input(name, part.get("input", {}))
-            print(f"  [{role}] {name} ({status}) {summary}")
+            print(f"  [{role}] {name} ({status})")
+            if summary:
+                print(f"         input: {summary}")
         elif ptype == "tool_result":
             content = str(part.get("content", ""))
             if content:
@@ -528,16 +532,25 @@ def get_bucket() -> str:
     return os.environ.get("AWS_S3_BUCKET", "envoi-trace-data")
 
 
-def save_agent_trace_snapshot(trajectory_id: str, trace: AgentTrace) -> None:
+def save_agent_trace_snapshot(
+    trajectory_id: str,
+    trace: AgentTrace,
+    *,
+    allow_empty: bool = False,
+) -> None:
+    part_count = sum(len(turn.parts) for turn in trace.turns)
+    turn_count = len(trace.turns)
+    if not allow_empty and turn_count == 0 and part_count == 0:
+        return
+
     s3 = get_s3_client()
     bucket = get_bucket()
     key = f"trajectories/{trajectory_id}/agent_trace.json"
     payload = trace.model_dump(mode="json")
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=body)
-    part_count = sum(len(turn.parts) for turn in trace.turns)
     print(
-        f"[s3] saved agent trace (turns={len(trace.turns)} parts={part_count}) "
+        f"[s3] saved agent trace (turns={turn_count} parts={part_count}) "
         f"to s3://{bucket}/{key}"
     )
 
@@ -656,7 +669,7 @@ async def sandbox_run(
     stdout = "".join(stdout_chunks)
     stderr = "".join(stderr_chunks)
     exit_code = proc.returncode or 0
-    if exit_code == 124:
+    if exit_code in {124, -1}:
         print(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
     if exit_code != 0:
         print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
