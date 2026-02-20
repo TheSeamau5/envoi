@@ -28,14 +28,12 @@ trace = "scripts.trace:main"
 replay = "scripts.offline_replay:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["."]
+[tool.setuptools]
+packages = ["agents", "scripts"]
+py-modules = ["task", "runner"]
 
 [tool.ruff]
 line-length = 100
