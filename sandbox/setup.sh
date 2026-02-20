@@ -110,7 +110,7 @@ if [ "$AGENT_KIND" = "codex" ]; then
     fi
     install -m 0755 "$CODEX_EXTRACTED_BIN" /usr/local/bin/codex
     codex --version
-    mkdir -p /workspace/.codex
+    mkdir -p /tmp/codex-home
 
     echo "=== Setup complete ==="
     echo "envoi PID=$ENVOI_PID on port 8000"

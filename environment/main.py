@@ -1,8 +1,9 @@
 """
 C Compiler evaluation environment.
 
-Evaluates a submitted Rust project that compiles C source code to ARM64
-executables. The submission must produce a ./cc binary via build.sh.
+Evaluates a submitted Rust project that compiles C source code to the
+container architecture (x86_64 in this environment). The submission must
+produce a ./cc binary via build.sh.
 
 Usage:  ./cc input.c -o output
 

@@ -3,7 +3,7 @@ This is EXTREMELY IMPORTANT: no cheating, no wrappers, no shortcuts.
 Do NOT call or wrap cc/gcc/clang/tcc.
 Do NOT use saltwater or ANY existing C compiler implementation.
 Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
-Target Linux ARM64 (AArch64). Do NOT generate x86/x86_64 assembly.
+Target Linux x86_64 (x86-64). Do NOT generate AArch64/ARM64 assembly.
 
 Your submission must include:
 - Cargo.toml

@@ -209,7 +209,7 @@ def build_codex_exec_command(*, session_id: str | None, model: str) -> list[str]
 
 def build_codex_env(api_key: str | None) -> dict[str, str]:
     env = dict(os.environ)
-    env.setdefault("CODEX_HOME", "/workspace/.codex")
+    env.setdefault("CODEX_HOME", "/tmp/codex-home")
     env.setdefault("RUST_LOG", "error")
     if api_key:
         env["CODEX_API_KEY"] = api_key
@@ -234,8 +234,15 @@ def progress_timestamp() -> str:
     return time.strftime("%H:%M:%S", time.localtime())
 
 
-def clean_progress_content(value: Any, limit: int = 240) -> str:
+def clean_progress_content(
+    value: Any,
+    *,
+    truncate_content: bool = True,
+    limit: int = 240,
+) -> str:
     text = str(value or "")
+    if not truncate_content:
+        return text
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
@@ -248,6 +255,7 @@ def log_progress(
     max_parts: int,
     description: str,
     content: str | None = None,
+    truncate_content: bool = True,
 ) -> None:
     total_label = str(max_parts) if max_parts > 0 else "?"
     print(
@@ -256,7 +264,11 @@ def log_progress(
         flush=True,
     )
     if content:
-        print(clean_progress_content(content), file=sys.stderr, flush=True)
+        print(
+            clean_progress_content(content, truncate_content=truncate_content),
+            file=sys.stderr,
+            flush=True,
+        )
     print("", file=sys.stderr, flush=True)
 
 
@@ -341,10 +353,14 @@ def summarize_event(event: dict[str, Any]) -> tuple[str, str | None] | None:
         if item_type == "mcp_tool_call":
             tool_name = str(item.get("tool") or "mcp_tool_call")
             status = str(item.get("status") or "")
-            details = f"tool={tool_name}"
+            details_lines: list[str] = [f"tool={tool_name}"]
             if status:
-                details += f" status={status}"
-            return (description, details)
+                details_lines.append(f"status={status}")
+            if event_type == "item.completed":
+                output_preview = mcp_output_payload(item.get("result"), item.get("error"))
+                if output_preview:
+                    details_lines.append(f"output={output_preview}")
+            return (description, "\n".join(details_lines))
         if item_type == "agent_message":
             text = str(item.get("text") or "").strip()
             return (description, text if text else None)
@@ -368,6 +384,7 @@ def log_event_stream_progress(
             max_parts=max_parts,
             description=description,
             content=content,
+            truncate_content="mcp_tool_call" not in description,
         )
 
 

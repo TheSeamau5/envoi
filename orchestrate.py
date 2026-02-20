@@ -35,6 +35,7 @@ DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_AGENT = "opencode"
 DEFAULT_MODEL = DEFAULT_OPENCODE_MODEL
+CODEX_HOME_DIR = "/tmp/codex-home"
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
 )  # hard cap per message turn
@@ -464,6 +465,31 @@ def log_message_parts(message: dict[str, Any]) -> None:
 def extract_envoi_calls(message_parts: list[dict[str, Any]]) -> list[EnvoiCall]:
     """Extract envoi test calls from message parts."""
     calls: list[EnvoiCall] = []
+
+    def parse_envoi_call(value: Any) -> EnvoiCall | None:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return None
+            return parse_envoi_call(parsed)
+
+        if isinstance(value, dict):
+            if "path" in value and "timestamp" in value:
+                try:
+                    return EnvoiCall(**value)
+                except Exception:
+                    pass
+            for nested_key in ("result", "data", "output", "structured_content"):
+                if nested_key in value:
+                    parsed_nested = parse_envoi_call(value.get(nested_key))
+                    if parsed_nested is not None:
+                        return parsed_nested
+        return None
+
     # Handle tool_use + tool_result pairs (older format)
     tool_results: dict[str, dict[str, Any]] = {}
     for part in message_parts:
@@ -474,21 +500,17 @@ def extract_envoi_calls(message_parts: list[dict[str, Any]]) -> list[EnvoiCall]:
             tool_result = tool_results.get(part.get("id", ""))
             if tool_result:
                 content = tool_result.get("content", "")
-                if isinstance(content, str):
-                    try:
-                        calls.append(EnvoiCall(**json.loads(content)))
-                    except (json.JSONDecodeError, Exception):
-                        pass
+                parsed_call = parse_envoi_call(content)
+                if parsed_call is not None:
+                    calls.append(parsed_call)
         # Handle "tool" type parts (OpenCode's actual format)
         if part.get("type") == "tool" and part.get("tool") == "run_tests":
             state = part.get("state", {})
             if state.get("status") == "completed":
                 output = state.get("output") or state.get("metadata", {}).get("output") or ""
-                try:
-                    data = json.loads(output) if isinstance(output, str) else output
-                    calls.append(EnvoiCall(**data))
-                except Exception:
-                    pass
+                parsed_call = parse_envoi_call(output)
+                if parsed_call is not None:
+                    calls.append(parsed_call)
     return calls
 
 
@@ -1160,9 +1182,9 @@ async def setup_sandbox_codex(
         await sandbox_write_file(sandbox, "/tmp/upload/codex_api_key.txt", api_key)
 
     codex_config = CODEX_CONFIG_TOML.replace("MODEL_PLACEHOLDER", model)
-    await sandbox_write_file(sandbox, "/workspace/.codex/config.toml", codex_config)
+    await sandbox_write_file(sandbox, f"{CODEX_HOME_DIR}/config.toml", codex_config)
     if auth_json:
-        await sandbox_write_file(sandbox, "/workspace/.codex/auth.json", auth_json)
+        await sandbox_write_file(sandbox, f"{CODEX_HOME_DIR}/auth.json", auth_json)
     await sandbox_write_file(sandbox, "/workspace/.gitignore", WORKSPACE_GITIGNORE)
     await upload_environment_files(sandbox)
     await run_setup_script(sandbox, "codex")

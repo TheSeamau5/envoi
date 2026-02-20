@@ -69,6 +69,15 @@ def file_size(path: Path) -> int | None:
         return None
 
 
+def expected_target_arch() -> tuple[str, set[str]]:
+    host_arch = os.uname().machine.lower()
+    if host_arch in {"x86_64", "amd64"}:
+        return ("x86_64", {"Advanced Micro Devices X86-64", "X86-64", "x86-64"})
+    if host_arch in {"aarch64", "arm64"}:
+        return ("AArch64", {"AArch64"})
+    return (host_arch, {host_arch})
+
+
 def to_result(results: list[CaseResult]) -> TestResult:
     passed = sum(1 for r in results if r.passed)
     return TestResult(
@@ -279,7 +288,8 @@ async def run_case(case: dict) -> CaseResult:
         )
 
     machine = await detect_elf_machine(out_file)
-    if machine is not None and machine != "AArch64":
+    expected_arch_label, expected_machine_values = expected_target_arch()
+    if machine is not None and machine not in expected_machine_values:
         return CaseResult(
             name=name,
             phase="verify",
@@ -295,7 +305,7 @@ async def run_case(case: dict) -> CaseResult:
             gcc_binary_size_bytes=gcc_binary_size_bytes,
             run_time_ms=None,
             gcc_run_time_ms=None,
-            stderr=f"wrong target architecture: expected AArch64, got {machine}",
+            stderr=f"wrong target architecture: expected {expected_arch_label}, got {machine}",
             debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
