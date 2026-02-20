@@ -6,7 +6,9 @@ containing all newly observed messages (including child sessions), per-part
 git checkpoints, and parsed envoi test calls.
 
 Usage:
-    modal run orchestrate.py --max-parts 1000 --model opencode/gpt-5-nano
+    modal run orchestrate.py --agent opencode --max-parts 1000 --model opencode/gpt-5-nano
+    modal run orchestrate.py --agent codex --max-parts 1000
+    modal run orchestrate.py --agent codex --max-parts 1000 --codex-auth-file /path/to/auth.json
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import boto3
 import modal
@@ -29,7 +31,10 @@ from pydantic import BaseModel, Field
 
 app = modal.App("envoi-trace")
 
-DEFAULT_MODEL = "opencode/gpt-5-nano"
+DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
+DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+DEFAULT_AGENT = "opencode"
+DEFAULT_MODEL = DEFAULT_OPENCODE_MODEL
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
 )  # hard cap per message turn
@@ -66,6 +71,7 @@ PROMPT = (Path(__file__).parent / "prompts" / "system.txt").read_text()
 SETUP_SH = (Path(__file__).parent / "sandbox" / "setup.sh").read_text()
 MCP_SERVER = (Path(__file__).parent / "sandbox" / "mcp_server.py").read_text()
 OPENCODE_CLIENT = (Path(__file__).parent / "sandbox" / "opencode_client.py").read_text()
+CODEX_CLIENT = (Path(__file__).parent / "sandbox" / "codex_client.py").read_text()
 OPENCODE_CONFIG = (Path(__file__).parent / "sandbox" / "opencode.jsonc").read_text()
 ENVIRONMENT_DIR = Path(__file__).parent / "environment"
 
@@ -99,6 +105,19 @@ test_*
 *.s
 opencode.jsonc
 .opencode/
+.codex/
+"""
+
+CODEX_CONFIG_TOML = """\
+model = "MODEL_PLACEHOLDER"
+model_reasoning_effort = "high"
+
+[mcp_servers.tests]
+command = "python3"
+args = ["/sandbox/mcp_server.py"]
+enabled = true
+required = false
+tool_timeout_sec = 3600
 """
 
 
@@ -107,10 +126,45 @@ opencode.jsonc
 # ---------------------------------------------------------------------------
 
 
-def resolve_model(model: str) -> str:
-    if "/" in model:
-        return model
-    return f"opencode/{model}"
+def resolve_model(agent: str, model: str | None) -> str:
+    if agent == "opencode":
+        raw = model or DEFAULT_OPENCODE_MODEL
+        if "/" in raw:
+            return raw
+        return f"opencode/{raw}"
+    if agent == "codex":
+        return model or DEFAULT_CODEX_MODEL
+    raise ValueError(f"Unsupported agent: {agent}")
+
+
+def decode_b64_to_text(encoded: str, *, label: str) -> str:
+    try:
+        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except Exception as e:
+        raise RuntimeError(f"Invalid base64 content for {label}: {e}") from e
+    try:
+        return raw.decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(f"Invalid UTF-8 content for {label}: {e}") from e
+
+
+def parse_codex_auth_json(raw_text: str, *, label: str) -> str:
+    try:
+        parsed = json.loads(raw_text)
+    except Exception as e:
+        raise RuntimeError(f"Invalid JSON content for {label}: {e}") from e
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{label} must contain a JSON object")
+    return raw_text
+
+
+def load_local_codex_auth_json_b64(path_str: str) -> str | None:
+    candidate = Path(path_str).expanduser()
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    raw = candidate.read_text()
+    parsed = parse_codex_auth_json(raw, label=str(candidate))
+    return base64.b64encode(parsed.encode("utf-8")).decode("ascii")
 
 
 def truncate_text(text: str, limit: int = 4000) -> str:
@@ -189,6 +243,7 @@ class RepoCheckpoint(BaseModel):
 class PartRecord(BaseModel):
     trajectory_id: str
     session_id: str
+    agent: str = DEFAULT_AGENT
     part: int | None = None
     timestamp: str
     agent_model: str
@@ -206,6 +261,7 @@ class PartRecord(BaseModel):
 class TurnRecord(BaseModel):
     trajectory_id: str
     session_id: str
+    agent: str = DEFAULT_AGENT
     turn: int
     part_start: int | None = None
     part_end: int | None = None
@@ -226,11 +282,67 @@ class TurnRecord(BaseModel):
 class AgentTrace(BaseModel):
     trajectory_id: str
     session_id: str
+    agent: str = DEFAULT_AGENT
     agent_model: str
     started_at: str
     turns: list[TurnRecord] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)
     session_end: SessionEnd | None = None
+
+
+class AgentTurnOutcome(BaseModel):
+    session_id: str
+    response: dict[str, Any]
+    session_objects: list[dict[str, Any]] = Field(default_factory=list)
+    session_ids: list[str] = Field(default_factory=list)
+    new_messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentBackend(Protocol):
+    name: str
+
+    def resolve_model(self, model: str | None) -> str:
+        ...
+
+    async def setup_sandbox(
+        self,
+        sandbox: modal.Sandbox,
+        model: str,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        ...
+
+    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
+        ...
+
+    async def ensure_authenticated(
+        self,
+        sandbox: modal.Sandbox,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        ...
+
+    async def run_turn(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        model: str,
+        prompt_text: str,
+        seen_message_ids: set[str],
+        timeout: int,
+        remaining_parts_budget: int,
+    ) -> AgentTurnOutcome | None:
+        ...
+
+    async def collect_crash_messages(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        seen_message_ids: set[str],
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -485,12 +597,26 @@ sandbox_image = (
 # ---------------------------------------------------------------------------
 
 
-async def dump_sandbox_logs(sandbox: modal.Sandbox, tail: int = 50) -> None:
-    """Print the tail of OpenCode and envoi logs from the sandbox."""
-    for log_file in ["/tmp/opencode.log", "/tmp/envoi.log"]:
+async def dump_sandbox_logs(
+    sandbox: modal.Sandbox,
+    *,
+    agent: str,
+    tail: int = 50,
+) -> None:
+    """Print the tail of agent + envoi logs from the sandbox."""
+    log_files = ["/tmp/envoi.log"]
+    if agent == "opencode":
+        log_files.insert(0, "/tmp/opencode.log")
+    elif agent == "codex":
+        log_files.insert(0, "/tmp/codex.log")
+
+    for log_file in log_files:
         try:
             _, stdout, _ = await sandbox_run(
-                sandbox, f"tail -n {tail} {log_file}", timeout=10, quiet=True
+                sandbox,
+                f"[ -f {shlex.quote(log_file)} ] && tail -n {tail} {shlex.quote(log_file)} || true",
+                timeout=10,
+                quiet=True,
             )
             if stdout.strip():
                 label = log_file.split("/")[-1]
@@ -511,7 +637,7 @@ async def sandbox_run(
     """Execute a command inside the sandbox."""
     if not quiet:
         print(f"[run] {cmd[:200]}")
-    proc = await sandbox.exec.aio("bash", "-c", cmd)
+    proc = await sandbox.exec.aio("bash", "-c", cmd, timeout=timeout)
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
@@ -521,29 +647,17 @@ async def sandbox_run(
             if live and chunk:
                 builtins.print(chunk, end="", flush=True)
 
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                drain_stream(proc.stdout, stdout_chunks),
-                drain_stream(proc.stderr, stderr_chunks, live=stream_output),
-            ),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError:
-        print(f"[run] TIMEOUT after {timeout}s, killing: {cmd[:100]}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        await proc.wait.aio()
-        stdout = "".join(stdout_chunks)
-        stderr = "".join(stderr_chunks)
-        return 124, stdout, stderr  # 124 = timeout convention
+    await asyncio.gather(
+        drain_stream(proc.stdout, stdout_chunks),
+        drain_stream(proc.stderr, stderr_chunks, live=stream_output),
+    )
 
     await proc.wait.aio()
     stdout = "".join(stdout_chunks)
     stderr = "".join(stderr_chunks)
     exit_code = proc.returncode or 0
+    if exit_code == 124:
+        print(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
     if exit_code != 0:
         print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
         if stderr:
@@ -596,6 +710,33 @@ async def run_opencode_client(
         return None
 
 
+async def run_codex_client(
+    sandbox: modal.Sandbox,
+    args: list[str],
+    *,
+    timeout: int = 60,
+    quiet: bool = False,
+    stream_output: bool = False,
+) -> dict[str, Any] | None:
+    command = "python3 /sandbox/codex_client.py " + " ".join(shlex.quote(a) for a in args)
+    exit_code, stdout, stderr = await sandbox_run(
+        sandbox,
+        command,
+        timeout=timeout,
+        quiet=quiet,
+        stream_output=stream_output,
+    )
+    if exit_code != 0:
+        if stderr:
+            print(f"[codex-cli] command failed: {stderr[:500]}")
+        return None
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        print(f"[codex-cli] invalid JSON response: {truncate_text(stdout, limit=500)}")
+        return None
+
+
 async def create_session(sandbox: modal.Sandbox, title: str) -> str | None:
     response = await run_opencode_client(
         sandbox,
@@ -620,7 +761,7 @@ async def send_message_blocking(
     session_id: str,
     text: str,
     timeout: int = MESSAGE_TIMEOUT_SECONDS,
-    max_parts_this_turn: int = 0,
+    remaining_parts_budget: int = 0,
 ) -> dict[str, Any] | None:
     prompt_path = "/tmp/prompt.txt"
     await sandbox_write_file(sandbox, prompt_path, text, ensure_dir=False)
@@ -635,7 +776,7 @@ async def send_message_blocking(
             "--text-file",
             prompt_path,
             "--max-parts",
-            str(max_parts_this_turn),
+            str(remaining_parts_budget),
         ],
         timeout=timeout,
         stream_output=True,
@@ -938,24 +1079,11 @@ async def ensure_provider_connected(sandbox: modal.Sandbox, api_key: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Sandbox setup
+# Agent backends + sandbox setup
 # ---------------------------------------------------------------------------
 
 
-async def setup_sandbox(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
-    print(f"[setup] model={model}")
-
-    # Write files to sandbox
-    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
-    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
-    await sandbox_write_file(sandbox, "/sandbox/opencode_client.py", OPENCODE_CLIENT)
-    await sandbox_write_file(sandbox, "/tmp/upload/opencode_api_key.txt", api_key)
-
-    config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
-    await sandbox_write_file(sandbox, "/workspace/opencode.jsonc", config)
-    await sandbox_write_file(sandbox, "/workspace/.gitignore", WORKSPACE_GITIGNORE)
-
-    # Upload environment files (precreate dirs in one call)
+async def upload_environment_files(sandbox: modal.Sandbox) -> None:
     env_paths = (
         [f"/environment/{r}" for r in ENVIRONMENT_PY_FILES]
         + [f"/environment/{r}" for r in ENVIRONMENT_C_FILES]
@@ -977,17 +1105,250 @@ async def setup_sandbox(sandbox: modal.Sandbox, model: str, api_key: str) -> Non
         f"{len(ENVIRONMENT_C_FILES)} c, {len(ENVIRONMENT_TXT_FILES)} txt files"
     )
 
-    # Run setup script (starts envoi + opencode)
-    print("[setup] running setup.sh...")
+
+async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
+    print(f"[setup] running setup.sh (agent={agent})...")
     exit_code, stdout, stderr = await sandbox_run(
         sandbox,
-        "bash /tmp/upload/setup.sh",
-        timeout=600,
+        f"AGENT_KIND={shlex.quote(agent)} bash /tmp/upload/setup.sh",
+        timeout=900,
     )
     if exit_code != 0:
         print(f"[setup] FAILED:\n{stdout}\n{stderr}")
         raise RuntimeError(f"Setup failed (exit {exit_code})")
     print("[setup] done")
+
+
+async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
+    print(f"[setup] agent=opencode model={model}")
+    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
+    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
+    await sandbox_write_file(sandbox, "/sandbox/opencode_client.py", OPENCODE_CLIENT)
+    await sandbox_write_file(sandbox, "/tmp/upload/opencode_api_key.txt", api_key)
+
+    config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
+    await sandbox_write_file(sandbox, "/workspace/opencode.jsonc", config)
+    await sandbox_write_file(sandbox, "/workspace/.gitignore", WORKSPACE_GITIGNORE)
+    await upload_environment_files(sandbox)
+    await run_setup_script(sandbox, "opencode")
+
+
+async def setup_sandbox_codex(
+    sandbox: modal.Sandbox,
+    model: str,
+    api_key: str,
+    auth_json: str | None = None,
+) -> None:
+    print(f"[setup] agent=codex model={model}")
+    await sandbox_write_file(sandbox, "/tmp/upload/setup.sh", SETUP_SH)
+    await sandbox_write_file(sandbox, "/sandbox/mcp_server.py", MCP_SERVER)
+    await sandbox_write_file(sandbox, "/sandbox/codex_client.py", CODEX_CLIENT)
+    if api_key:
+        await sandbox_write_file(sandbox, "/tmp/upload/codex_api_key.txt", api_key)
+
+    codex_config = CODEX_CONFIG_TOML.replace("MODEL_PLACEHOLDER", model)
+    await sandbox_write_file(sandbox, "/workspace/.codex/config.toml", codex_config)
+    if auth_json:
+        await sandbox_write_file(sandbox, "/workspace/.codex/auth.json", auth_json)
+    await sandbox_write_file(sandbox, "/workspace/.gitignore", WORKSPACE_GITIGNORE)
+    await upload_environment_files(sandbox)
+    await run_setup_script(sandbox, "codex")
+
+
+class OpenCodeBackend:
+    name = "opencode"
+
+    def resolve_model(self, model: str | None) -> str:
+        return resolve_model(self.name, model)
+
+    async def setup_sandbox(
+        self,
+        sandbox: modal.Sandbox,
+        model: str,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        await setup_sandbox_opencode(sandbox, model, api_key)
+
+    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
+        return await create_session(sandbox, title=f"trajectory-{trajectory_id}")
+
+    async def ensure_authenticated(
+        self,
+        sandbox: modal.Sandbox,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        await ensure_provider_connected(sandbox, api_key)
+
+    async def run_turn(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        model: str,
+        prompt_text: str,
+        seen_message_ids: set[str],
+        timeout: int,
+        remaining_parts_budget: int,
+    ) -> AgentTurnOutcome | None:
+        response = await send_message_blocking(
+            sandbox,
+            session_id,
+            prompt_text,
+            timeout=timeout,
+            remaining_parts_budget=remaining_parts_budget,
+        )
+        if response is None:
+            return None
+        session_objects, session_ids, new_messages = await collect_turn_messages(
+            sandbox,
+            session_id,
+            seen_message_ids,
+        )
+        return AgentTurnOutcome(
+            session_id=session_id,
+            response=response,
+            session_objects=session_objects,
+            session_ids=session_ids,
+            new_messages=new_messages,
+        )
+
+    async def collect_crash_messages(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        seen_message_ids: set[str],
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        return await collect_turn_messages(sandbox, session_id, seen_message_ids)
+
+
+class CodexBackend:
+    name = "codex"
+
+    def __init__(self) -> None:
+        self._api_key_file: str | None = None
+
+    def resolve_model(self, model: str | None) -> str:
+        return resolve_model(self.name, model)
+
+    async def setup_sandbox(
+        self,
+        sandbox: modal.Sandbox,
+        model: str,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        self._api_key_file = "/tmp/upload/codex_api_key.txt" if api_key else None
+        await setup_sandbox_codex(sandbox, model, api_key, auth_json)
+
+    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
+        return f"pending-{trajectory_id}"
+
+    async def ensure_authenticated(
+        self,
+        sandbox: modal.Sandbox,
+        api_key: str,
+        auth_json: str | None = None,
+    ) -> None:
+        return None
+
+    async def run_turn(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        model: str,
+        prompt_text: str,
+        seen_message_ids: set[str],
+        timeout: int,
+        remaining_parts_budget: int,
+    ) -> AgentTurnOutcome | None:
+        prompt_path = "/tmp/prompt.txt"
+        await sandbox_write_file(sandbox, prompt_path, prompt_text, ensure_dir=False)
+        args = [
+            "chat-stream",
+            "--session-id",
+            session_id,
+            "--text-file",
+            prompt_path,
+            "--model",
+            model,
+            "--max-parts",
+            str(remaining_parts_budget),
+        ]
+        if self._api_key_file:
+            args.extend(["--api-key-file", self._api_key_file])
+        response = await run_codex_client(
+            sandbox,
+            args,
+            timeout=timeout,
+            stream_output=True,
+        )
+        if response is None:
+            return None
+        if not response.get("ok"):
+            print(f"[codex] turn failed: {truncate_text(str(response.get('error')), limit=800)}")
+            return None
+        body = response.get("body")
+        if not isinstance(body, dict):
+            print("[codex] missing body in response")
+            return None
+
+        updated_session_id = body.get("_session_id")
+        effective_session_id = (
+            updated_session_id
+            if isinstance(updated_session_id, str) and updated_session_id
+            else session_id
+        )
+
+        message_obj = body.get("_message")
+        new_messages: list[dict[str, Any]] = []
+        if isinstance(message_obj, dict):
+            mid = message_id(message_obj)
+            if mid and mid in seen_message_ids:
+                pass
+            else:
+                if mid:
+                    seen_message_ids.add(mid)
+                new_messages.append(message_obj)
+        if not new_messages:
+            fallback_msg = {
+                "info": {
+                    "id": f"{effective_session_id}:{int(time.time() * 1000)}",
+                    "role": "assistant",
+                    "sessionID": effective_session_id,
+                    "time": {"created": int(time.time() * 1000)},
+                },
+                "parts": body.get("parts", []),
+            }
+            fallback_mid = message_id(fallback_msg)
+            if fallback_mid:
+                seen_message_ids.add(fallback_mid)
+            new_messages.append(fallback_msg)
+
+        session_obj = {"id": effective_session_id, "provider": "codex"}
+        return AgentTurnOutcome(
+            session_id=effective_session_id,
+            response=body,
+            session_objects=[session_obj],
+            session_ids=[effective_session_id],
+            new_messages=new_messages,
+        )
+
+    async def collect_crash_messages(
+        self,
+        sandbox: modal.Sandbox,
+        session_id: str,
+        seen_message_ids: set[str],
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        return [], [session_id], []
+
+
+def get_agent_backend(agent: str) -> AgentBackend:
+    if agent == "opencode":
+        return OpenCodeBackend()
+    if agent == "codex":
+        return CodexBackend()
+    raise ValueError(f"Unsupported agent: {agent}")
 
 
 # ---------------------------------------------------------------------------
@@ -1063,34 +1424,56 @@ async def end_session(
 # ---------------------------------------------------------------------------
 
 
-@app.function(
-    timeout=14400,
-    secrets=[modal.Secret.from_dotenv()],
-    image=function_image,
-    nonpreemptible=True,
-)
-async def run_trajectory(
-    model: str = DEFAULT_MODEL,
+async def _run_trajectory_impl(
+    agent: str = DEFAULT_AGENT,
+    model: str | None = None,
     max_parts: int = 1000,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
+    codex_auth_json_b64: str | None = None,
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
+    agent = (agent or DEFAULT_AGENT).strip().lower()
 
     effective_max_parts = max_parts
-
-    resolved_model = resolve_model(model)
+    backend = get_agent_backend(agent)
+    resolved_model = backend.resolve_model(model)
     print(f"Starting trajectory {trajectory_id}")
     print(
-        f"model={resolved_model} max_parts={effective_max_parts} "
+        f"agent={agent} model={resolved_model} max_parts={effective_max_parts} "
         f"timeout={timeout_seconds}s message_timeout={message_timeout_seconds}s"
     )
 
-    opencode_api_key = os.environ.get("OPENCODE_API_KEY", "")
-    if not opencode_api_key:
-        raise RuntimeError("OPENCODE_API_KEY not set")
+    agent_api_key = ""
+    codex_auth_json: str | None = None
+    if agent == "opencode":
+        agent_api_key = os.environ.get("OPENCODE_API_KEY", "").strip()
+        if not agent_api_key:
+            raise RuntimeError("OPENCODE_API_KEY not set")
+    else:
+        env_codex_auth_b64 = os.environ.get("CODEX_AUTH_JSON_B64", "").strip()
+        env_codex_auth_raw = os.environ.get("CODEX_AUTH_JSON", "").strip()
+        if codex_auth_json_b64:
+            decoded = decode_b64_to_text(codex_auth_json_b64, label="codex_auth_json_b64 arg")
+            codex_auth_json = parse_codex_auth_json(decoded, label="codex_auth_json_b64 arg")
+        elif env_codex_auth_b64:
+            decoded = decode_b64_to_text(env_codex_auth_b64, label="CODEX_AUTH_JSON_B64")
+            codex_auth_json = parse_codex_auth_json(decoded, label="CODEX_AUTH_JSON_B64")
+        elif env_codex_auth_raw:
+            codex_auth_json = parse_codex_auth_json(env_codex_auth_raw, label="CODEX_AUTH_JSON")
+
+        agent_api_key = (
+            os.environ.get("CODEX_API_KEY", "").strip()
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+        )
+        if not codex_auth_json and not agent_api_key:
+            raise RuntimeError(
+                "No Codex credentials found. Provide one of: "
+                "~/.codex/auth.json via --codex-auth-file, "
+                "CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON, or CODEX_API_KEY/OPENAI_API_KEY."
+            )
 
     sandbox = await modal.Sandbox.create.aio(
         "bash",
@@ -1104,17 +1487,18 @@ async def run_trajectory(
 
     try:
         # --- Setup ---
-        await setup_sandbox(sandbox, resolved_model, opencode_api_key)
+        await backend.setup_sandbox(sandbox, resolved_model, agent_api_key, codex_auth_json)
 
-        session_id = await create_session(sandbox, title=f"trajectory-{trajectory_id}")
+        session_id = await backend.create_session(sandbox, trajectory_id)
         if not session_id:
-            raise RuntimeError("Failed to create OpenCode session")
+            raise RuntimeError(f"Failed to create session for agent={agent}")
 
-        await ensure_provider_connected(sandbox, opencode_api_key)
+        await backend.ensure_authenticated(sandbox, agent_api_key, codex_auth_json)
 
         agent_trace = AgentTrace(
             trajectory_id=trajectory_id,
             session_id=session_id,
+            agent=agent,
             agent_model=resolved_model,
             started_at=datetime.now(UTC).isoformat(),
         )
@@ -1138,7 +1522,6 @@ async def run_trajectory(
                     break
                 remaining_run_seconds = timeout_seconds - elapsed
                 remaining_parts = max(1, effective_max_parts - part_count)
-                max_parts_this_turn = remaining_parts
                 turn_timeout_seconds = compute_turn_timeout_seconds(
                     remaining_parts=remaining_parts,
                     remaining_run_seconds=remaining_run_seconds,
@@ -1158,19 +1541,26 @@ async def run_trajectory(
                 turn_started_at = datetime.now(UTC).isoformat()
 
                 # Send message and BLOCK until agent finishes
-                response = await send_message_blocking(
-                    sandbox,
-                    session_id,
-                    prompt_text,
+                turn_outcome = await backend.run_turn(
+                    sandbox=sandbox,
+                    session_id=session_id,
+                    model=resolved_model,
+                    prompt_text=prompt_text,
+                    seen_message_ids=seen_message_ids,
                     timeout=turn_timeout_seconds,
-                    max_parts_this_turn=max_parts_this_turn,
+                    remaining_parts_budget=remaining_parts,
                 )
 
-                if response is None:
+                if turn_outcome is None:
                     print("[turn] no response from agent")
-                    await dump_sandbox_logs(sandbox)
+                    await dump_sandbox_logs(sandbox, agent=agent)
                     end_reason = "agent_error"
                     break
+
+                response = turn_outcome.response
+                session_id = turn_outcome.session_id
+                if agent_trace.session_id != session_id:
+                    agent_trace.session_id = session_id
 
                 turn_count += 1
 
@@ -1181,11 +1571,9 @@ async def run_trajectory(
                 print(f"[turn] response id={last_message_id} parts={len(parts)}")
                 log_message_parts(response)
 
-                session_objects, session_ids, new_messages = await collect_turn_messages(
-                    sandbox,
-                    session_id,
-                    seen_message_ids,
-                )
+                session_objects = turn_outcome.session_objects
+                session_ids = turn_outcome.session_ids
+                new_messages = turn_outcome.new_messages
                 print(f"[turn] new_messages={len(new_messages)} sessions={len(session_ids)}")
 
                 # Extract envoi calls from newly observed messages only.
@@ -1224,6 +1612,7 @@ async def run_trajectory(
                     part_record = PartRecord(
                         trajectory_id=trajectory_id,
                         session_id=session_id,
+                        agent=agent,
                         part=absolute_part,
                         timestamp=datetime.now(UTC).isoformat(),
                         agent_model=resolved_model,
@@ -1245,6 +1634,7 @@ async def run_trajectory(
                 turn_record = TurnRecord(
                     trajectory_id=trajectory_id,
                     session_id=session_id,
+                    agent=agent,
                     turn=turn_count,
                     part_start=(previous_part_count + 1) if new_parts > 0 else None,
                     part_end=part_count if new_parts > 0 else None,
@@ -1310,19 +1700,22 @@ async def run_trajectory(
 
         except Exception as loop_err:
             print(f"[error] crash during main loop: {loop_err}")
-            await dump_sandbox_logs(sandbox)
+            await dump_sandbox_logs(sandbox, agent=agent)
             end_reason = "agent_error"
             # Save whatever messages we have
             try:
-                session_objects, session_ids, crash_new_messages = await collect_turn_messages(
-                    sandbox,
-                    session_id,
-                    seen_message_ids,
+                session_objects, session_ids, crash_new_messages = (
+                    await backend.collect_crash_messages(
+                        sandbox,
+                        session_id,
+                        seen_message_ids,
+                    )
                 )
                 if crash_new_messages:
                     crash_record = TurnRecord(
                         trajectory_id=trajectory_id,
                         session_id=session_id,
+                        agent=agent,
                         turn=turn_count + 1,
                         part_start=part_count + 1,
                         part_end=part_count,
@@ -1365,6 +1758,47 @@ async def run_trajectory(
     return trajectory_id
 
 
+@app.function(
+    timeout=14400,
+    secrets=[modal.Secret.from_dotenv()],
+    image=function_image,
+)
+async def run_trajectory(
+    agent: str = DEFAULT_AGENT,
+    model: str | None = None,
+    max_parts: int = 1000,
+    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    timeout_seconds: int = 14400,
+    trajectory_id: str | None = None,
+    codex_auth_json_b64: str | None = None,
+) -> str:
+    return await _run_trajectory_impl(
+        agent=agent,
+        model=model,
+        max_parts=max_parts,
+        message_timeout_seconds=message_timeout_seconds,
+        timeout_seconds=timeout_seconds,
+        trajectory_id=trajectory_id,
+        codex_auth_json_b64=codex_auth_json_b64,
+    )
+
+
+_RUN_TRAJECTORY_NON_PREEMPTIBLE: Any | None = None
+
+
+def get_non_preemptible_runner() -> Any:
+    global _RUN_TRAJECTORY_NON_PREEMPTIBLE
+    if _RUN_TRAJECTORY_NON_PREEMPTIBLE is None:
+        _RUN_TRAJECTORY_NON_PREEMPTIBLE = app.function(
+            timeout=14400,
+            secrets=[modal.Secret.from_dotenv()],
+            image=function_image,
+            nonpreemptible=True,
+            name="run_trajectory_non_preemptible",
+        )(_run_trajectory_impl)
+    return _RUN_TRAJECTORY_NON_PREEMPTIBLE
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -1372,15 +1806,30 @@ async def run_trajectory(
 
 @app.local_entrypoint()
 async def main(
-    model: str = DEFAULT_MODEL,
+    agent: str = DEFAULT_AGENT,
+    model: str | None = None,
     max_parts: int = 1000,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    non_preemptible: bool = False,
     trajectory_id: str | None = None,
+    codex_auth_file: str = "~/.codex/auth.json",
 ) -> None:
-    result = await run_trajectory.remote.aio(
+    normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
+    codex_auth_json_b64: str | None = None
+    if normalized_agent == "codex" and codex_auth_file.strip():
+        codex_auth_json_b64 = load_local_codex_auth_json_b64(codex_auth_file.strip())
+        if codex_auth_json_b64:
+            print(f"[auth] loaded codex auth from {Path(codex_auth_file).expanduser()}")
+        else:
+            print(f"[auth] no codex auth file found at {Path(codex_auth_file).expanduser()}")
+
+    runner = get_non_preemptible_runner() if non_preemptible else run_trajectory
+    result = await runner.remote.aio(
+        agent=normalized_agent,
         model=model,
         max_parts=max_parts,
         message_timeout_seconds=message_timeout_seconds,
         trajectory_id=trajectory_id,
+        codex_auth_json_b64=codex_auth_json_b64,
     )
     print(f"Completed trajectory: {result}")
