@@ -1036,6 +1036,7 @@ async def end_session(
     timeout=14400,
     secrets=[modal.Secret.from_dotenv()],
     image=function_image,
+    nonpreemptible=True,
 )
 async def run_trajectory(
     model: str = DEFAULT_MODEL,
@@ -1114,13 +1115,14 @@ async def run_trajectory(
                 )
 
                 banner = "=" * 60
-                print(f"\n{banner}")
-                print(
+                builtins.print(f"\n{banner}", flush=True)
+                builtins.print(
                     f" TURN {turn_count + 1}  "
                     f"(part_count {part_count}/{effective_max_parts}, "
-                    f"timeout {turn_timeout_seconds}s)"
+                    f"timeout {turn_timeout_seconds}s)",
+                    flush=True,
                 )
-                print(banner)
+                builtins.print(banner, flush=True)
 
                 turn_started_at = datetime.now(UTC).isoformat()
 

@@ -14,7 +14,7 @@
     "hostname": "0.0.0.0"
   },
   "mcp": {
-    "envoi-tests": {
+    "tests": {
       "type": "local",
       "command": ["python3", "/sandbox/mcp_server.py"],
       "enabled": true

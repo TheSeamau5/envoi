@@ -1,8 +1,8 @@
 """
-MCP server that wraps envoi test calls.
+MCP server exposing test tools.
 
-Each run_tests call creates a fresh envoi session with the current /workspace
-contents so that the latest code is always tested.
+Each run_tests call evaluates the current /workspace contents against the
+test suites so that the latest code is always tested.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import envoi
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("envoi-tests")
+mcp = FastMCP("tests")
 
 ENVOI_URL = "http://localhost:8000"
 
