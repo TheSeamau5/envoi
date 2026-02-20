@@ -269,6 +269,84 @@ def part_identifier(part: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def truncate_for_trace(value: str, limit: int = 240) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
+def parse_json_maybe(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def extract_run_tests_call_from_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    if str(part.get("tool") or "") != "run_tests":
+        return None
+    state = part.get("state")
+    if not isinstance(state, dict):
+        return None
+    metadata = state.get("metadata")
+    metadata_obj = metadata if isinstance(metadata, dict) else {}
+    raw_output = state.get("output") or metadata_obj.get("output")
+    parsed = parse_json_maybe(raw_output)
+    if not isinstance(parsed, dict):
+        return None
+
+    path = parsed.get("path")
+    timestamp = parsed.get("timestamp")
+    duration_ms = parsed.get("duration_ms")
+    status_code = parsed.get("status_code")
+    if not isinstance(path, str) or not path:
+        return None
+    if not isinstance(timestamp, str) or not timestamp:
+        return None
+    if not isinstance(duration_ms, int):
+        return None
+    if not isinstance(status_code, int):
+        return None
+
+    return {
+        "path": path,
+        "timestamp": timestamp,
+        "duration_ms": duration_ms,
+        "status_code": status_code,
+        "error": parsed.get("error") if isinstance(parsed.get("error"), str) else None,
+        "result": parsed.get("result"),
+    }
+
+
+def stream_part_summary(part: dict[str, Any]) -> str | None:
+    part_type = str(part.get("type") or "")
+    if part_type in {"reasoning", "text"}:
+        text = str(part.get("text") or "").strip()
+        return truncate_for_trace(text) if text else None
+    if part_type == "tool":
+        tool_name = str(part.get("tool") or "").strip()
+        state = part.get("state")
+        if not isinstance(state, dict):
+            return tool_name or None
+        input_obj = state.get("input")
+        if tool_name == "bash" and isinstance(input_obj, dict):
+            cmd = str(input_obj.get("command") or "").strip()
+            if cmd:
+                return truncate_for_trace(cmd)
+        if tool_name == "run_tests" and isinstance(input_obj, dict):
+            test_path = str(input_obj.get("test_path") or "").strip()
+            if test_path:
+                return f"run_tests {test_path}"
+        return tool_name or None
+    return None
+
+
 async def stream_session_events(
     *,
     client: AsyncOpencode,
@@ -339,9 +417,17 @@ async def stream_session_events(
                                                     files.append(name)
                                 trace_event = {
                                     "event": "part.completed",
+                                    "role": "assistant",
                                     "part_type": part_type,
+                                    "item_type": part_type,
+                                    "summary": stream_part_summary(part),
                                     "has_file_change": part_type == "patch",
                                     "files": files,
+                                    "test_call": (
+                                        extract_run_tests_call_from_part(part)
+                                        if part_type == "tool"
+                                        else None
+                                    ),
                                     "timestamp_ms": int(time.time() * 1000),
                                 }
                                 print(

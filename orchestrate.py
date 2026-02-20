@@ -34,8 +34,8 @@ app = modal.App("envoi-trace")
 
 DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
-DEFAULT_AGENT = "opencode"
-DEFAULT_MODEL = DEFAULT_OPENCODE_MODEL
+DEFAULT_AGENT = "codex"
+DEFAULT_MODEL = DEFAULT_CODEX_MODEL
 CODEX_HOME_DIR = "/tmp/codex-home"
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
@@ -234,6 +234,16 @@ class EnvoiCall(BaseModel):
     result: TestResult | None = None
 
 
+class TestingState(BaseModel):
+    solved_paths: int
+    total_paths: int
+    latest_path: str | None = None
+    latest_passed: int | None = None
+    latest_total: int | None = None
+    latest_status_code: int | None = None
+    latest_error: str | None = None
+
+
 class SessionEnd(BaseModel):
     reason: Literal["solved", "part_limit", "timeout", "agent_error", "envoi_error"]
     total_parts: int
@@ -254,16 +264,16 @@ class PartRecord(BaseModel):
     agent: str = DEFAULT_AGENT
     part: int | None = None
     timestamp: str
+    role: Literal["assistant", "user"] = "assistant"
+    part_type: str | None = None
+    item_type: str | None = None
+    summary: str | None = None
+    duration_ms: int | None = None
     agent_model: str
-    prompt: str | None = None
     git_commit: str | None = None
-    message_id: str | None = None
-    sessions: list[dict[str, Any]] = Field(default_factory=list)
-    session_ids: list[str] = Field(default_factory=list)
-    new_messages: list[dict[str, Any]] = Field(default_factory=list)
     envoi_calls: list[EnvoiCall] = Field(default_factory=list)
+    testing_state: TestingState | None = None
     repo_checkpoint: RepoCheckpoint | None = None
-    session_end: SessionEnd | None = None
 
 
 class TurnRecord(BaseModel):
@@ -277,11 +287,6 @@ class TurnRecord(BaseModel):
     agent_model: str
     prompt: str | None = None
     git_commit: str | None = None
-    message_id: str | None = None
-    sessions: list[dict[str, Any]] = Field(default_factory=list)
-    session_ids: list[str] = Field(default_factory=list)
-    new_messages: list[dict[str, Any]] = Field(default_factory=list)
-    envoi_calls: list[EnvoiCall] = Field(default_factory=list)
     repo_checkpoint: RepoCheckpoint | None = None
     parts: list[PartRecord] = Field(default_factory=list)
     session_end: SessionEnd | None = None
@@ -293,6 +298,7 @@ class AgentTrace(BaseModel):
     agent: str = DEFAULT_AGENT
     agent_model: str
     started_at: str
+    parts: list[PartRecord] = Field(default_factory=list)
     turns: list[TurnRecord] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)
     session_end: SessionEnd | None = None
@@ -363,10 +369,18 @@ class SolveTracker:
     def __init__(self) -> None:
         self.solved: set[str] = set()
         self.all_calls: list[EnvoiCall] = []
+        self._seen_call_keys: set[str] = set()
+
+    def _call_key(self, call: EnvoiCall) -> str:
+        return f"{call.path}|{call.timestamp}|{call.status_code}|{call.duration_ms}"
 
     def update(self, envoi_calls: list[EnvoiCall]) -> None:
-        self.all_calls.extend(envoi_calls)
         for call in envoi_calls:
+            key = self._call_key(call)
+            if key in self._seen_call_keys:
+                continue
+            self._seen_call_keys.add(key)
+            self.all_calls.append(call)
             if call.result and call.result.total > 0 and call.result.passed == call.result.total:
                 self.solved.add(call.path)
 
@@ -381,6 +395,20 @@ class SolveTracker:
             if call.path == path:
                 return call
         return None
+
+    def snapshot(self) -> TestingState:
+        latest = self.all_calls[-1] if self.all_calls else None
+        latest_passed = latest.result.passed if latest and latest.result else None
+        latest_total = latest.result.total if latest and latest.result else None
+        return TestingState(
+            solved_paths=len(self.solved),
+            total_paths=len(REQUIRED_PATHS),
+            latest_path=latest.path if latest else None,
+            latest_passed=latest_passed,
+            latest_total=latest_total,
+            latest_status_code=latest.status_code if latest else None,
+            latest_error=latest.error if latest else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +596,7 @@ def save_agent_trace_snapshot(
     *,
     allow_empty: bool = False,
 ) -> None:
-    part_count = sum(len(turn.parts) for turn in trace.turns)
+    part_count = len(trace.parts)
     turn_count = len(trace.turns)
     if not allow_empty and turn_count == 0 and part_count == 0:
         return
@@ -1083,9 +1111,19 @@ async def create_part_checkpoint(
     sandbox: modal.Sandbox,
     trajectory_id: str,
     part: int,
+    changed_files_hint: list[str] | None = None,
+    commit_before_hint: str | None = None,
 ) -> RepoCheckpoint:
-    commit_before = await get_git_commit(sandbox)
-    changed_files = await get_changed_files(sandbox)
+    commit_before = (
+        commit_before_hint
+        if commit_before_hint is not None
+        else await get_git_commit(sandbox)
+    )
+    changed_files = (
+        [f for f in changed_files_hint if isinstance(f, str) and f]
+        if changed_files_hint is not None
+        else await get_changed_files(sandbox)
+    )
     if not changed_files:
         return RepoCheckpoint(
             commit_before=commit_before,
@@ -1093,6 +1131,18 @@ async def create_part_checkpoint(
             committed=False,
             changed_files=[],
         )
+
+    # Re-read actual dirty state so hints from streamed events never cause
+    # a spurious commit attempt when git is already clean.
+    actual_changed_files = await get_changed_files(sandbox)
+    if not actual_changed_files:
+        return RepoCheckpoint(
+            commit_before=commit_before,
+            commit_after=commit_before,
+            committed=False,
+            changed_files=changed_files,
+        )
+    changed_files = actual_changed_files
 
     commit_message = f"part {part} checkpoint"
     exit_code, _, stderr = await sandbox_run(
@@ -1449,15 +1499,15 @@ def make_stream_part_callback(
     sandbox: modal.Sandbox,
     trajectory_id: str,
     agent_trace: AgentTrace,
+    tracker: SolveTracker,
     agent_name: str,
     resolved_model: str,
     effective_max_parts: int,
     part_counter: list[int],
     git_commit_ref: list[str | None],
+    last_part_timestamp_ms_ref: list[int | None],
     turn_record: TurnRecord | None,
     session_id: str,
-    prompt_text: str,
-    part_start: int,
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
     async def on_stream_part(stream_event: dict[str, Any]) -> None:
         if turn_record is None:
@@ -1476,14 +1526,58 @@ def make_stream_part_callback(
                 if isinstance(raw_files, list)
                 else []
             )
+            part_type_value = stream_event.get("part_type")
+            part_type = part_type_value if isinstance(part_type_value, str) else None
+            item_type_value = stream_event.get("item_type")
+            item_type = item_type_value if isinstance(item_type_value, str) else None
+            summary_value = stream_event.get("summary")
+            summary = summary_value if isinstance(summary_value, str) and summary_value else None
+            role_value = stream_event.get("role")
+            role: Literal["assistant", "user"] = (
+                role_value
+                if role_value in {"assistant", "user"}
+                else "assistant"
+            )
+            event_timestamp_ms_value = stream_event.get("timestamp_ms")
+            event_timestamp_ms = (
+                event_timestamp_ms_value
+                if isinstance(event_timestamp_ms_value, int)
+                else int(time.time() * 1000)
+            )
+            prev_ts = last_part_timestamp_ms_ref[0]
+            duration_ms = (
+                event_timestamp_ms - prev_ts
+                if isinstance(prev_ts, int) and event_timestamp_ms >= prev_ts
+                else None
+            )
+            last_part_timestamp_ms_ref[0] = event_timestamp_ms
             has_file_change = bool(stream_event.get("has_file_change"))
+            changed_files = await get_changed_files(sandbox)
+            detected_file_change = bool(changed_files)
             checkpoint: RepoCheckpoint | None = None
-            if has_file_change:
+            should_checkpoint = has_file_change or detected_file_change
+            if should_checkpoint:
+                if not has_file_change:
+                    print(
+                        "[stream] corrected has_file_change=false with git dirty "
+                        f"state on part {absolute_part}"
+                    )
                 checkpoint = await create_part_checkpoint(
                     sandbox=sandbox,
                     trajectory_id=trajectory_id,
                     part=absolute_part,
+                    changed_files_hint=(changed_files or files),
+                    commit_before_hint=git_commit_ref[0],
                 )
+                if (
+                    has_file_change
+                    and not checkpoint.committed
+                    and not detected_file_change
+                ):
+                    print(
+                        "[git] part signaled file change but git was clean; "
+                        f"recorded metadata only on part {absolute_part}"
+                    )
                 if files and not checkpoint.changed_files:
                     checkpoint.changed_files = files
                 git_commit_ref[0] = (
@@ -1492,27 +1586,35 @@ def make_stream_part_callback(
                     or git_commit_ref[0]
                 )
 
+            part_envoi_calls: list[EnvoiCall] = []
+            raw_test_call = stream_event.get("test_call")
+            if isinstance(raw_test_call, dict):
+                try:
+                    part_envoi_calls.append(EnvoiCall(**raw_test_call))
+                except Exception:
+                    pass
+            if part_envoi_calls:
+                tracker.update(part_envoi_calls)
+
             part_record = PartRecord(
                 trajectory_id=trajectory_id,
                 session_id=session_id,
                 agent=agent_name,
                 part=absolute_part,
-                timestamp=iso_from_epoch_ms(
-                    stream_event.get("timestamp_ms")
-                    if isinstance(stream_event.get("timestamp_ms"), int)
-                    else None
-                ),
+                timestamp=iso_from_epoch_ms(event_timestamp_ms),
+                role=role,
+                part_type=part_type,
+                item_type=item_type,
+                summary=summary,
+                duration_ms=duration_ms,
                 agent_model=resolved_model,
-                prompt=(prompt_text if absolute_part == part_start + 1 else None),
                 git_commit=git_commit_ref[0],
-                message_id=None,
-                sessions=[],
-                session_ids=[],
-                new_messages=[],
-                envoi_calls=[],
+                envoi_calls=part_envoi_calls,
+                testing_state=tracker.snapshot(),
                 repo_checkpoint=checkpoint,
             )
             turn_record.parts.append(part_record)
+            agent_trace.parts.append(part_record)
             if turn_record.part_start is None:
                 turn_record.part_start = absolute_part
             turn_record.part_end = absolute_part
@@ -1611,11 +1713,18 @@ async def _run_trajectory_impl(
     effective_max_parts = max_parts
     backend = get_agent_backend(agent)
     resolved_model = backend.resolve_model(model)
-    print(f"Starting trajectory {trajectory_id}")
+    trace_s3_uri = artifact_uri(trajectory_id, "agent_trace.json")
+    bundle_s3_uri = artifact_uri(trajectory_id, "repo.bundle")
+    banner = "=" * 72
+    print(banner)
+    print(f"TRAJECTORY_ID: {trajectory_id}")
+    print(f"TRACE_S3_URI: {trace_s3_uri}")
+    print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
     print(
         f"agent={agent} model={resolved_model} max_parts={effective_max_parts} "
         f"timeout={timeout_seconds}s message_timeout={message_timeout_seconds}s"
     )
+    print(banner)
 
     agent_api_key = ""
     codex_auth_json: str | None = None
@@ -1677,7 +1786,6 @@ async def _run_trajectory_impl(
 
         # --- Main loop: blocking message calls with part budget ---
         tracker = SolveTracker()
-        last_message_id: str | None = None
         seen_message_ids: set[str] = set()
         turn_count = 0
         part_count = 0
@@ -1734,36 +1842,28 @@ async def _run_trajectory_impl(
                     agent_model=resolved_model,
                     prompt=prompt_text,
                     git_commit=git_commit,
-                    message_id=None,
-                    sessions=[],
-                    session_ids=[],
-                    new_messages=[],
-                    envoi_calls=[],
                     repo_checkpoint=None,
                     parts=[],
                 )
                 agent_trace.turns.append(turn_record)
 
-                current_turn_record = turn_record
-                current_session_id = session_id
-                current_prompt_text = prompt_text
-                current_part_start = previous_part_count
                 stream_part_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None
                 stream_part_counter: list[int] = [part_count]
                 stream_git_commit_ref: list[str | None] = [git_commit]
+                stream_last_part_ts_ref: list[int | None] = [None]
                 stream_part_cb = make_stream_part_callback(
                     sandbox=sandbox,
                     trajectory_id=trajectory_id,
                     agent_trace=agent_trace,
+                    tracker=tracker,
                     agent_name=agent,
                     resolved_model=resolved_model,
                     effective_max_parts=effective_max_parts,
                     part_counter=stream_part_counter,
                     git_commit_ref=stream_git_commit_ref,
-                    turn_record=current_turn_record,
-                    session_id=current_session_id,
-                    prompt_text=current_prompt_text,
-                    part_start=current_part_start,
+                    last_part_timestamp_ms_ref=stream_last_part_ts_ref,
+                    turn_record=turn_record,
+                    session_id=session_id,
                 )
 
                 # Send message and BLOCK until agent finishes
@@ -1796,11 +1896,10 @@ async def _run_trajectory_impl(
                 # Log what the agent did
                 info = response.get("info", {})
                 parts = response.get("parts", [])
-                last_message_id = info.get("id")
-                print(f"[progress] response id={last_message_id} parts={len(parts)}")
+                response_message_id = info.get("id")
+                print(f"[progress] response id={response_message_id} parts={len(parts)}")
                 log_message_parts(response)
 
-                session_objects = turn_outcome.session_objects
                 session_ids = turn_outcome.session_ids
                 new_messages = turn_outcome.new_messages
                 print(f"[progress] new_messages={len(new_messages)} sessions={len(session_ids)}")
@@ -1833,21 +1932,19 @@ async def _run_trajectory_impl(
                             agent=agent,
                             part=absolute_part,
                             timestamp=datetime.now(UTC).isoformat(),
+                            role="assistant",
+                            part_type=None,
+                            item_type=None,
+                            summary="placeholder",
+                            duration_ms=None,
                             agent_model=resolved_model,
-                            prompt=(
-                                prompt_text
-                                if absolute_part == previous_part_count + 1
-                                else None
-                            ),
                             git_commit=git_commit,
-                            message_id=None,
-                            sessions=[],
-                            session_ids=[],
-                            new_messages=[],
                             envoi_calls=[],
+                            testing_state=tracker.snapshot(),
                             repo_checkpoint=None,
                         )
                         turn_record.parts.append(placeholder)
+                        agent_trace.parts.append(placeholder)
                         if turn_record.part_start is None:
                             turn_record.part_start = absolute_part
                         turn_record.part_end = absolute_part
@@ -1856,20 +1953,19 @@ async def _run_trajectory_impl(
                     new_parts = part_count - previous_part_count
 
                     turn_record.session_id = session_id
-                    turn_record.message_id = last_message_id
-                    turn_record.sessions = session_objects
-                    turn_record.session_ids = session_ids
-                    turn_record.new_messages = new_messages
-                    turn_record.envoi_calls = new_envoi_calls
                     for record in turn_record.parts:
                         record.session_id = session_id
                     if turn_record.parts:
                         last_part_record = turn_record.parts[-1]
-                        last_part_record.message_id = last_message_id
-                        last_part_record.sessions = session_objects
-                        last_part_record.session_ids = session_ids
-                        last_part_record.new_messages = new_messages
-                        last_part_record.envoi_calls = new_envoi_calls
+                        existing_keys = {
+                            tracker._call_key(call) for call in last_part_record.envoi_calls
+                        }
+                        for call in new_envoi_calls:
+                            key = tracker._call_key(call)
+                            if key not in existing_keys:
+                                last_part_record.envoi_calls.append(call)
+                                existing_keys.add(key)
+                        last_part_record.testing_state = tracker.snapshot()
                         if turn_record.git_commit is None:
                             turn_record.git_commit = last_part_record.git_commit
                     else:
@@ -1922,7 +2018,7 @@ async def _run_trajectory_impl(
             end_reason = "agent_error"
             # Save whatever messages we have
             try:
-                session_objects, session_ids, crash_new_messages = (
+                _, _, crash_new_messages = (
                     await backend.collect_crash_messages(
                         sandbox,
                         session_id,
@@ -1941,11 +2037,6 @@ async def _run_trajectory_impl(
                         agent_model=resolved_model,
                         prompt=prompt_text,
                         git_commit=await get_git_commit(sandbox),
-                        message_id=last_message_id,
-                        sessions=session_objects,
-                        session_ids=session_ids,
-                        new_messages=crash_new_messages,
-                        envoi_calls=[],
                         parts=[],
                     )
                     agent_trace.turns.append(crash_record)

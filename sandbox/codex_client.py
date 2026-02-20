@@ -97,6 +97,49 @@ def parse_json_maybe(value: Any) -> Any:
     return value
 
 
+def truncate_for_trace(value: str, limit: int = 240) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
+def extract_run_tests_call(item: dict[str, Any]) -> dict[str, Any] | None:
+    if str(item.get("tool") or "") != "run_tests":
+        return None
+
+    result_obj = _as_dict(item.get("result"))
+    payload: Any = result_obj.get("structured_content")
+    if payload is None:
+        payload = mcp_output_payload(item.get("result"), item.get("error"))
+    parsed = parse_json_maybe(payload)
+    if not isinstance(parsed, dict):
+        return None
+
+    path = parsed.get("path")
+    timestamp = parsed.get("timestamp")
+    duration_ms = parsed.get("duration_ms")
+    status_code = parsed.get("status_code")
+    if not isinstance(path, str) or not path:
+        return None
+    if not isinstance(timestamp, str) or not timestamp:
+        return None
+    if not isinstance(duration_ms, int):
+        return None
+    if not isinstance(status_code, int):
+        return None
+
+    normalized: dict[str, Any] = {
+        "path": path,
+        "timestamp": timestamp,
+        "duration_ms": duration_ms,
+        "status_code": status_code,
+        "error": parsed.get("error") if isinstance(parsed.get("error"), str) else None,
+        "result": parsed.get("result"),
+    }
+    return normalized
+
+
 def format_generic_structured(value: Any) -> str:
     parsed = parse_json_maybe(value)
     if isinstance(parsed, (dict, list)):
@@ -359,7 +402,6 @@ def log_progress(
             file=sys.stderr,
             flush=True,
         )
-    print("", file=sys.stderr, flush=True)
 
 
 def start_progress_heartbeat(
@@ -425,6 +467,29 @@ def files_from_item(item: dict[str, Any], part: dict[str, Any]) -> list[str]:
     return files
 
 
+def workspace_changed_files() -> list[str]:
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", "/workspace", "status", "--porcelain"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+
+    files: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        entry = line[3:].strip() if len(line) >= 4 else line.strip()
+        if " -> " in entry:
+            entry = entry.split(" -> ", 1)[1]
+        if entry:
+            files.append(entry)
+    return files
+
+
 def emit_trace_event(payload: dict[str, Any]) -> None:
     print(f"{TRACE_EVENT_PREFIX}{_json_dumps(payload)}", file=sys.stderr, flush=True)
 
@@ -446,12 +511,34 @@ def trace_event_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
         item_type = "unknown"
     has_file_change = item_type == "file_change" or part_type == "patch"
     files = files_from_item(item, part) if has_file_change else []
+    if item_type == "command_execution":
+        files = workspace_changed_files()
+        has_file_change = bool(files)
+    summary: str | None = None
+    if part_type in {"reasoning", "text"}:
+        text = str(part.get("text") or item.get("text") or "").strip()
+        summary = truncate_for_trace(text) if text else None
+    elif item_type == "command_execution":
+        command = str(item.get("command") or "").strip()
+        summary = truncate_for_trace(command) if command else None
+    elif item_type == "mcp_tool_call":
+        tool_name = str(item.get("tool") or "mcp_tool_call")
+        args = item.get("arguments")
+        test_path = ""
+        if isinstance(args, dict):
+            test_path = str(args.get("test_path") or "")
+        suffix = f" {test_path}" if test_path else ""
+        summary = f"{tool_name}{suffix}".strip()
+    test_call = extract_run_tests_call(item) if item_type == "mcp_tool_call" else None
     return {
         "event": "part.completed",
+        "role": "assistant",
         "part_type": part_type,
         "item_type": item_type,
+        "summary": summary,
         "has_file_change": has_file_change,
         "files": files,
+        "test_call": test_call,
         "timestamp_ms": int(time.time() * 1000),
     }
 

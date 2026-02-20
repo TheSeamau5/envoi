@@ -1,13 +1,20 @@
 # AGENTS.md
 
 ## What This Repo Does
-This repo runs and records long-horizon OpenCode agent sessions against a C-compiler test environment.
+This repo is an iterative harness to get an agent to build a C compiler against an envoi test environment.
+
+Primary objective:
+- Increase compiler correctness over time until the agent passes all required suites.
+
+Operational objective:
+- Make each run replayable and diagnosable at part granularity.
 
 Core job:
 1. Run an agent in a Modal sandbox with a bounded part budget.
-2. Capture what happened (messages, tool calls, sessions/sub-sessions, test calls).
-3. Capture repository state at high granularity via git commits when code changed.
-4. Persist artifacts to S3 for offline replay and analysis.
+2. Let the agent iteratively edit compiler code and run envoi tests.
+3. Capture what happened at part granularity.
+4. Capture repository state via git commits when code changed.
+5. Persist artifacts to S3 for replay and analysis.
 
 Hard requirement:
 - Persist `agent_trace.json` after every recorded part.
@@ -52,14 +59,11 @@ Schema policy:
 
 ## Big Technical Decisions (Intent)
 - Single trace object (`agent_trace.json`) instead of append-only JSONL:
-  - Easier to store nested turn/part/session/message/checkpoint data.
+  - Easier to store nested turn/part/checkpoint/test-state data.
   - One canonical JSON document per trajectory.
 - Git-first state capture:
   - Checkpoint commits happen only when files changed (no duplicate commit noise).
   - Final `repo.bundle` makes full history portable.
-- Capture full session family, not only root session:
-  - Per turn, `list-sessions` + parent graph traversal captures root + child + deeper sessions.
-  - Messages are collected for all discovered session IDs in that family.
 - SDK isolation:
   - OpenCode API access is centralized in `sandbox/opencode_client.py`.
   - Orchestrator talks to one JSON CLI surface, decoupled from SDK internals.
@@ -74,18 +78,23 @@ Code-state source of truth:
 - `agent_trace.json` maps each part to commit metadata (`git_commit` / `repo_checkpoint`).
 
 `agent_trace.json` shape:
-- `turns`: list of turn records
-- each turn record includes:
-  - `turn` (global turn index)
-  - `part_start`, `part_end`
-  - `parts`: list of per-part records for that turn
+- `parts`: canonical list of part records (source of truth)
+- `turns`: grouping metadata
 
 Each part record includes:
-- `part` (global part index), `timestamp`, `prompt`, `message_id`
-- `sessions`, `session_ids`, `new_messages`
-- `envoi_calls`
-- `repo_checkpoint`: `commit_before`, `commit_after`, `changed_files`
-- `git_commit` (effective commit)
+- identity and timing:
+  - `part`, `timestamp`, `duration_ms`
+- part semantics:
+  - `role` (`assistant` or `user`)
+  - `part_type` (`reasoning`, `text`, `tool`, `patch`, ...)
+  - `item_type` (provider-specific item kind)
+  - `summary` (concise content preview)
+- repository state:
+  - `git_commit`
+  - `repo_checkpoint`: `commit_before`, `commit_after`, `changed_files`
+- testing state:
+  - `envoi_calls` (new test calls observed on that part)
+  - `testing_state` (solved progress + latest test status)
 
 Top-level session summary includes:
 - `session_end.reason`
@@ -93,8 +102,40 @@ Top-level session summary includes:
 - `session_end.total_turns`
 - `session_end.final_git_commit`
 
+## Quick Trace Commands
+Run a trajectory:
+
+```bash
+uv run trace
+```
+
+Common options:
+
+```bash
+uv run trace --agent codex --max-parts 100 --detach
+```
+
+`trace` prints:
+- `TRAJECTORY_ID`
+- `TRACE_S3_URI`
+- `BUNDLE_S3_URI`
+
+Analyze a trajectory:
+
+```bash
+uv run graph_trace <trajectory_id>
+```
+
+This auto-downloads trace + bundle from S3 and runs suite-level analysis.
+
+For a specific part checkout:
+
+```bash
+uv run graph_trace <trajectory_id> --part <p>
+```
+
 ## How To Reconstruct Repo At Part `p`
-Use `offline_replay.py`:
+Use `offline_replay.py` directly when you need full control:
 
 ```bash
 uv run python offline_replay.py \
@@ -111,6 +152,7 @@ What it does:
 3. Clones bundle and checks out that commit.
 
 ## How To Replay Tests Offline
+Use `offline_replay.py` directly when you need full control:
 ```bash
 uv run python offline_replay.py \
   --mode evaluate \
@@ -124,18 +166,35 @@ Behavior:
 - Maps results back onto each part (`part_to_commit`, `part_evaluations`).
 
 ## Where To Edit What
-- Trace schema/capture behavior: `orchestrate.py` (`PartRecord`, `TurnRecord`, `collect_turn_messages`, main loop).
+- Trace schema/capture behavior: `orchestrate.py` (`PartRecord`, `TurnRecord`, `make_stream_part_callback`, main loop).
 - OpenCode API interactions: `sandbox/opencode_client.py`.
+- Codex stream interactions: `sandbox/codex_client.py`.
 - Sandbox boot/runtime services: `sandbox/setup.sh`.
 - Tool exposure: `sandbox/opencode.jsonc` and `sandbox/mcp_server.py`.
 - Test suite behavior: `environment/tests/*.py`.
 - Offline reconstruction/reporting: `offline_replay.py`.
+- Short launchers: `run_trace.py`, `graph_trace.py`.
 
 ## Operational Notes
 - Use `uv` for local Python workflows.
-- Main run command:
+- Default run behavior:
+  - agent: `codex`
+  - max parts: `1000`
+- Normal workflow:
+  - run trajectory (`uv run trace`)
+  - capture `TRAJECTORY_ID` from startup logs
+  - analyze (`uv run graph_trace <trajectory_id>`)
+- Main run command (simple):
   ```bash
-  modal run orchestrate.py --model opencode/gpt-5-nano --max-parts <n>
+  uv run trace
+  ```
+- With explicit options:
+  ```bash
+  uv run trace --agent codex --max-parts 100 --detach
+  ```
+- Direct Modal command (full control):
+  ```bash
+  modal run orchestrate.py --agent codex --max-parts <n>
   ```
 - Lint/check:
   ```bash
