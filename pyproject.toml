@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+e2b = [
+    "e2b-code-interpreter>=1.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
@@ -33,7 +36,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agents", "scripts"]
+packages = ["agents", "sandbox", "scripts"]
 py-modules = ["task", "runner"]
 
 [tool.ruff]

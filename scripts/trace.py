@@ -25,29 +25,42 @@ def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
 
 
+def _common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str]:
+    """Build runner.py argument list shared by both modal and direct execution."""
+    parts: list[str] = [
+        "--agent",
+        args.agent,
+        "--max-parts",
+        str(args.max_parts),
+        "--trajectory-id",
+        trajectory_id,
+    ]
+    if args.model:
+        parts.extend(["--model", args.model])
+    if args.message_timeout_seconds is not None:
+        parts.extend(["--message-timeout-seconds", str(args.message_timeout_seconds)])
+    if args.sandbox != "modal":
+        parts.extend(["--sandbox-provider", args.sandbox])
+    if args.agent == "codex" and args.codex_auth_file:
+        parts.extend(["--codex-auth-file", args.codex_auth_file])
+    return parts
+
+
 def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[str]:
     command: list[str] = ["modal", "run"]
     if args.detach:
         command.append("--detach")
-    command.extend(
-        [
-            "runner.py",
-            "--agent",
-            args.agent,
-            "--max-parts",
-            str(args.max_parts),
-            "--trajectory-id",
-            trajectory_id,
-        ]
-    )
-    if args.model:
-        command.extend(["--model", args.model])
-    if args.message_timeout_seconds is not None:
-        command.extend(["--message-timeout-seconds", str(args.message_timeout_seconds)])
+    command.append("runner.py")
+    command.extend(_common_runner_args(args, trajectory_id))
     if args.non_preemptible:
         command.append("--non-preemptible")
-    if args.agent == "codex" and args.codex_auth_file:
-        command.extend(["--codex-auth-file", args.codex_auth_file])
+    return command
+
+
+def build_direct_command(args: argparse.Namespace, trajectory_id: str) -> list[str]:
+    """Build a direct python invocation for non-Modal sandbox providers."""
+    command: list[str] = ["python3", "runner.py"]
+    command.extend(_common_runner_args(args, trajectory_id))
     return command
 
 
@@ -105,6 +118,12 @@ def main() -> None:
         help="Opt into preemptible execution.",
     )
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument(
+        "--sandbox",
+        choices=["modal", "e2b"],
+        default="modal",
+        help="Sandbox provider to use (default: modal).",
+    )
     parser.add_argument("--trajectory-id", default=None)
     parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
     parser.add_argument(
@@ -152,10 +171,15 @@ def main() -> None:
     )
     print(banner, flush=True)
 
+    print(f"sandbox={args.sandbox}", flush=True)
+
     if args.detach and args.auto_resume:
         print("[launcher] detach mode disables auto-resume checks", flush=True)
 
-    command = build_modal_command(args, trajectory_id)
+    if args.sandbox == "modal":
+        command = build_modal_command(args, trajectory_id)
+    else:
+        command = build_direct_command(args, trajectory_id)
     restart_count = 0
     while True:
         print(

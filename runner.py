@@ -32,6 +32,8 @@ import modal
 from pydantic import BaseModel, Field
 
 from agents.opencode import OPENCODE_CONFIG_TEMPLATE
+from sandbox.base import SandboxBackend
+from sandbox.modal import ModalSandbox
 from task import (
     TASK_REQUIRED_TEST_PATHS,
     TASK_SANDBOX_SETUP_SH,
@@ -443,19 +445,19 @@ class AgentBackend(Protocol):
 
     async def setup_sandbox(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         model: str,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
         ...
 
-    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
+    async def create_session(self, sb: SandboxBackend, trajectory_id: str) -> str | None:
         ...
 
     async def ensure_authenticated(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
@@ -463,7 +465,7 @@ class AgentBackend(Protocol):
 
     async def run_turn(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         model: str,
         prompt_text: str,
@@ -476,7 +478,7 @@ class AgentBackend(Protocol):
 
     async def collect_crash_messages(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         seen_message_ids: set[str],
     ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
@@ -826,7 +828,7 @@ sandbox_image = (
 
 
 async def dump_sandbox_logs(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     *,
     agent: str,
     tail: int = 50,
@@ -840,12 +842,11 @@ async def dump_sandbox_logs(
 
     for log_file in log_files:
         try:
-            _, stdout, _ = await sandbox_run(
-                sandbox,
+            _, stdout, _ = (await sb.run(
                 f"[ -f {shlex.quote(log_file)} ] && tail -n {tail} {shlex.quote(log_file)} || true",
                 timeout=10,
                 quiet=True,
-            )
+            )).unpack()
             if stdout.strip():
                 label = log_file.split("/")[-1]
                 print(f"[logs] === {label} (last {tail} lines) ===")
@@ -853,84 +854,6 @@ async def dump_sandbox_logs(
                     builtins.print(f"  {line}", flush=True)
         except Exception:
             pass
-
-
-async def sandbox_run(
-    sandbox: modal.Sandbox,
-    cmd: str,
-    timeout: int = 60,
-    quiet: bool = False,
-    stream_output: bool = False,
-    on_stdout_line: Callable[[str], Awaitable[None]] | None = None,
-    on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
-) -> tuple[int, str, str]:
-    """Execute a command inside the sandbox."""
-    if not quiet:
-        print(f"[run] {cmd[:200]}")
-    proc = await sandbox.exec.aio("bash", "-c", cmd, timeout=timeout)
-    stdout_chunks: list[str] = []
-    stderr_chunks: list[str] = []
-
-    async def drain_stream(
-        stream: Any,
-        sink: list[str],
-        live: bool = False,
-        line_callback: Callable[[str], Awaitable[None]] | None = None,
-    ) -> None:
-        line_buffer = ""
-        async for chunk in stream:
-            sink.append(chunk)
-            if live and chunk:
-                builtins.print(chunk, end="", flush=True)
-            if line_callback is None:
-                continue
-            line_buffer += chunk
-            while "\n" in line_buffer:
-                line, line_buffer = line_buffer.split("\n", 1)
-                await line_callback(line.rstrip("\r"))
-        if line_callback is not None and line_buffer:
-            await line_callback(line_buffer.rstrip("\r"))
-
-    await asyncio.gather(
-        drain_stream(
-            proc.stdout,
-            stdout_chunks,
-            line_callback=on_stdout_line,
-        ),
-        drain_stream(
-            proc.stderr,
-            stderr_chunks,
-            live=stream_output,
-            line_callback=on_stderr_line,
-        ),
-    )
-
-    await proc.wait.aio()
-    stdout = "".join(stdout_chunks)
-    stderr = "".join(stderr_chunks)
-    exit_code = proc.returncode or 0
-    if exit_code in {124, -1}:
-        print(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
-    if exit_code != 0:
-        print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
-        if stderr:
-            print(f"[run] stderr: {stderr[:500]}")
-    return exit_code, stdout, stderr
-
-
-async def sandbox_write_file(
-    sandbox: modal.Sandbox,
-    path: str,
-    content: str,
-    ensure_dir: bool = True,
-    log_upload: bool = False,
-) -> None:
-    if log_upload:
-        print(f"[setup][upload] {path}")
-    if ensure_dir:
-        await sandbox_run(sandbox, f"mkdir -p '{Path(path).parent}'", quiet=True)
-    async with await sandbox.open.aio(path, "w") as f:
-        await f.write.aio(content)
 
 
 def environment_upload_items() -> list[tuple[str, str]]:
@@ -945,7 +868,7 @@ def environment_upload_items() -> list[tuple[str, str]]:
 
 
 async def upload_files_parallel(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     uploads: list[tuple[str, str]],
     *,
     concurrency: int = SETUP_UPLOAD_CONCURRENCY,
@@ -958,7 +881,7 @@ async def upload_files_parallel(
     dirs = sorted({str(Path(path).parent) for path, _ in uploads})
     if dirs:
         mkdir_cmd = "mkdir -p " + " ".join(shlex.quote(d) for d in dirs)
-        await sandbox_run(sandbox, mkdir_cmd, quiet=True)
+        await sb.run(mkdir_cmd, quiet=True)
 
     print(
         f"[setup] uploading {len(uploads)} files with concurrency={bounded}"
@@ -970,8 +893,7 @@ async def upload_files_parallel(
         if log_upload:
             print(f"[setup][upload] {path}")
         async with semaphore:
-            await sandbox_write_file(
-                sandbox,
+            await sb.write_file(
                 path,
                 content,
                 ensure_dir=False,
@@ -987,7 +909,7 @@ async def upload_files_parallel(
 
 
 async def run_opencode_client(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     args: list[str],
     *,
     timeout: int = 60,
@@ -996,14 +918,13 @@ async def run_opencode_client(
     on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     command = "python3 /sandbox/opencode_client.py " + " ".join(shlex.quote(a) for a in args)
-    exit_code, stdout, stderr = await sandbox_run(
-        sandbox,
+    exit_code, stdout, stderr = (await sb.run(
         command,
         timeout=timeout,
         quiet=quiet,
         stream_output=stream_output,
         on_stderr_line=on_stderr_line,
-    )
+    )).unpack()
     if exit_code != 0:
         if stderr:
             print(f"[opencode-sdk] command failed: {stderr[:500]}")
@@ -1017,7 +938,7 @@ async def run_opencode_client(
 
 
 async def run_codex_client(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     args: list[str],
     *,
     timeout: int = 60,
@@ -1026,14 +947,13 @@ async def run_codex_client(
     on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     command = "python3 -u /sandbox/codex_client.py " + " ".join(shlex.quote(a) for a in args)
-    exit_code, stdout, stderr = await sandbox_run(
-        sandbox,
+    exit_code, stdout, stderr = (await sb.run(
         command,
         timeout=timeout,
         quiet=quiet,
         stream_output=stream_output,
         on_stderr_line=on_stderr_line,
-    )
+    )).unpack()
     if exit_code != 0:
         if stderr:
             print(f"[codex-cli] command failed: {stderr[:500]}")
@@ -1045,9 +965,9 @@ async def run_codex_client(
         return None
 
 
-async def create_session(sandbox: modal.Sandbox, title: str) -> str | None:
+async def create_session(sb: SandboxBackend, title: str) -> str | None:
     response = await run_opencode_client(
-        sandbox,
+        sb,
         ["create-session", "--title", title],
         timeout=60,
     )
@@ -1065,7 +985,7 @@ async def create_session(sandbox: modal.Sandbox, title: str) -> str | None:
 
 
 async def send_message_blocking(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     session_id: str,
     text: str,
     timeout: int = MESSAGE_TIMEOUT_SECONDS,
@@ -1073,7 +993,7 @@ async def send_message_blocking(
     on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     prompt_path = "/tmp/prompt.txt"
-    await sandbox_write_file(sandbox, prompt_path, text, ensure_dir=False)
+    await sb.write_file(prompt_path, text, ensure_dir=False)
     print(f"[prompt] sending message ({len(text)} chars), waiting up to {timeout}s...")
 
     async def handle_stderr_line(line: str) -> None:
@@ -1093,7 +1013,7 @@ async def send_message_blocking(
             await on_stream_part(event_obj)
 
     response = await run_opencode_client(
-        sandbox,
+        sb,
         [
             "chat-stream",
             "--session-id",
@@ -1145,9 +1065,9 @@ async def send_message_blocking(
     return body
 
 
-async def get_all_messages(sandbox: modal.Sandbox, session_id: str) -> list[dict[str, Any]]:
+async def get_all_messages(sb: SandboxBackend, session_id: str) -> list[dict[str, Any]]:
     response = await run_opencode_client(
-        sandbox,
+        sb,
         ["list-messages", "--session-id", session_id],
         timeout=60,
         quiet=True,
@@ -1165,9 +1085,9 @@ async def get_all_messages(sandbox: modal.Sandbox, session_id: str) -> list[dict
     return []
 
 
-async def get_all_sessions(sandbox: modal.Sandbox) -> list[dict[str, Any]]:
+async def get_all_sessions(sb: SandboxBackend) -> list[dict[str, Any]]:
     response = await run_opencode_client(
-        sandbox,
+        sb,
         ["list-sessions"],
         timeout=60,
         quiet=True,
@@ -1249,11 +1169,11 @@ def message_id(message: dict[str, Any]) -> str | None:
 
 
 async def collect_turn_messages(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     root_session_id: str,
     seen_message_ids: set[str],
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
-    sessions = await get_all_sessions(sandbox)
+    sessions = await get_all_sessions(sb)
     session_ids = get_session_family(root_session_id, sessions)
     session_map: dict[str, dict[str, Any]] = {}
     for session in sessions:
@@ -1264,7 +1184,7 @@ async def collect_turn_messages(
             session_map[sid] = session
 
     message_results = await asyncio.gather(
-        *[get_all_messages(sandbox, session_id) for session_id in session_ids]
+        *[get_all_messages(sb, session_id) for session_id in session_ids]
     )
 
     all_messages: list[dict[str, Any]] = []
@@ -1294,7 +1214,7 @@ async def collect_turn_messages(
 
 
 async def run_git_command_with_retry(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     cmd: str,
     *,
     attempts: int = GIT_RETRY_ATTEMPTS,
@@ -1302,12 +1222,11 @@ async def run_git_command_with_retry(
 ) -> tuple[int, str, str]:
     last: tuple[int, str, str] = (1, "", "")
     for attempt in range(1, max(1, attempts) + 1):
-        exit_code, stdout, stderr = await sandbox_run(
-            sandbox,
+        exit_code, stdout, stderr = (await sb.run(
             cmd,
             timeout=timeout,
             quiet=True,
-        )
+        )).unpack()
         last = (exit_code, stdout, stderr)
         if exit_code == 0:
             return last
@@ -1332,18 +1251,18 @@ async def run_git_command_with_retry(
     return last
 
 
-async def get_git_commit(sandbox: modal.Sandbox) -> str | None:
+async def get_git_commit(sb: SandboxBackend) -> str | None:
     _, stdout, _ = await run_git_command_with_retry(
-        sandbox,
+        sb,
         "cd /workspace && git rev-parse HEAD 2>/dev/null || echo none",
     )
     commit = stdout.strip()
     return commit if commit and commit != "none" else None
 
 
-async def get_changed_files(sandbox: modal.Sandbox) -> list[str]:
+async def get_changed_files(sb: SandboxBackend) -> list[str]:
     exit_code, stdout, stderr = await run_git_command_with_retry(
-        sandbox,
+        sb,
         "cd /workspace && git status --porcelain",
     )
     if exit_code != 0:
@@ -1386,7 +1305,7 @@ def parse_numstat_output(stdout: str) -> list[dict[str, Any]]:
 
 
 async def get_commit_patch_payload(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     commit: str,
 ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
     quoted_commit = shlex.quote(commit)
@@ -1394,27 +1313,24 @@ async def get_commit_patch_payload(
     stats_text: str | None = None
     numstat_rows: list[dict[str, Any]] = []
 
-    patch_exit, patch_stdout, _ = await sandbox_run(
-        sandbox,
+    patch_exit, patch_stdout, _ = (await sb.run(
         f"cd /workspace && git show --format= --no-color --patch {quoted_commit}",
         quiet=True,
-    )
+    )).unpack()
     if patch_exit == 0:
         patch_text = patch_stdout
 
-    stats_exit, stats_stdout, _ = await sandbox_run(
-        sandbox,
+    stats_exit, stats_stdout, _ = (await sb.run(
         f"cd /workspace && git show --format= --no-color --stat {quoted_commit}",
         quiet=True,
-    )
+    )).unpack()
     if stats_exit == 0:
         stats_text = stats_stdout
 
-    numstat_exit, numstat_stdout, _ = await sandbox_run(
-        sandbox,
+    numstat_exit, numstat_stdout, _ = (await sb.run(
         f"cd /workspace && git show --format= --no-color --numstat {quoted_commit}",
         quiet=True,
-    )
+    )).unpack()
     if numstat_exit == 0:
         numstat_rows = parse_numstat_output(numstat_stdout)
 
@@ -1423,7 +1339,7 @@ async def get_commit_patch_payload(
 
 async def upload_repo_bundle_snapshot(
     *,
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     trajectory_id: str,
     reason: str,
 ) -> str | None:
@@ -1431,7 +1347,7 @@ async def upload_repo_bundle_snapshot(
         return None
 
     exit_code, _, stderr = await run_git_command_with_retry(
-        sandbox,
+        sb,
         "cd /workspace && git bundle create /tmp/repo.bundle --all",
         attempts=2,
     )
@@ -1442,20 +1358,18 @@ async def upload_repo_bundle_snapshot(
         )
         return None
 
-    _, size_out, _ = await sandbox_run(
-        sandbox,
+    _, size_out, _ = (await sb.run(
         "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
         quiet=True,
-    )
+    )).unpack()
     bundle_size = int(size_out.strip() or "0")
     if bundle_size <= 0:
         return None
 
-    b64_exit, b64, b64_stderr = await sandbox_run(
-        sandbox,
+    b64_exit, b64, b64_stderr = (await sb.run(
         "base64 /tmp/repo.bundle",
         quiet=True,
-    )
+    )).unpack()
     if b64_exit != 0:
         print(
             "[bundle] snapshot encode failed: "
@@ -1470,7 +1384,7 @@ async def upload_repo_bundle_snapshot(
 
 
 async def create_part_checkpoint(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     trajectory_id: str,
     part: int,
     changed_files_hint: list[str] | None = None,
@@ -1479,12 +1393,12 @@ async def create_part_checkpoint(
     commit_before = (
         commit_before_hint
         if commit_before_hint is not None
-        else await get_git_commit(sandbox)
+        else await get_git_commit(sb)
     )
     changed_files = (
         [f for f in changed_files_hint if isinstance(f, str) and f]
         if changed_files_hint is not None
-        else await get_changed_files(sandbox)
+        else await get_changed_files(sb)
     )
     if not changed_files:
         return RepoCheckpoint(
@@ -1496,7 +1410,7 @@ async def create_part_checkpoint(
 
     # Re-read actual dirty state so hints from streamed events never cause
     # a spurious commit attempt when git is already clean.
-    actual_changed_files = await get_changed_files(sandbox)
+    actual_changed_files = await get_changed_files(sb)
     if not actual_changed_files:
         return RepoCheckpoint(
             commit_before=commit_before,
@@ -1508,7 +1422,7 @@ async def create_part_checkpoint(
 
     commit_message = f"part {part} checkpoint"
     exit_code, _, stderr = await run_git_command_with_retry(
-        sandbox,
+        sb,
         "cd /workspace && git add -A && "
         f"git commit -m {shlex.quote(commit_message)}",
         attempts=GIT_RETRY_ATTEMPTS,
@@ -1522,17 +1436,17 @@ async def create_part_checkpoint(
             changed_files=changed_files,
         )
 
-    commit_after = await get_git_commit(sandbox)
+    commit_after = await get_git_commit(sb)
     patch_text: str | None = None
     stats_text: str | None = None
     numstat_rows: list[dict[str, Any]] = []
     if commit_after:
         patch_text, stats_text, numstat_rows = await get_commit_patch_payload(
-            sandbox,
+            sb,
             commit_after,
         )
         await upload_repo_bundle_snapshot(
-            sandbox=sandbox,
+            sb=sb,
             trajectory_id=trajectory_id,
             reason=f"part {part}",
         )
@@ -1652,17 +1566,16 @@ def parse_commit_evaluation_payload(stdout: str) -> dict[str, Any] | None:
 
 async def run_commit_evaluation(
     *,
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     commit: str,
 ) -> dict[str, Any]:
     eval_repo_dir = f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
     command = build_commit_evaluation_command(commit=commit, eval_repo_dir=eval_repo_dir)
-    exit_code, stdout, stderr = await sandbox_run(
-        sandbox,
+    exit_code, stdout, stderr = (await sb.run(
         command,
         timeout=EVALUATION_TIMEOUT_SECONDS,
         quiet=True,
-    )
+    )).unpack()
     payload = parse_commit_evaluation_payload(stdout)
     return {
         "command": command,
@@ -1673,9 +1586,9 @@ async def run_commit_evaluation(
     }
 
 
-async def ensure_provider_connected(sandbox: modal.Sandbox, api_key: str) -> None:
+async def ensure_provider_connected(sb: SandboxBackend, api_key: str) -> None:
     response = await run_opencode_client(
-        sandbox,
+        sb,
         ["provider-status"],
         timeout=30,
         quiet=True,
@@ -1688,9 +1601,9 @@ async def ensure_provider_connected(sandbox: modal.Sandbox, api_key: str) -> Non
 
     print("[provider] opencode not connected, setting auth...")
     api_key_path = "/tmp/auth_opencode_api_key.txt"
-    await sandbox_write_file(sandbox, api_key_path, api_key, ensure_dir=False)
+    await sb.write_file(api_key_path, api_key, ensure_dir=False)
     auth_response = await run_opencode_client(
-        sandbox,
+        sb,
         ["provider-auth", "--api-key-file", api_key_path],
         timeout=30,
     )
@@ -1699,13 +1612,13 @@ async def ensure_provider_connected(sandbox: modal.Sandbox, api_key: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Agent backends + sandbox setup
+# Agent backends + sb setup
 # ---------------------------------------------------------------------------
 
 
-async def upload_environment_files(sandbox: modal.Sandbox) -> None:
+async def upload_environment_files(sb: SandboxBackend) -> None:
     await upload_files_parallel(
-        sandbox,
+        sb,
         environment_upload_items(),
         log_upload=True,
     )
@@ -1716,7 +1629,7 @@ async def upload_environment_files(sandbox: modal.Sandbox) -> None:
     )
 
 
-async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
+async def run_setup_script(sb: SandboxBackend, agent: str) -> None:
     print(f"[setup] running setup.sh (agent={agent})...")
 
     async def handle_setup_line(line: str) -> None:
@@ -1729,13 +1642,12 @@ async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
         if stripped.startswith("ERROR:"):
             print(f"[setup] {stripped}")
 
-    exit_code, stdout, stderr = await sandbox_run(
-        sandbox,
+    exit_code, stdout, stderr = (await sb.run(
         f"AGENT_KIND={shlex.quote(agent)} bash /tmp/upload/setup.sh",
         timeout=1800,
         on_stdout_line=handle_setup_line,
         on_stderr_line=handle_setup_line,
-    )
+    )).unpack()
     if exit_code != 0:
         print(f"[setup] FAILED:\n{stdout}\n{stderr}")
         raise RuntimeError(f"Setup failed (exit {exit_code})")
@@ -1787,7 +1699,7 @@ def build_unsolved_status_lines(tracker: SolveTracker) -> list[str]:
 
 async def restore_workspace_from_bundle(
     *,
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     trajectory_id: str,
     commit: str,
 ) -> bool:
@@ -1815,8 +1727,7 @@ async def restore_workspace_from_bundle(
         return False
 
     encoded = base64.b64encode(bundle_bytes).decode("ascii")
-    await sandbox_write_file(
-        sandbox,
+    await sb.write_file(
         "/tmp/resume.bundle.b64",
         encoded,
         ensure_dir=False,
@@ -1837,12 +1748,11 @@ async def restore_workspace_from_bundle(
         "git config user.email 'agent@example.com'\n"
         "git config user.name 'Agent'\n"
     )
-    exit_code, _, stderr = await sandbox_run(
-        sandbox,
+    exit_code, _, stderr = (await sb.run(
         restore_cmd,
         timeout=300,
         quiet=True,
-    )
+    )).unpack()
     if exit_code != 0:
         stderr_summary = truncate_text(stderr or "(no stderr)", limit=600)
         print(
@@ -1853,11 +1763,11 @@ async def restore_workspace_from_bundle(
     return True
 
 
-async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
+async def setup_sandbox_opencode(sb: SandboxBackend, model: str, api_key: str) -> None:
     print(f"[setup] agent=opencode model={model}")
     config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
     await upload_files_parallel(
-        sandbox,
+        sb,
         [
             ("/tmp/upload/setup.sh", SETUP_SH),
             ("/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH),
@@ -1869,12 +1779,12 @@ async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: st
         ],
         log_upload=True,
     )
-    await upload_environment_files(sandbox)
-    await run_setup_script(sandbox, "opencode")
+    await upload_environment_files(sb)
+    await run_setup_script(sb, "opencode")
 
 
 async def setup_sandbox_codex(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     model: str,
     api_key: str,
     auth_json: str | None = None,
@@ -1895,12 +1805,12 @@ async def setup_sandbox_codex(
         setup_uploads.append((f"{CODEX_HOME_DIR}/auth.json", auth_json))
 
     await upload_files_parallel(
-        sandbox,
+        sb,
         setup_uploads,
         log_upload=True,
     )
-    await upload_environment_files(sandbox)
-    await run_setup_script(sandbox, "codex")
+    await upload_environment_files(sb)
+    await run_setup_script(sb, "codex")
 
 
 class OpenCodeBackend:
@@ -1911,27 +1821,27 @@ class OpenCodeBackend:
 
     async def setup_sandbox(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         model: str,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
-        await setup_sandbox_opencode(sandbox, model, api_key)
+        await setup_sandbox_opencode(sb, model, api_key)
 
-    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
-        return await create_session(sandbox, title=f"trajectory-{trajectory_id}")
+    async def create_session(self, sb: SandboxBackend, trajectory_id: str) -> str | None:
+        return await create_session(sb, title=f"trajectory-{trajectory_id}")
 
     async def ensure_authenticated(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
-        await ensure_provider_connected(sandbox, api_key)
+        await ensure_provider_connected(sb, api_key)
 
     async def run_turn(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         model: str,
         prompt_text: str,
@@ -1941,7 +1851,7 @@ class OpenCodeBackend:
         on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentTurnOutcome | None:
         response = await send_message_blocking(
-            sandbox,
+            sb,
             session_id,
             prompt_text,
             timeout=timeout,
@@ -1951,7 +1861,7 @@ class OpenCodeBackend:
         if response is None:
             return None
         session_objects, session_ids, new_messages = await collect_turn_messages(
-            sandbox,
+            sb,
             session_id,
             seen_message_ids,
         )
@@ -1965,11 +1875,11 @@ class OpenCodeBackend:
 
     async def collect_crash_messages(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         seen_message_ids: set[str],
     ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
-        return await collect_turn_messages(sandbox, session_id, seen_message_ids)
+        return await collect_turn_messages(sb, session_id, seen_message_ids)
 
 
 class CodexBackend:
@@ -1983,20 +1893,20 @@ class CodexBackend:
 
     async def setup_sandbox(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         model: str,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
         self._api_key_file = "/tmp/upload/codex_api_key.txt" if api_key else None
-        await setup_sandbox_codex(sandbox, model, api_key, auth_json)
+        await setup_sandbox_codex(sb, model, api_key, auth_json)
 
-    async def create_session(self, sandbox: modal.Sandbox, trajectory_id: str) -> str | None:
+    async def create_session(self, sb: SandboxBackend, trajectory_id: str) -> str | None:
         return f"pending-{trajectory_id}"
 
     async def ensure_authenticated(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         api_key: str,
         auth_json: str | None = None,
     ) -> None:
@@ -2004,7 +1914,7 @@ class CodexBackend:
 
     async def run_turn(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         model: str,
         prompt_text: str,
@@ -2014,7 +1924,7 @@ class CodexBackend:
         on_stream_part: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentTurnOutcome | None:
         prompt_path = "/tmp/prompt.txt"
-        await sandbox_write_file(sandbox, prompt_path, prompt_text, ensure_dir=False)
+        await sb.write_file(prompt_path, prompt_text, ensure_dir=False)
         args = [
             "chat-stream",
             "--session-id",
@@ -2045,7 +1955,7 @@ class CodexBackend:
                 await on_stream_part(event_obj)
 
         response = await run_codex_client(
-            sandbox,
+            sb,
             args,
             timeout=timeout,
             stream_output=True,
@@ -2104,7 +2014,7 @@ class CodexBackend:
 
     async def collect_crash_messages(
         self,
-        sandbox: modal.Sandbox,
+        sb: SandboxBackend,
         session_id: str,
         seen_message_ids: set[str],
     ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
@@ -2126,7 +2036,7 @@ def get_agent_backend(agent: str) -> AgentBackend:
 
 def make_stream_part_callback(
     *,
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     trajectory_id: str,
     agent_trace: AgentTrace,
     tracker: SolveTracker,
@@ -2220,7 +2130,7 @@ def make_stream_part_callback(
             )
             last_part_timestamp_ms_ref[0] = event_timestamp_ms
             has_file_change = bool(stream_event.get("has_file_change"))
-            changed_files = await get_changed_files(sandbox)
+            changed_files = await get_changed_files(sb)
             detected_file_change = bool(changed_files)
             checkpoint: RepoCheckpoint | None = None
             should_checkpoint = has_file_change or detected_file_change
@@ -2231,7 +2141,7 @@ def make_stream_part_callback(
                         f"state on part {absolute_part}"
                     )
                 checkpoint = await create_part_checkpoint(
-                    sandbox=sandbox,
+                    sb=sb,
                     trajectory_id=trajectory_id,
                     part=absolute_part,
                     changed_files_hint=(changed_files or files),
@@ -2328,7 +2238,7 @@ def make_stream_part_callback(
 
 
 async def end_session(
-    sandbox: modal.Sandbox,
+    sb: SandboxBackend,
     agent_trace: AgentTrace,
     part_count: int,
     turn_count: int,
@@ -2340,7 +2250,7 @@ async def end_session(
         print("[end] nothing to save (0 parts), skipping S3 upload")
         return
 
-    final_commit = await get_git_commit(sandbox)
+    final_commit = await get_git_commit(sb)
     trace_s3_uri = artifact_uri(agent_trace.trajectory_id, "agent_trace.json")
     bundle_s3_uri: str | None = None
 
@@ -2354,21 +2264,19 @@ async def end_session(
 
     # Upload git bundle
     try:
-        exit_code, _, _ = await sandbox_run(
-            sandbox,
+        exit_code, _, _ = (await sb.run(
             "cd /workspace && git bundle create /tmp/repo.bundle --all",
             quiet=True,
-        )
-        _, size_out, _ = await sandbox_run(
-            sandbox,
+        )).unpack()
+        _, size_out, _ = (await sb.run(
             "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
             quiet=True,
-        )
+        )).unpack()
         bundle_size = int(size_out.strip() or "0")
         print(f"[bundle] size={bundle_size} bytes")
 
         if bundle_size > 0:
-            _, b64, _ = await sandbox_run(sandbox, "base64 /tmp/repo.bundle", quiet=True)
+            _, b64, _ = (await sb.run("base64 /tmp/repo.bundle", quiet=True)).unpack()
             data = base64.b64decode(b64.strip())
             bundle_s3_uri = upload_file(agent_trace.trajectory_id, "repo.bundle", data)
             print(f"[bundle] uploaded ({len(data)} bytes)")
@@ -2400,6 +2308,7 @@ async def _run_trajectory_impl(
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
+    sandbox_provider: str = "modal",
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
@@ -2462,7 +2371,7 @@ async def _run_trajectory_impl(
                 "CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON, or CODEX_API_KEY/OPENAI_API_KEY."
             )
 
-    sandbox: modal.Sandbox | None = None
+    sb: SandboxBackend | None = None
     agent_trace: AgentTrace | None = None
     turn_count = 0
     part_count = 0
@@ -2470,32 +2379,36 @@ async def _run_trajectory_impl(
     wait_for_evaluations_fn: Callable[[], Awaitable[None]] | None = None
 
     try:
-        sandbox = await modal.Sandbox.create.aio(
-            "bash",
-            "-c",
-            "sleep infinity",
-            image=sandbox_image,
-            timeout=timeout_seconds,
-            app=app,
-        )
+        if sandbox_provider == "modal":
+            sb = await ModalSandbox.create(
+                image=sandbox_image,
+                timeout=timeout_seconds,
+                app=app,
+            )
+        elif sandbox_provider == "e2b":
+            from sandbox.e2b import E2BSandbox
+
+            sb = await E2BSandbox.create(timeout=timeout_seconds)
+        else:
+            raise ValueError(f"Unknown sandbox provider: {sandbox_provider}")
         start_time = time.monotonic()
 
         # --- Setup ---
-        await backend.setup_sandbox(sandbox, resolved_model, agent_api_key, codex_auth_json)
+        await backend.setup_sandbox(sb, resolved_model, agent_api_key, codex_auth_json)
 
         resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
         if existing_trace is not None and isinstance(resume_commit, str) and resume_commit:
             await restore_workspace_from_bundle(
-                sandbox=sandbox,
+                sb=sb,
                 trajectory_id=trajectory_id,
                 commit=resume_commit,
             )
 
-        session_id = await backend.create_session(sandbox, trajectory_id)
+        session_id = await backend.create_session(sb, trajectory_id)
         if not session_id:
             raise RuntimeError(f"Failed to create session for agent={agent}")
 
-        await backend.ensure_authenticated(sandbox, agent_api_key, codex_auth_json)
+        await backend.ensure_authenticated(sb, agent_api_key, codex_auth_json)
 
         if existing_trace is not None:
             agent_trace = existing_trace
@@ -2559,7 +2472,7 @@ async def _run_trajectory_impl(
                     started_mono = time.monotonic()
                     try:
                         run_payload = await run_commit_evaluation(
-                            sandbox=sandbox,
+                            sb=sb,
                             commit=commit,
                         )
                         payload = run_payload.get("payload")
@@ -2726,7 +2639,7 @@ async def _run_trajectory_impl(
                 streamed_parts = 0
                 observed_parts = 0
                 part_limit_abort = False
-                git_commit = await get_git_commit(sandbox)
+                git_commit = await get_git_commit(sb)
                 turn_record: TurnRecord | None = None
 
                 turn_count += 1
@@ -2751,7 +2664,7 @@ async def _run_trajectory_impl(
                 stream_git_commit_ref: list[str | None] = [git_commit]
                 stream_last_part_ts_ref: list[int | None] = [None]
                 stream_part_cb = make_stream_part_callback(
-                    sandbox=sandbox,
+                    sb=sb,
                     trajectory_id=trajectory_id,
                     agent_trace=agent_trace,
                     tracker=tracker,
@@ -2768,7 +2681,7 @@ async def _run_trajectory_impl(
 
                 # Send message and BLOCK until agent finishes
                 turn_outcome = await backend.run_turn(
-                    sandbox=sandbox,
+                    sb=sb,
                     session_id=session_id,
                     model=resolved_model,
                     prompt_text=prompt_text,
@@ -2788,9 +2701,9 @@ async def _run_trajectory_impl(
                         "[progress] no response from agent "
                         f"(recovery {consecutive_turn_failures}/{TURN_RECOVERY_RETRIES})"
                     )
-                    await dump_sandbox_logs(sandbox, agent=agent)
+                    await dump_sandbox_logs(sb, agent=agent)
                     if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
-                        recovered_session_id = await backend.create_session(sandbox, trajectory_id)
+                        recovered_session_id = await backend.create_session(sb, trajectory_id)
                         if recovered_session_id:
                             session_id = recovered_session_id
                             agent_trace.session_id = recovered_session_id
@@ -2897,13 +2810,13 @@ async def _run_trajectory_impl(
 
         except Exception as loop_err:
             print(f"[error] crash during main loop: {loop_err}")
-            await dump_sandbox_logs(sandbox, agent=agent)
+            await dump_sandbox_logs(sb, agent=agent)
             end_reason = "agent_error"
             # Save whatever messages we have
             try:
                 _, _, crash_new_messages = (
                     await backend.collect_crash_messages(
-                        sandbox,
+                        sb,
                         session_id,
                         seen_message_ids,
                     )
@@ -2919,7 +2832,7 @@ async def _run_trajectory_impl(
                         timestamp=datetime.now(UTC).isoformat(),
                         agent_model=resolved_model,
                         prompt=prompt_text,
-                        git_commit=await get_git_commit(sandbox),
+                        git_commit=await get_git_commit(sb),
                         parts=[],
                     )
                     agent_trace.turns.append(crash_record)
@@ -2932,7 +2845,7 @@ async def _run_trajectory_impl(
         if wait_for_evaluations_fn is not None:
             await wait_for_evaluations_fn()
         await end_session(
-            sandbox,
+            sb,
             agent_trace,
             part_count,
             turn_count,
@@ -2942,12 +2855,12 @@ async def _run_trajectory_impl(
 
     except Exception as e:
         print(f"[error] {e}")
-        if sandbox is not None and agent_trace is not None:
+        if sb is not None and agent_trace is not None:
             try:
                 if wait_for_evaluations_fn is not None:
                     await wait_for_evaluations_fn()
                 await end_session(
-                    sandbox,
+                    sb,
                     agent_trace,
                     part_count,
                     turn_count,
@@ -2957,9 +2870,9 @@ async def _run_trajectory_impl(
                 print(f"[error] failed to finalize session after exception: {end_err}")
         return trajectory_id
     finally:
-        if sandbox is not None:
+        if sb is not None:
             try:
-                await sandbox.terminate.aio()
+                await sb.terminate()
             except Exception:
                 pass
 
@@ -2980,6 +2893,7 @@ async def run_trajectory(
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
+    sandbox_provider: str = "modal",
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -2990,6 +2904,7 @@ async def run_trajectory(
         trajectory_id=trajectory_id,
         codex_auth_json_b64=codex_auth_json_b64,
         resume=resume,
+        sandbox_provider=sandbox_provider,
     )
 
 
@@ -3009,6 +2924,7 @@ async def run_trajectory_non_preemptible(
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
+    sandbox_provider: str = "modal",
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -3019,6 +2935,7 @@ async def run_trajectory_non_preemptible(
         trajectory_id=trajectory_id,
         codex_auth_json_b64=codex_auth_json_b64,
         resume=resume,
+        sandbox_provider=sandbox_provider,
     )
 
 
@@ -3041,6 +2958,7 @@ async def main(
     trajectory_id: str | None = None,
     codex_auth_file: str = "~/.codex/auth.json",
     resume: bool = RESUME_FROM_S3,
+    sandbox_provider: str = "modal",
 ) -> None:
     normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
     codex_auth_json_b64: str | None = None
@@ -3061,6 +2979,7 @@ async def main(
             trajectory_id=trajectory_id,
             codex_auth_json_b64=codex_auth_json_b64,
             resume=resume,
+            sandbox_provider=sandbox_provider,
         )
         print(f"Completed trajectory: {result}")
     except Exception as e:
@@ -3068,3 +2987,44 @@ async def main(
         if not message:
             message = "remote run stopped or failed"
         print(f"[error] {message}")
+
+
+# ---------------------------------------------------------------------------
+# Direct execution entry point (for non-Modal sandbox providers)
+# ---------------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    import argparse as _ap
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    _parser = _ap.ArgumentParser(description="Run trajectory directly (non-Modal).")
+    _parser.add_argument("--agent", default=DEFAULT_AGENT)
+    _parser.add_argument("--model", default=None)
+    _parser.add_argument("--max-parts", type=int, default=1000)
+    _parser.add_argument("--sandbox-provider", default="modal")
+    _parser.add_argument("--trajectory-id", default=None)
+    _parser.add_argument(
+        "--message-timeout-seconds", type=int, default=MESSAGE_TIMEOUT_SECONDS
+    )
+    _parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
+    _args = _parser.parse_args()
+
+    _codex_auth_json_b64: str | None = None
+    if (_args.agent or DEFAULT_AGENT).strip().lower() == "codex" and _args.codex_auth_file:
+        _codex_auth_json_b64 = load_local_codex_auth_json_b64(_args.codex_auth_file.strip())
+
+    asyncio.run(
+        _run_trajectory_impl(
+            agent=_args.agent,
+            model=_args.model,
+            max_parts=_args.max_parts,
+            message_timeout_seconds=_args.message_timeout_seconds,
+            trajectory_id=_args.trajectory_id,
+            codex_auth_json_b64=_codex_auth_json_b64,
+            sandbox_provider=_args.sandbox_provider,
+        )
+    )
