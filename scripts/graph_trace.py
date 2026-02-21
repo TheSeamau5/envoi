@@ -21,7 +21,6 @@ from scripts.offline_replay import (
     now_iso,
     reconstruct_repo_at_part,
 )
-from task import TASK_SUITE_PATHS
 
 
 def parse_int(value: Any) -> int | None:
@@ -231,7 +230,7 @@ def annotate_elapsed_minutes(points: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def detect_suites(points: list[dict[str, Any]]) -> list[str]:
-    seen = {suite for suite in TASK_SUITE_PATHS}
+    seen: set[str] = set()
     for point in points:
         suites = point.get("suites")
         if not isinstance(suites, dict):

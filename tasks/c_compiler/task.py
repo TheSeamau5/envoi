@@ -1,59 +1,33 @@
-"""Task definition for the current environment."""
+"""C compiler task definition."""
 
 from __future__ import annotations
 
-TASK_ID = "c-compiler"
+from pathlib import Path
 
-TASK_SYSTEM_PROMPT = """Build a REAL C compiler in Rust from scratch.
-This is EXTREMELY IMPORTANT: no cheating, no wrappers, no shortcuts.
-Do NOT call or wrap cc/gcc/clang/tcc.
-Do NOT use saltwater or ANY existing C compiler implementation.
-Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
-Target Linux x86_64 (x86-64). Do NOT generate AArch64/ARM64 assembly.
+ENVIRONMENT = "c_compiler"
 
-Your submission must include:
-- Cargo.toml
-- build.sh (must produce ./cc binary when run)
-- src/ (your Rust source code)
+CONTINUE_PROMPT = "Continue working on the compiler. Run tests and pass ALL suites."
 
-Interface: ./cc input.c -o output
+SUITE_PATHS: tuple[str, ...] = ("basics", "wacct", "c_testsuite", "torture")
 
-You have access to a run_tests tool. Use it to test your compiler frequently.
-
-Available test paths:
-  - basics (runs all basics tests)
-  - basics/smoke, basics/variables, basics/control_flow, etc.
-  - wacct (all chapters) or wacct/chapter_1 through wacct/chapter_20
-  - c_testsuite (all shards) or c_testsuite/part_<n>
-  - torture (all shards) or torture/part_<n>
-
-Testing strategy:
-1. Run tests frequently after making changes
-2. When tests fail: read the error output carefully, fix the code, rerun
-3. After fixing, rerun previously passing suites to check for regressions
-4. Commit after each meaningful change
-
-Your goal is to pass ALL test suites. Work methodically.
-"""
-
-TASK_CONTINUE_PROMPT = "Continue working on the compiler. Run tests and pass ALL suites."
-
-TASK_REQUIRED_TEST_PATHS: tuple[str, ...] = (
+REQUIRED_TEST_PATHS: tuple[str, ...] = (
     "basics",
     *tuple(f"wacct/chapter_{i}" for i in range(1, 21)),
     *tuple(f"c_testsuite/part_{i}" for i in range(1, 6)),
     *tuple(f"torture/part_{i}" for i in range(1, 11)),
 )
 
-TASK_SUITE_PATHS: tuple[str, ...] = ("basics", "wacct", "c_testsuite", "torture")
-
-TASK_HEAVY_TEST_ROOTS: dict[str, str] = {
+HEAVY_TEST_ROOTS: dict[str, str] = {
     "wacct": "/opt/tests/wacct/tests",
     "c_testsuite": "/opt/tests/c-testsuite/tests/single-exec",
-    "torture": "/opt/tests/llvm-test-suite/SingleSource/Regression/C/gcc-c-torture/execute",
+    "torture": (
+        "/opt/tests/llvm-test-suite/SingleSource/Regression/C/"
+        "gcc-c-torture/execute"
+    ),
 }
 
-TASK_SANDBOX_SETUP_SH = """#!/bin/bash
+SETUP_SH = """\
+#!/bin/bash
 set -euo pipefail
 
 echo "=== Ensuring task fixtures under /opt/tests ==="
@@ -99,7 +73,21 @@ echo "[fixtures] all task fixtures ready"
 """
 
 
+def load_prompt(*, lang: str = "en") -> str:
+    """Load the system prompt for the given language."""
+    prompt_file = Path(__file__).parent / f"{lang}.md"
+    if not prompt_file.exists():
+        raise FileNotFoundError(
+            f"No prompt file for lang={lang!r} at {prompt_file}"
+        )
+    return prompt_file.read_text().strip()
+
+
 def build_followup_prompt(status_lines: list[str]) -> str:
     if not status_lines:
-        return TASK_CONTINUE_PROMPT
-    return TASK_CONTINUE_PROMPT + "\n\nCurrent test status:\n" + "\n".join(status_lines)
+        return CONTINUE_PROMPT
+    return (
+        CONTINUE_PROMPT
+        + "\n\nCurrent test status:\n"
+        + "\n".join(status_lines)
+    )

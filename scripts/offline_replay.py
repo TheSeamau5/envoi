@@ -30,10 +30,12 @@ import boto3
 import envoi
 import httpx
 
-from task import TASK_HEAVY_TEST_ROOTS, TASK_REQUIRED_TEST_PATHS, TASK_SUITE_PATHS
+from tasks.resolver import resolve_task
 
-REQUIRED_PATHS: list[str] = list(TASK_REQUIRED_TEST_PATHS)
-SUITE_PATHS: list[str] = list(TASK_SUITE_PATHS)
+_DEFAULT_TASK = os.environ.get("ENVOI_TASK", "c_compiler")
+_env = resolve_task(_DEFAULT_TASK)
+REQUIRED_PATHS: list[str] = list(_env.required_test_paths)
+SUITE_PATHS: list[str] = list(_env.suite_paths)
 DEFAULT_TASK_FIXTURES_ROOT = Path("/opt/tests")
 
 
@@ -186,7 +188,7 @@ def default_fixtures_root() -> Path:
 
 def resolve_fixture_roots(fixtures_root: Path) -> dict[str, Path]:
     roots: dict[str, Path] = {}
-    for suite, configured in TASK_HEAVY_TEST_ROOTS.items():
+    for suite, configured in _env.heavy_test_roots.items():
         configured_path = Path(configured)
         if configured_path.is_absolute():
             try:

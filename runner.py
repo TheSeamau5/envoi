@@ -34,13 +34,7 @@ from pydantic import BaseModel, Field
 from agents.opencode import OPENCODE_CONFIG_TEMPLATE
 from sandbox.base import SandboxBackend
 from sandbox.modal import ModalSandbox
-from task import (
-    TASK_REQUIRED_TEST_PATHS,
-    TASK_SANDBOX_SETUP_SH,
-    TASK_SUITE_PATHS,
-    TASK_SYSTEM_PROMPT,
-    build_followup_prompt,
-)
+from tasks.resolver import EnvConfig, resolve_task
 
 app = modal.App("envoi-trace")
 
@@ -99,20 +93,33 @@ MCP_SERVER = (Path(__file__).parent / "sandbox" / "modal" / "mcp_server.py").rea
 OPENCODE_CLIENT = (Path(__file__).parent / "agents" / "opencode.py").read_text()
 CODEX_CLIENT = (Path(__file__).parent / "agents" / "codex.py").read_text()
 OPENCODE_CONFIG = OPENCODE_CONFIG_TEMPLATE
-ENVIRONMENT_DIR = Path(__file__).parent / "environment"
 
-ENVIRONMENT_PY_FILES = {
-    str(py_file.relative_to(ENVIRONMENT_DIR)): py_file.read_text()
-    for py_file in ENVIRONMENT_DIR.rglob("*.py")
-}
-ENVIRONMENT_C_FILES = {
-    str(c_file.relative_to(ENVIRONMENT_DIR)): c_file.read_text()
-    for c_file in ENVIRONMENT_DIR.rglob("*.c")
-}
-ENVIRONMENT_TXT_FILES = {
-    str(txt_file.relative_to(ENVIRONMENT_DIR)): txt_file.read_text()
-    for txt_file in ENVIRONMENT_DIR.rglob("*.txt")
-}
+_DEFAULT_TASK = os.environ.get("ENVOI_TASK", "c_compiler")
+
+
+def load_environment_files(
+    env_dir: Path,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Load py/c/txt files from an environment directory."""
+    py_files = {
+        str(p.relative_to(env_dir)): p.read_text()
+        for p in env_dir.rglob("*.py")
+    }
+    c_files = {
+        str(p.relative_to(env_dir)): p.read_text()
+        for p in env_dir.rglob("*.c")
+    }
+    txt_files = {
+        str(p.relative_to(env_dir)): p.read_text()
+        for p in env_dir.rglob("*.txt")
+    }
+    return py_files, c_files, txt_files
+
+
+_default_env = resolve_task(_DEFAULT_TASK)
+_ENV_PY, _ENV_C, _ENV_TXT = load_environment_files(
+    _default_env.environment_dir,
+)
 
 WORKSPACE_GITIGNORE = """\
 target/
@@ -449,6 +456,10 @@ class AgentBackend(Protocol):
         model: str,
         api_key: str,
         auth_json: str | None = None,
+        env_config: EnvConfig | None = None,
+        env_files: tuple[
+            dict[str, str], dict[str, str], dict[str, str]
+        ] | None = None,
     ) -> None:
         ...
 
@@ -793,10 +804,13 @@ def load_agent_trace_snapshot(trajectory_id: str) -> AgentTrace | None:
 function_image = (
     modal.Image.debian_slim()
     .pip_install("boto3", "pydantic")
-    .add_local_file(Path(__file__).parent / "task.py", remote_path="/root/task.py")
+    .add_local_dir(Path(__file__).parent / "tasks", remote_path="/root/tasks")
     .add_local_dir(Path(__file__).parent / "agents", remote_path="/root/agents")
     .add_local_dir(Path(__file__).parent / "sandbox", remote_path="/root/sandbox")
-    .add_local_dir(Path(__file__).parent / "environment", remote_path="/root/environment")
+    .add_local_dir(
+        Path(__file__).parent / "environments",
+        remote_path="/root/environments",
+    )
 )
 
 sandbox_image = (
@@ -856,13 +870,20 @@ async def dump_sandbox_logs(
             pass
 
 
-def environment_upload_items() -> list[tuple[str, str]]:
+def environment_upload_items(
+    py_files: dict[str, str] | None = None,
+    c_files: dict[str, str] | None = None,
+    txt_files: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    env_py = py_files if py_files is not None else _ENV_PY
+    env_c = c_files if c_files is not None else _ENV_C
+    env_txt = txt_files if txt_files is not None else _ENV_TXT
     items: list[tuple[str, str]] = []
-    for rel, content in ENVIRONMENT_PY_FILES.items():
+    for rel, content in env_py.items():
         items.append((f"/environment/{rel}", content))
-    for rel, content in ENVIRONMENT_C_FILES.items():
+    for rel, content in env_c.items():
         items.append((f"/environment/{rel}", content))
-    for rel, content in ENVIRONMENT_TXT_FILES.items():
+    for rel, content in env_txt.items():
         items.append((f"/environment/{rel}", content))
     return items
 
@@ -1472,8 +1493,44 @@ async def create_part_checkpoint(
     )
 
 
-def build_commit_evaluation_command(*, commit: str, eval_repo_dir: str) -> str:
-    suite_paths_json = json.dumps(list(TASK_SUITE_PATHS))
+def _extract_leaf_paths(schema: Any) -> list[str]:
+    """Walk an envoi /schema tree and collect all leaf test paths."""
+    leaves: list[str] = []
+
+    def _walk(node: Any, prefix: str) -> None:
+        if isinstance(node, dict):
+            children = node.get("children") or node.get("suites")
+            if isinstance(children, dict):
+                for key, child in children.items():
+                    _walk(child, f"{prefix}/{key}" if prefix else key)
+                return
+        # Leaf node
+        if prefix:
+            leaves.append(prefix)
+
+    _walk(schema, "")
+    return sorted(leaves) if leaves else []
+
+
+def _extract_suite_roots(schema: Any) -> list[str]:
+    """Extract top-level suite names from an envoi /schema tree."""
+    if isinstance(schema, dict):
+        children = schema.get("children") or schema.get("suites")
+        if isinstance(children, dict):
+            return sorted(children.keys())
+    return []
+
+
+def build_commit_evaluation_command(
+    *,
+    commit: str,
+    eval_repo_dir: str,
+    suite_paths: list[str] | None = None,
+) -> str:
+    suite_paths_json = json.dumps(
+        suite_paths if suite_paths is not None
+        else list(_default_env.suite_paths)
+    )
     repo_dir_json = json.dumps(eval_repo_dir)
     envoi_url_json = json.dumps(EVALUATION_ENVOI_URL)
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
@@ -1577,9 +1634,13 @@ async def run_commit_evaluation(
     *,
     sb: SandboxBackend,
     commit: str,
+    suite_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     eval_repo_dir = f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
-    command = build_commit_evaluation_command(commit=commit, eval_repo_dir=eval_repo_dir)
+    command = build_commit_evaluation_command(
+        commit=commit, eval_repo_dir=eval_repo_dir,
+        suite_paths=suite_paths,
+    )
     exit_code, stdout, stderr = (await sb.run(
         command,
         timeout=EVALUATION_TIMEOUT_SECONDS,
@@ -1625,16 +1686,24 @@ async def ensure_provider_connected(sb: SandboxBackend, api_key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def upload_environment_files(sb: SandboxBackend) -> None:
+async def upload_environment_files(
+    sb: SandboxBackend,
+    py_files: dict[str, str] | None = None,
+    c_files: dict[str, str] | None = None,
+    txt_files: dict[str, str] | None = None,
+) -> None:
+    env_py = py_files if py_files is not None else _ENV_PY
+    env_c = c_files if c_files is not None else _ENV_C
+    env_txt = txt_files if txt_files is not None else _ENV_TXT
     await upload_files_parallel(
         sb,
-        environment_upload_items(),
+        environment_upload_items(env_py, env_c, env_txt),
         log_upload=True,
     )
 
     print(
-        f"[setup] uploaded {len(ENVIRONMENT_PY_FILES)} py, "
-        f"{len(ENVIRONMENT_C_FILES)} c, {len(ENVIRONMENT_TXT_FILES)} txt files"
+        f"[setup] uploaded {len(env_py)} py, "
+        f"{len(env_c)} c, {len(env_txt)} txt files"
     )
 
 
@@ -1772,14 +1841,22 @@ async def restore_workspace_from_bundle(
     return True
 
 
-async def setup_sandbox_opencode(sb: SandboxBackend, model: str, api_key: str) -> None:
+async def setup_sandbox_opencode(
+    sb: SandboxBackend,
+    model: str,
+    api_key: str,
+    setup_script: str = "",
+    env_files: tuple[
+        dict[str, str], dict[str, str], dict[str, str]
+    ] | None = None,
+) -> None:
     print(f"[setup] agent=opencode model={model}")
     config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
     await upload_files_parallel(
         sb,
         [
             ("/tmp/upload/setup.sh", SETUP_SH),
-            ("/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH),
+            ("/tmp/upload/task_setup.sh", setup_script),
             ("/sandbox/mcp_server.py", MCP_SERVER),
             ("/sandbox/opencode_client.py", OPENCODE_CLIENT),
             ("/tmp/upload/opencode_api_key.txt", api_key),
@@ -1788,7 +1865,8 @@ async def setup_sandbox_opencode(sb: SandboxBackend, model: str, api_key: str) -
         ],
         log_upload=True,
     )
-    await upload_environment_files(sb)
+    py, c, txt = env_files if env_files else (_ENV_PY, _ENV_C, _ENV_TXT)
+    await upload_environment_files(sb, py, c, txt)
     await run_setup_script(sb, "opencode")
 
 
@@ -1797,12 +1875,16 @@ async def setup_sandbox_codex(
     model: str,
     api_key: str,
     auth_json: str | None = None,
+    setup_script: str = "",
+    env_files: tuple[
+        dict[str, str], dict[str, str], dict[str, str]
+    ] | None = None,
 ) -> None:
     print(f"[setup] agent=codex model={model}")
     codex_config = CODEX_CONFIG_TOML.replace("MODEL_PLACEHOLDER", model)
     setup_uploads: list[tuple[str, str]] = [
         ("/tmp/upload/setup.sh", SETUP_SH),
-        ("/tmp/upload/task_setup.sh", TASK_SANDBOX_SETUP_SH),
+        ("/tmp/upload/task_setup.sh", setup_script),
         ("/sandbox/mcp_server.py", MCP_SERVER),
         ("/sandbox/codex_client.py", CODEX_CLIENT),
         (f"{CODEX_HOME_DIR}/config.toml", codex_config),
@@ -1818,7 +1900,8 @@ async def setup_sandbox_codex(
         setup_uploads,
         log_upload=True,
     )
-    await upload_environment_files(sb)
+    py, c, txt = env_files if env_files else (_ENV_PY, _ENV_C, _ENV_TXT)
+    await upload_environment_files(sb, py, c, txt)
     await run_setup_script(sb, "codex")
 
 
@@ -1834,8 +1917,16 @@ class OpenCodeBackend:
         model: str,
         api_key: str,
         auth_json: str | None = None,
+        env_config: EnvConfig | None = None,
+        env_files: tuple[
+            dict[str, str], dict[str, str], dict[str, str]
+        ] | None = None,
     ) -> None:
-        await setup_sandbox_opencode(sb, model, api_key)
+        script = env_config.setup_script if env_config else ""
+        await setup_sandbox_opencode(
+            sb, model, api_key,
+            setup_script=script, env_files=env_files,
+        )
 
     async def create_session(self, sb: SandboxBackend, trajectory_id: str) -> str | None:
         return await create_session(sb, title=f"trajectory-{trajectory_id}")
@@ -1906,9 +1997,19 @@ class CodexBackend:
         model: str,
         api_key: str,
         auth_json: str | None = None,
+        env_config: EnvConfig | None = None,
+        env_files: tuple[
+            dict[str, str], dict[str, str], dict[str, str]
+        ] | None = None,
     ) -> None:
-        self._api_key_file = "/tmp/upload/codex_api_key.txt" if api_key else None
-        await setup_sandbox_codex(sb, model, api_key, auth_json)
+        self._api_key_file = (
+            "/tmp/upload/codex_api_key.txt" if api_key else None
+        )
+        script = env_config.setup_script if env_config else ""
+        await setup_sandbox_codex(
+            sb, model, api_key, auth_json,
+            setup_script=script, env_files=env_files,
+        )
 
     async def create_session(self, sb: SandboxBackend, trajectory_id: str) -> str | None:
         return f"pending-{trajectory_id}"
@@ -2319,10 +2420,18 @@ async def _run_trajectory_impl(
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
     sandbox_provider: str = "modal",
+    task: str = _DEFAULT_TASK,
+    task_lang: str = "en",
+    task_params: dict[str, str] | None = None,
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
     agent = (agent or DEFAULT_AGENT).strip().lower()
+
+    env_config = resolve_task(
+        task, lang=task_lang, params_overrides=task_params,
+    )
+    env_files = load_environment_files(env_config.environment_dir)
 
     effective_max_parts = max_parts
     backend = get_agent_backend(agent)
@@ -2404,7 +2513,10 @@ async def _run_trajectory_impl(
         start_time = time.monotonic()
 
         # --- Setup ---
-        await backend.setup_sandbox(sb, resolved_model, agent_api_key, codex_auth_json)
+        await backend.setup_sandbox(
+            sb, resolved_model, agent_api_key, codex_auth_json,
+            env_config=env_config, env_files=env_files,
+        )
 
         resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
         if existing_trace is not None and isinstance(resume_commit, str) and resume_commit:
@@ -2484,6 +2596,7 @@ async def _run_trajectory_impl(
                         run_payload = await run_commit_evaluation(
                             sb=sb,
                             commit=commit,
+                            suite_paths=env_config.suite_paths or None,
                         )
                         payload = run_payload.get("payload")
                         exit_code_value = run_payload.get("exit_code")
@@ -2602,15 +2715,45 @@ async def _run_trajectory_impl(
 
         wait_for_evaluations_fn = _wait_for_evaluations
 
+        # --- Discover test paths from envoi /schema ---
+        schema_result = await sb.run(
+            "curl -sf http://localhost:8000/schema",
+            quiet=True, timeout=30,
+        )
+        if schema_result.exit_code == 0 and schema_result.stdout.strip():
+            try:
+                schema = json.loads(schema_result.stdout)
+                env_config.required_test_paths = (
+                    _extract_leaf_paths(schema)
+                )
+                env_config.suite_paths = _extract_suite_roots(schema)
+                print(
+                    f"[schema] discovered "
+                    f"{len(env_config.required_test_paths)} test paths, "
+                    f"{len(env_config.suite_paths)} suites"
+                )
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"[schema] parse error: {e}")
+        else:
+            print("[schema] /schema not available, using env_config defaults")
+
         # --- Main loop: blocking message calls with part budget ---
-        tracker = SolveTracker(list(TASK_REQUIRED_TEST_PATHS))
+        tracker = SolveTracker(list(env_config.required_test_paths))
         for part_record in agent_trace.parts:
             tracker.update(list(part_record.envoi_calls))
         seen_message_ids: set[str] = set()
+        def _followup() -> str:
+            status = build_unsolved_status_lines(tracker)
+            if not status:
+                return env_config.continue_prompt
+            return (
+                env_config.continue_prompt
+                + "\n\nCurrent test status:\n"
+                + "\n".join(status)
+            )
+
         prompt_text = (
-            TASK_SYSTEM_PROMPT
-            if part_count == 0
-            else build_followup_prompt(build_unsolved_status_lines(tracker))
+            env_config.prompt if part_count == 0 else _followup()
         )
         consecutive_turn_failures = 0
 
@@ -2718,9 +2861,7 @@ async def _run_trajectory_impl(
                             session_id = recovered_session_id
                             agent_trace.session_id = recovered_session_id
                             save_agent_trace_snapshot(trajectory_id, agent_trace)
-                            prompt_text = build_followup_prompt(
-                                build_unsolved_status_lines(tracker)
-                            )
+                            prompt_text = _followup()
                             continue
                     end_reason = "agent_error"
                     break
@@ -2813,7 +2954,7 @@ async def _run_trajectory_impl(
                     break
 
                 # Build re-injection prompt for next turn
-                prompt_text = build_followup_prompt(build_unsolved_status_lines(tracker))
+                prompt_text = _followup()
 
             if end_reason is None:
                 end_reason = "part_limit"
@@ -2904,6 +3045,7 @@ async def run_trajectory(
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
     sandbox_provider: str = "modal",
+    task: str = _DEFAULT_TASK,
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -2915,6 +3057,7 @@ async def run_trajectory(
         codex_auth_json_b64=codex_auth_json_b64,
         resume=resume,
         sandbox_provider=sandbox_provider,
+        task=task,
     )
 
 
@@ -2935,6 +3078,7 @@ async def run_trajectory_non_preemptible(
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
     sandbox_provider: str = "modal",
+    task: str = _DEFAULT_TASK,
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -2946,6 +3090,7 @@ async def run_trajectory_non_preemptible(
         codex_auth_json_b64=codex_auth_json_b64,
         resume=resume,
         sandbox_provider=sandbox_provider,
+        task=task,
     )
 
 
@@ -2969,6 +3114,7 @@ async def main(
     codex_auth_file: str = "~/.codex/auth.json",
     resume: bool = RESUME_FROM_S3,
     sandbox_provider: str = "modal",
+    task: str = _DEFAULT_TASK,
 ) -> None:
     normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
     codex_auth_json_b64: str | None = None
@@ -2990,6 +3136,7 @@ async def main(
             codex_auth_json_b64=codex_auth_json_b64,
             resume=resume,
             sandbox_provider=sandbox_provider,
+            task=task,
         )
         print(f"Completed trajectory: {result}")
     except Exception as e:
@@ -3021,6 +3168,7 @@ if __name__ == "__main__":
         "--message-timeout-seconds", type=int, default=MESSAGE_TIMEOUT_SECONDS
     )
     _parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
+    _parser.add_argument("--task", default=_DEFAULT_TASK)
     _args = _parser.parse_args()
 
     _codex_auth_json_b64: str | None = None
@@ -3036,5 +3184,6 @@ if __name__ == "__main__":
             trajectory_id=_args.trajectory_id,
             codex_auth_json_b64=_codex_auth_json_b64,
             sandbox_provider=_args.sandbox_provider,
+            task=_args.task,
         )
     )

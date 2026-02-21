@@ -43,6 +43,8 @@ def _common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[st
         parts.extend(["--sandbox-provider", args.sandbox])
     if args.agent == "codex" and args.codex_auth_file:
         parts.extend(["--codex-auth-file", args.codex_auth_file])
+    if getattr(args, "task", None) and args.task != "c_compiler":
+        parts.extend(["--task", args.task])
     return parts
 
 
@@ -126,6 +128,11 @@ def main() -> None:
     )
     parser.add_argument("--trajectory-id", default=None)
     parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
+    parser.add_argument(
+        "--task",
+        default="c_compiler",
+        help="Task name to run (default: c_compiler).",
+    )
     parser.add_argument(
         "--auto-resume",
         dest="auto_resume",

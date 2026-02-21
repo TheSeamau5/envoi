@@ -36,8 +36,8 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agents", "sandbox", "scripts"]
-py-modules = ["task", "runner"]
+packages = ["agents", "sandbox", "scripts", "tasks", "tasks.c_compiler"]
+py-modules = ["runner"]
 
 [tool.ruff]
 line-length = 100
