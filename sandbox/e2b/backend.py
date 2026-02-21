@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import builtins
+import shlex
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -66,6 +68,8 @@ class E2BSandbox:
         stream_output: bool = False,
         on_stdout_line: Callable[[str], Awaitable[None]] | None = None,
         on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Execute a shell command inside the E2B sandbox.
 
@@ -78,7 +82,19 @@ class E2BSandbox:
         if not quiet:
             builtins.print(f"[run] {cmd[:200]}")
 
-        result = await self._inner.commands.run(cmd, timeout=timeout, user="root")
+        # Build shell prefix for cwd/env.
+        prefix = ""
+        if env:
+            exports = " ".join(
+                f"{k}={shlex.quote(v)}" for k, v in env.items()
+            )
+            prefix += f"export {exports} && "
+        if cwd:
+            prefix += f"cd {shlex.quote(cwd)} && "
+        full_cmd = prefix + cmd if prefix else cmd
+
+        t0 = time.monotonic()
+        result = await self._inner.commands.run(full_cmd, timeout=timeout, user="root")
         stdout = result.stdout or ""
         stderr = result.stderr or ""
         exit_code = result.exit_code if result.exit_code is not None else 0
@@ -94,13 +110,17 @@ class E2BSandbox:
         if stream_output and stderr:
             builtins.print(stderr, end="", flush=True)
 
+        duration_ms = int((time.monotonic() - t0) * 1000)
+
         if exit_code in {124, -1}:
             builtins.print(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
         if exit_code != 0:
             builtins.print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
             if stderr:
                 builtins.print(f"[run] stderr: {stderr[:500]}")
-        return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        return CommandResult(
+            exit_code=exit_code, stdout=stdout, stderr=stderr, duration_ms=duration_ms,
+        )
 
     async def write_file(
         self,

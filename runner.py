@@ -1219,6 +1219,7 @@ async def run_git_command_with_retry(
     *,
     attempts: int = GIT_RETRY_ATTEMPTS,
     timeout: int = 60,
+    cwd: str | None = None,
 ) -> tuple[int, str, str]:
     last: tuple[int, str, str] = (1, "", "")
     for attempt in range(1, max(1, attempts) + 1):
@@ -1226,6 +1227,7 @@ async def run_git_command_with_retry(
             cmd,
             timeout=timeout,
             quiet=True,
+            cwd=cwd,
         )).unpack()
         last = (exit_code, stdout, stderr)
         if exit_code == 0:
@@ -1254,7 +1256,8 @@ async def run_git_command_with_retry(
 async def get_git_commit(sb: SandboxBackend) -> str | None:
     _, stdout, _ = await run_git_command_with_retry(
         sb,
-        "cd /workspace && git rev-parse HEAD 2>/dev/null || echo none",
+        "git rev-parse HEAD 2>/dev/null || echo none",
+        cwd="/workspace",
     )
     commit = stdout.strip()
     return commit if commit and commit != "none" else None
@@ -1263,7 +1266,8 @@ async def get_git_commit(sb: SandboxBackend) -> str | None:
 async def get_changed_files(sb: SandboxBackend) -> list[str]:
     exit_code, stdout, stderr = await run_git_command_with_retry(
         sb,
-        "cd /workspace && git status --porcelain",
+        "git status --porcelain",
+        cwd="/workspace",
     )
     if exit_code != 0:
         print(
@@ -1314,22 +1318,25 @@ async def get_commit_patch_payload(
     numstat_rows: list[dict[str, Any]] = []
 
     patch_exit, patch_stdout, _ = (await sb.run(
-        f"cd /workspace && git show --format= --no-color --patch {quoted_commit}",
+        f"git show --format= --no-color --patch {quoted_commit}",
         quiet=True,
+        cwd="/workspace",
     )).unpack()
     if patch_exit == 0:
         patch_text = patch_stdout
 
     stats_exit, stats_stdout, _ = (await sb.run(
-        f"cd /workspace && git show --format= --no-color --stat {quoted_commit}",
+        f"git show --format= --no-color --stat {quoted_commit}",
         quiet=True,
+        cwd="/workspace",
     )).unpack()
     if stats_exit == 0:
         stats_text = stats_stdout
 
     numstat_exit, numstat_stdout, _ = (await sb.run(
-        f"cd /workspace && git show --format= --no-color --numstat {quoted_commit}",
+        f"git show --format= --no-color --numstat {quoted_commit}",
         quiet=True,
+        cwd="/workspace",
     )).unpack()
     if numstat_exit == 0:
         numstat_rows = parse_numstat_output(numstat_stdout)
@@ -1348,8 +1355,9 @@ async def upload_repo_bundle_snapshot(
 
     exit_code, _, stderr = await run_git_command_with_retry(
         sb,
-        "cd /workspace && git bundle create /tmp/repo.bundle --all",
+        "git bundle create /tmp/repo.bundle --all",
         attempts=2,
+        cwd="/workspace",
     )
     if exit_code != 0:
         print(
@@ -1423,9 +1431,10 @@ async def create_part_checkpoint(
     commit_message = f"part {part} checkpoint"
     exit_code, _, stderr = await run_git_command_with_retry(
         sb,
-        "cd /workspace && git add -A && "
+        "git add -A && "
         f"git commit -m {shlex.quote(commit_message)}",
         attempts=GIT_RETRY_ATTEMPTS,
+        cwd="/workspace",
     )
     if exit_code != 0:
         print(f"[git] checkpoint commit failed on part {part}: {truncate_text(stderr, limit=400)}")
@@ -2265,8 +2274,9 @@ async def end_session(
     # Upload git bundle
     try:
         exit_code, _, _ = (await sb.run(
-            "cd /workspace && git bundle create /tmp/repo.bundle --all",
+            "git bundle create /tmp/repo.bundle --all",
             quiet=True,
+            cwd="/workspace",
         )).unpack()
         _, size_out, _ = (await sb.run(
             "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",

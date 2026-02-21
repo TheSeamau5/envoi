@@ -14,6 +14,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    duration_ms: int = 0
 
     def unpack(self) -> tuple[int, str, str]:
         """Return (exit_code, stdout, stderr) for backward-compatible destructuring."""
@@ -38,6 +39,8 @@ class SandboxBackend(Protocol):
         stream_output: bool = False,
         on_stdout_line: Callable[[str], Awaitable[None]] | None = None,
         on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Execute a shell command inside the sandbox."""
         ...

@@ -18,7 +18,9 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 MEANINGFUL_PART_TYPES: set[str] = {
     "reasoning",
@@ -30,6 +32,41 @@ MEANINGFUL_PART_TYPES: set[str] = {
 }
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
+
+
+class TraceEvent(BaseModel):
+    """A single part-completion event emitted over stderr for runner.py."""
+
+    event: Literal["part.completed"] = "part.completed"
+    role: Literal["assistant", "user"] = "assistant"
+    part_type: str | None = None
+    item_type: str | None = None
+    summary: str | None = None
+    content: str | None = None
+    has_file_change: bool = False
+    files: list[str] = Field(default_factory=list)
+    tool_name: str | None = None
+    tool_status: str | None = None
+    tool_input: Any = None
+    tool_output: Any = None
+    tool_error: Any = None
+    tool_exit_code: int | None = None
+    token_usage: dict[str, Any] | None = None
+    provider_part: dict[str, Any] | None = None
+    provider_item: dict[str, Any] | None = None
+    provider_event: dict[str, Any] | None = None
+    test_call: dict[str, Any] | None = None
+    timestamp_ms: int = 0
+
+
+class CodexTurnResult(BaseModel):
+    """Return value of run_codex_turn, serialized to stdout as JSON."""
+
+    ok: bool
+    status_code: int
+    body: dict[str, Any] | None = None
+    error: str | None = None
+    stderr: str = ""
 
 
 def _json_dumps(value: Any) -> str:
@@ -529,7 +566,7 @@ def trace_event_from_item(
     agent_message_deltas: dict[str, list[str]],
     reasoning_deltas: dict[str, list[str]],
     command_output_deltas: dict[str, list[str]],
-) -> dict[str, Any] | None:
+) -> TraceEvent | None:
     part = part_from_item(
         item,
         agent_message_deltas=agent_message_deltas,
@@ -587,28 +624,26 @@ def trace_event_from_item(
 
     test_call = extract_run_tests_call(item) if item_type == "mcp_tool_call" else None
 
-    return {
-        "event": "part.completed",
-        "role": "assistant",
-        "part_type": part_type,
-        "item_type": item_type,
-        "summary": summary,
-        "content": content,
-        "has_file_change": has_file_change,
-        "files": files,
-        "tool_name": tool_name,
-        "tool_status": tool_status,
-        "tool_input": tool_input,
-        "tool_output": tool_output,
-        "tool_error": tool_error,
-        "tool_exit_code": tool_exit_code,
-        "token_usage": event_token_usage(notification, item),
-        "provider_part": part,
-        "provider_item": item,
-        "provider_event": notification,
-        "test_call": test_call,
-        "timestamp_ms": int(time.time() * 1000),
-    }
+    return TraceEvent(
+        part_type=part_type,
+        item_type=item_type,
+        summary=summary,
+        content=content,
+        has_file_change=has_file_change,
+        files=files,
+        tool_name=tool_name,
+        tool_status=tool_status,
+        tool_input=tool_input,
+        tool_output=tool_output,
+        tool_error=tool_error,
+        tool_exit_code=tool_exit_code,
+        token_usage=event_token_usage(notification, item),
+        provider_part=part,
+        provider_item=item,
+        provider_event=notification,
+        test_call=test_call,
+        timestamp_ms=int(time.time() * 1000),
+    )
 
 
 def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread | None:
@@ -680,8 +715,12 @@ def start_progress_heartbeat(
     return thread
 
 
-def emit_trace_event(payload: dict[str, Any]) -> None:
-    print(f"{TRACE_EVENT_PREFIX}{_json_dumps(payload)}", file=sys.stderr, flush=True)
+def emit_trace_event(payload: TraceEvent) -> None:
+    print(
+        f"{TRACE_EVENT_PREFIX}{payload.model_dump_json()}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def summarize_notification(notification: dict[str, Any]) -> tuple[str, str | None] | None:
@@ -902,7 +941,7 @@ def run_codex_turn(
     model: str,
     api_key: str | None,
     max_parts: int = 0,
-) -> dict[str, Any]:
+) -> CodexTurnResult:
     log_progress(
         parts_seen=0,
         max_parts=max_parts,
@@ -1302,22 +1341,22 @@ def run_codex_turn(
         )
 
         stderr_text = client.close()
-        return {
-            "ok": ok,
-            "status_code": 200 if ok else 500,
-            "body": body,
-            "error": None if ok else error_text,
-            "stderr": stderr_text,
-        }
+        return CodexTurnResult(
+            ok=ok,
+            status_code=200 if ok else 500,
+            body=body,
+            error=None if ok else error_text,
+            stderr=stderr_text,
+        )
     except Exception as error:  # noqa: BLE001
         stderr_text = client.close()
-        return {
-            "ok": False,
-            "status_code": 500,
-            "body": None,
-            "error": str(error),
-            "stderr": stderr_text,
-        }
+        return CodexTurnResult(
+            ok=False,
+            status_code=500,
+            body=None,
+            error=str(error),
+            stderr=stderr_text,
+        )
     finally:
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=1)
@@ -1348,7 +1387,7 @@ def main() -> None:
             api_key=api_key or None,
             max_parts=max(0, args.max_parts),
         )
-        print(_json_dumps(result))
+        print(result.model_dump_json())
         return
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import builtins
+import shlex
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
 from typing import Any
@@ -51,11 +53,26 @@ class ModalSandbox:
         stream_output: bool = False,
         on_stdout_line: Callable[[str], Awaitable[None]] | None = None,
         on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Execute a command inside the Modal sandbox."""
         if not quiet:
             builtins.print(f"[run] {cmd[:200]}")
-        proc = await self._inner.exec.aio("bash", "-c", cmd, timeout=timeout)
+
+        # Build shell prefix for cwd/env.
+        prefix = ""
+        if env:
+            exports = " ".join(
+                f"{k}={shlex.quote(v)}" for k, v in env.items()
+            )
+            prefix += f"export {exports} && "
+        if cwd:
+            prefix += f"cd {shlex.quote(cwd)} && "
+        full_cmd = prefix + cmd if prefix else cmd
+
+        t0 = time.monotonic()
+        proc = await self._inner.exec.aio("bash", "-c", full_cmd, timeout=timeout)
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
 
@@ -94,6 +111,7 @@ class ModalSandbox:
         )
 
         await proc.wait.aio()
+        duration_ms = int((time.monotonic() - t0) * 1000)
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
         exit_code = proc.returncode or 0
@@ -103,7 +121,9 @@ class ModalSandbox:
             builtins.print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
             if stderr:
                 builtins.print(f"[run] stderr: {stderr[:500]}")
-        return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        return CommandResult(
+            exit_code=exit_code, stdout=stdout, stderr=stderr, duration_ms=duration_ms,
+        )
 
     async def write_file(
         self,
