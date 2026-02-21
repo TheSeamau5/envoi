@@ -62,6 +62,13 @@ EVALUATION_CONCURRENCY = max(1, int(os.environ.get("EVALUATION_CONCURRENCY", "1"
 EVALUATION_TIMEOUT_SECONDS = max(60, int(os.environ.get("EVALUATION_TIMEOUT_SECONDS", "7200")))
 EVALUATION_ENVOI_URL = os.environ.get("EVALUATION_ENVOI_URL", "http://localhost:8000").strip() or "http://localhost:8000"
 EVALUATION_JSON_MARKER = "__ENVOI_EVAL_JSON__"
+GIT_RETRY_ATTEMPTS = max(1, int(os.environ.get("GIT_RETRY_ATTEMPTS", "4")))
+GIT_RETRY_BACKOFF_SECONDS = float(os.environ.get("GIT_RETRY_BACKOFF_SECONDS", "0.5"))
+RESUME_FROM_S3 = os.environ.get("RESUME_FROM_S3", "1").strip().lower() not in {"0", "false", "no"}
+INCREMENTAL_BUNDLE_UPLOAD = (
+    os.environ.get("INCREMENTAL_BUNDLE_UPLOAD", "1").strip().lower() not in {"0", "false", "no"}
+)
+TURN_RECOVERY_RETRIES = max(0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3")))
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +752,38 @@ def artifact_uri(trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/{key}"
 
 
+def load_agent_trace_snapshot(trajectory_id: str) -> AgentTrace | None:
+    s3 = get_s3_client()
+    bucket = get_bucket()
+    key = f"trajectories/{trajectory_id}/agent_trace.json"
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+    except Exception as error:  # noqa: BLE001
+        code = str(getattr(error, "response", {}).get("Error", {}).get("Code", "")).strip()
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            return None
+        print(f"[resume] failed to load prior trace: {error}")
+        return None
+
+    raw_body = response.get("Body")
+    if raw_body is None:
+        return None
+    payload_raw = raw_body.read()
+    try:
+        payload_obj = json.loads(payload_raw.decode("utf-8"))
+    except Exception as error:  # noqa: BLE001
+        print(f"[resume] invalid JSON in prior trace: {error}")
+        return None
+
+    if not isinstance(payload_obj, dict):
+        return None
+    try:
+        return AgentTrace.model_validate(payload_obj)
+    except Exception as error:  # noqa: BLE001
+        print(f"[resume] failed to parse prior trace schema: {error}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Modal images
 # ---------------------------------------------------------------------------
@@ -1254,22 +1293,65 @@ async def collect_turn_messages(
     return session_objects, session_ids, new_messages
 
 
+async def run_git_command_with_retry(
+    sandbox: modal.Sandbox,
+    cmd: str,
+    *,
+    attempts: int = GIT_RETRY_ATTEMPTS,
+    timeout: int = 60,
+) -> tuple[int, str, str]:
+    last: tuple[int, str, str] = (1, "", "")
+    for attempt in range(1, max(1, attempts) + 1):
+        exit_code, stdout, stderr = await sandbox_run(
+            sandbox,
+            cmd,
+            timeout=timeout,
+            quiet=True,
+        )
+        last = (exit_code, stdout, stderr)
+        if exit_code == 0:
+            return last
+
+        stderr_text = (stderr or "").lower()
+        retryable = (
+            exit_code == 128
+            or "index.lock" in stderr_text
+            or "unable to create" in stderr_text
+            or "another git process" in stderr_text
+        )
+        if not retryable or attempt >= max(1, attempts):
+            return last
+
+        delay_seconds = GIT_RETRY_BACKOFF_SECONDS * attempt
+        print(
+            f"[git] transient failure exit={exit_code} attempt={attempt}/{attempts}; "
+            f"retrying in {delay_seconds:.1f}s"
+        )
+        await asyncio.sleep(delay_seconds)
+
+    return last
+
+
 async def get_git_commit(sandbox: modal.Sandbox) -> str | None:
-    _, stdout, _ = await sandbox_run(
+    _, stdout, _ = await run_git_command_with_retry(
         sandbox,
         "cd /workspace && git rev-parse HEAD 2>/dev/null || echo none",
-        quiet=True,
     )
     commit = stdout.strip()
     return commit if commit and commit != "none" else None
 
 
 async def get_changed_files(sandbox: modal.Sandbox) -> list[str]:
-    _, stdout, _ = await sandbox_run(
+    exit_code, stdout, stderr = await run_git_command_with_retry(
         sandbox,
         "cd /workspace && git status --porcelain",
-        quiet=True,
     )
+    if exit_code != 0:
+        print(
+            f"[git] unable to read working tree state after retries: "
+            f"{truncate_text(stderr or '(no stderr)', limit=300)}"
+        )
+        return []
     files: list[str] = []
     for line in stdout.splitlines():
         if not line.strip():
@@ -1339,6 +1421,54 @@ async def get_commit_patch_payload(
     return patch_text, stats_text, numstat_rows
 
 
+async def upload_repo_bundle_snapshot(
+    *,
+    sandbox: modal.Sandbox,
+    trajectory_id: str,
+    reason: str,
+) -> str | None:
+    if not INCREMENTAL_BUNDLE_UPLOAD:
+        return None
+
+    exit_code, _, stderr = await run_git_command_with_retry(
+        sandbox,
+        "cd /workspace && git bundle create /tmp/repo.bundle --all",
+        attempts=2,
+    )
+    if exit_code != 0:
+        print(
+            "[bundle] snapshot create failed: "
+            f"{truncate_text(stderr or '(no stderr)', limit=240)}"
+        )
+        return None
+
+    _, size_out, _ = await sandbox_run(
+        sandbox,
+        "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
+        quiet=True,
+    )
+    bundle_size = int(size_out.strip() or "0")
+    if bundle_size <= 0:
+        return None
+
+    b64_exit, b64, b64_stderr = await sandbox_run(
+        sandbox,
+        "base64 /tmp/repo.bundle",
+        quiet=True,
+    )
+    if b64_exit != 0:
+        print(
+            "[bundle] snapshot encode failed: "
+            f"{truncate_text(b64_stderr or '(no stderr)', limit=240)}"
+        )
+        return None
+
+    data = base64.b64decode(b64.strip())
+    uri = upload_file(trajectory_id, "repo.bundle", data)
+    print(f"[bundle] snapshot uploaded ({len(data)} bytes) reason={reason}")
+    return uri
+
+
 async def create_part_checkpoint(
     sandbox: modal.Sandbox,
     trajectory_id: str,
@@ -1377,11 +1507,11 @@ async def create_part_checkpoint(
     changed_files = actual_changed_files
 
     commit_message = f"part {part} checkpoint"
-    exit_code, _, stderr = await sandbox_run(
+    exit_code, _, stderr = await run_git_command_with_retry(
         sandbox,
         "cd /workspace && git add -A && "
         f"git commit -m {shlex.quote(commit_message)}",
-        quiet=True,
+        attempts=GIT_RETRY_ATTEMPTS,
     )
     if exit_code != 0:
         print(f"[git] checkpoint commit failed on part {part}: {truncate_text(stderr, limit=400)}")
@@ -1400,6 +1530,11 @@ async def create_part_checkpoint(
         patch_text, stats_text, numstat_rows = await get_commit_patch_payload(
             sandbox,
             commit_after,
+        )
+        await upload_repo_bundle_snapshot(
+            sandbox=sandbox,
+            trajectory_id=trajectory_id,
+            reason=f"part {part}",
         )
 
     print(f"[git] committed part {part}: {commit_after} files={len(changed_files)}")
@@ -1605,6 +1740,117 @@ async def run_setup_script(sandbox: modal.Sandbox, agent: str) -> None:
         print(f"[setup] FAILED:\n{stdout}\n{stderr}")
         raise RuntimeError(f"Setup failed (exit {exit_code})")
     print("[setup] done")
+
+
+def get_trace_last_part(trace: AgentTrace) -> int:
+    return max((part.part or 0) for part in trace.parts) if trace.parts else 0
+
+
+def get_trace_last_turn(trace: AgentTrace) -> int:
+    if not trace.turns:
+        return 0
+    turn_values = [turn.turn for turn in trace.turns if isinstance(turn.turn, int)]
+    if turn_values:
+        return max(turn_values)
+    return len(trace.turns)
+
+
+def get_trace_latest_commit(trace: AgentTrace) -> str | None:
+    if trace.session_end and isinstance(trace.session_end.final_git_commit, str):
+        final_commit = trace.session_end.final_git_commit.strip()
+        if final_commit:
+            return final_commit
+
+    for part in reversed(trace.parts):
+        if isinstance(part.git_commit, str) and part.git_commit:
+            return part.git_commit
+        checkpoint = part.repo_checkpoint
+        if checkpoint is None:
+            continue
+        if isinstance(checkpoint.commit_after, str) and checkpoint.commit_after:
+            return checkpoint.commit_after
+        if isinstance(checkpoint.commit_before, str) and checkpoint.commit_before:
+            return checkpoint.commit_before
+    return None
+
+
+def build_unsolved_status_lines(tracker: SolveTracker) -> list[str]:
+    details: list[str] = []
+    for path in tracker.get_unsolved_paths()[:10]:
+        call = tracker.get_latest_call_for_path(path)
+        if call and call.result:
+            details.append(f"  - {path}: {call.result.passed}/{call.result.total}")
+        else:
+            details.append(f"  - {path}: not run")
+    return details
+
+
+async def restore_workspace_from_bundle(
+    *,
+    sandbox: modal.Sandbox,
+    trajectory_id: str,
+    commit: str,
+) -> bool:
+    s3 = get_s3_client()
+    bucket = get_bucket()
+    key = f"trajectories/{trajectory_id}/repo.bundle"
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+    except Exception as error:  # noqa: BLE001
+        code = str(getattr(error, "response", {}).get("Error", {}).get("Code", "")).strip()
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            print("[resume] repo.bundle not found; continuing without workspace restore")
+            return False
+        print(f"[resume] failed to read repo.bundle: {error}")
+        return False
+
+    body = response.get("Body")
+    if body is None:
+        print("[resume] repo.bundle body missing; continuing without workspace restore")
+        return False
+
+    bundle_bytes = body.read()
+    if not bundle_bytes:
+        print("[resume] repo.bundle empty; continuing without workspace restore")
+        return False
+
+    encoded = base64.b64encode(bundle_bytes).decode("ascii")
+    await sandbox_write_file(
+        sandbox,
+        "/tmp/resume.bundle.b64",
+        encoded,
+        ensure_dir=False,
+    )
+
+    quoted_commit = shlex.quote(commit)
+    restore_cmd = (
+        "set -euo pipefail\n"
+        "base64 -d /tmp/resume.bundle.b64 > /tmp/resume.bundle\n"
+        "rm -rf /tmp/resume_repo\n"
+        "git clone -q /tmp/resume.bundle /tmp/resume_repo\n"
+        "cd /tmp/resume_repo\n"
+        f"git checkout -q {quoted_commit}\n"
+        "rm -rf /workspace\n"
+        "mkdir -p /workspace\n"
+        "cp -a /tmp/resume_repo/. /workspace/\n"
+        "cd /workspace\n"
+        "git config user.email 'agent@example.com'\n"
+        "git config user.name 'Agent'\n"
+    )
+    exit_code, _, stderr = await sandbox_run(
+        sandbox,
+        restore_cmd,
+        timeout=300,
+        quiet=True,
+    )
+    if exit_code != 0:
+        stderr_summary = truncate_text(stderr or "(no stderr)", limit=600)
+        print(
+            f"[resume] workspace restore failed: {stderr_summary}"
+        )
+        return False
+    print(f"[resume] restored workspace from bundle at commit {commit}")
+    return True
 
 
 async def setup_sandbox_opencode(sandbox: modal.Sandbox, model: str, api_key: str) -> None:
@@ -2153,6 +2399,7 @@ async def _run_trajectory_impl(
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
+    resume: bool = RESUME_FROM_S3,
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
@@ -2161,6 +2408,13 @@ async def _run_trajectory_impl(
     effective_max_parts = max_parts
     backend = get_agent_backend(agent)
     resolved_model = backend.resolve_model(model)
+    existing_trace = load_agent_trace_snapshot(trajectory_id) if resume else None
+    if existing_trace is not None and existing_trace.agent != agent:
+        print(
+            f"[resume] existing trajectory agent={existing_trace.agent} differs from "
+            f"requested agent={agent}; starting new trace object"
+        )
+        existing_trace = None
     trace_s3_uri = artifact_uri(trajectory_id, "agent_trace.json")
     bundle_s3_uri = artifact_uri(trajectory_id, "repo.bundle")
     banner = "=" * 72
@@ -2172,6 +2426,11 @@ async def _run_trajectory_impl(
         f"agent={agent} model={resolved_model} max_parts={effective_max_parts} "
         f"timeout={timeout_seconds}s message_timeout={message_timeout_seconds}s"
     )
+    if existing_trace is not None:
+        print(
+            f"[resume] found existing trace: parts={len(existing_trace.parts)} "
+            f"turns={len(existing_trace.turns)}"
+        )
     print(banner)
 
     agent_api_key = ""
@@ -2224,24 +2483,47 @@ async def _run_trajectory_impl(
         # --- Setup ---
         await backend.setup_sandbox(sandbox, resolved_model, agent_api_key, codex_auth_json)
 
+        resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
+        if existing_trace is not None and isinstance(resume_commit, str) and resume_commit:
+            await restore_workspace_from_bundle(
+                sandbox=sandbox,
+                trajectory_id=trajectory_id,
+                commit=resume_commit,
+            )
+
         session_id = await backend.create_session(sandbox, trajectory_id)
         if not session_id:
             raise RuntimeError(f"Failed to create session for agent={agent}")
 
         await backend.ensure_authenticated(sandbox, agent_api_key, codex_auth_json)
 
-        agent_trace = AgentTrace(
-            trajectory_id=trajectory_id,
-            session_id=session_id,
-            agent=agent,
-            agent_model=resolved_model,
-            started_at=datetime.now(UTC).isoformat(),
-        )
+        if existing_trace is not None:
+            agent_trace = existing_trace
+            agent_trace.session_id = session_id
+            agent_trace.agent = agent
+            agent_trace.agent_model = resolved_model
+            agent_trace.session_end = None
+            part_count = get_trace_last_part(agent_trace)
+            turn_count = get_trace_last_turn(agent_trace)
+            print(f"[resume] continuing from part={part_count} turn={turn_count}")
+        else:
+            agent_trace = AgentTrace(
+                trajectory_id=trajectory_id,
+                session_id=session_id,
+                agent=agent,
+                agent_model=resolved_model,
+                started_at=datetime.now(UTC).isoformat(),
+            )
         save_agent_trace_snapshot(trajectory_id, agent_trace)
 
         evaluation_tasks: set[asyncio.Task[None]] = set()
-        evaluation_commits: set[str] = set()
+        evaluation_commits: set[str] = set(agent_trace.evaluations.keys())
         evaluation_semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
+        for evaluation in agent_trace.evaluations.values():
+            if evaluation.status in {"queued", "running"}:
+                evaluation.status = "failed"
+                evaluation.error = "Interrupted before evaluation completed"
+                evaluation.completed_at = datetime.now(UTC).isoformat()
 
         def schedule_commit_evaluation(commit: str, part: int) -> None:
             if commit in evaluation_commits:
@@ -2399,8 +2681,15 @@ async def _run_trajectory_impl(
 
         # --- Main loop: blocking message calls with part budget ---
         tracker = SolveTracker(list(TASK_REQUIRED_TEST_PATHS))
+        for part_record in agent_trace.parts:
+            tracker.update(list(part_record.envoi_calls))
         seen_message_ids: set[str] = set()
-        prompt_text = TASK_SYSTEM_PROMPT
+        prompt_text = (
+            TASK_SYSTEM_PROMPT
+            if part_count == 0
+            else build_followup_prompt(build_unsolved_status_lines(tracker))
+        )
+        consecutive_turn_failures = 0
 
         try:
             while part_count < effective_max_parts:
@@ -2494,10 +2783,25 @@ async def _run_trajectory_impl(
                 if turn_outcome is None:
                     if turn_record is not None and not turn_record.parts:
                         agent_trace.turns.pop()
-                    print("[progress] no response from agent")
+                    consecutive_turn_failures += 1
+                    print(
+                        "[progress] no response from agent "
+                        f"(recovery {consecutive_turn_failures}/{TURN_RECOVERY_RETRIES})"
+                    )
                     await dump_sandbox_logs(sandbox, agent=agent)
+                    if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
+                        recovered_session_id = await backend.create_session(sandbox, trajectory_id)
+                        if recovered_session_id:
+                            session_id = recovered_session_id
+                            agent_trace.session_id = recovered_session_id
+                            save_agent_trace_snapshot(trajectory_id, agent_trace)
+                            prompt_text = build_followup_prompt(
+                                build_unsolved_status_lines(tracker)
+                            )
+                            continue
                     end_reason = "agent_error"
                     break
+                consecutive_turn_failures = 0
 
                 response = turn_outcome.response
                 session_id = turn_outcome.session_id
@@ -2586,16 +2890,7 @@ async def _run_trajectory_impl(
                     break
 
                 # Build re-injection prompt for next turn
-                unsolved = tracker.get_unsolved_paths()
-                details: list[str] = []
-                for p in unsolved[:10]:
-                    call = tracker.get_latest_call_for_path(p)
-                    if call and call.result:
-                        details.append(f"  - {p}: {call.result.passed}/{call.result.total}")
-                    else:
-                        details.append(f"  - {p}: not run")
-
-                prompt_text = build_followup_prompt(details)
+                prompt_text = build_followup_prompt(build_unsolved_status_lines(tracker))
 
             if end_reason is None:
                 end_reason = "part_limit"
@@ -2684,6 +2979,7 @@ async def run_trajectory(
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
+    resume: bool = RESUME_FROM_S3,
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -2693,6 +2989,7 @@ async def run_trajectory(
         timeout_seconds=timeout_seconds,
         trajectory_id=trajectory_id,
         codex_auth_json_b64=codex_auth_json_b64,
+        resume=resume,
     )
 
 
@@ -2711,6 +3008,7 @@ async def run_trajectory_non_preemptible(
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
+    resume: bool = RESUME_FROM_S3,
 ) -> str:
     return await _run_trajectory_impl(
         agent=agent,
@@ -2720,6 +3018,7 @@ async def run_trajectory_non_preemptible(
         timeout_seconds=timeout_seconds,
         trajectory_id=trajectory_id,
         codex_auth_json_b64=codex_auth_json_b64,
+        resume=resume,
     )
 
 
@@ -2741,6 +3040,7 @@ async def main(
     non_preemptible: bool = True,
     trajectory_id: str | None = None,
     codex_auth_file: str = "~/.codex/auth.json",
+    resume: bool = RESUME_FROM_S3,
 ) -> None:
     normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
     codex_auth_json_b64: str | None = None
@@ -2760,6 +3060,7 @@ async def main(
             message_timeout_seconds=message_timeout_seconds,
             trajectory_id=trajectory_id,
             codex_auth_json_b64=codex_auth_json_b64,
+            resume=resume,
         )
         print(f"Completed trajectory: {result}")
     except Exception as e:
