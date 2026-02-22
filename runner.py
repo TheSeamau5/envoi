@@ -607,7 +607,7 @@ def build_followup_prompt(
     return continue_prompt + "\n\nCurrent test status:\n" + "\n".join(status)
 
 
-async def run_trajectory_impl(
+async def run_trajectory(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
@@ -1190,7 +1190,7 @@ if __name__ == "__main__":
         )
 
     asyncio.run(
-        run_trajectory_impl(
+        run_trajectory(
             agent=args.agent,
             model=args.model,
             max_parts=args.max_parts,

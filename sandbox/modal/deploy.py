@@ -55,7 +55,7 @@ from runner import (  # noqa: E402
     DEFAULT_AGENT,
     MESSAGE_TIMEOUT_SECONDS,
     RESUME_FROM_S3,
-    run_trajectory_impl,
+    run_trajectory,
 )
 from utils.helpers import tprint  # noqa: E402
 
@@ -67,7 +67,7 @@ print = tprint
     secrets=[modal.Secret.from_dotenv()],
     image=function_image,
 )
-async def run_trajectory(
+async def modal_run_trajectory(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
@@ -80,7 +80,7 @@ async def run_trajectory(
     task_dir: str = "",
     environment_dir: str = "",
 ) -> str:
-    return await run_trajectory_impl(
+    return await run_trajectory(
         agent=agent,
         model=model,
         max_parts=max_parts,
@@ -102,7 +102,7 @@ async def run_trajectory(
     nonpreemptible=True,
     name="run_trajectory_non_preemptible",
 )
-async def run_trajectory_non_preemptible(
+async def modal_run_trajectory_non_preemptible(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
@@ -115,7 +115,7 @@ async def run_trajectory_non_preemptible(
     task_dir: str = "",
     environment_dir: str = "",
 ) -> str:
-    return await run_trajectory_impl(
+    return await run_trajectory(
         agent=agent,
         model=model,
         max_parts=max_parts,
@@ -131,7 +131,7 @@ async def run_trajectory_non_preemptible(
 
 
 def get_non_preemptible_runner() -> Any:
-    return run_trajectory_non_preemptible
+    return modal_run_trajectory_non_preemptible
 
 
 @app.local_entrypoint()
@@ -173,7 +173,7 @@ async def main(
     runner = (
         get_non_preemptible_runner()
         if non_preemptible
-        else run_trajectory
+        else modal_run_trajectory
     )
     try:
         result = await runner.remote.aio(

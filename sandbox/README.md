@@ -4,7 +4,7 @@ Remote sandbox backends where agents run in isolation.
 
 ## How It Works
 
-The orchestrator needs a remote Linux environment to run agents in. The `SandboxBackend` protocol in `base.py` abstracts this — you can swap Modal for E2B (or anything else) without changing the orchestrator.
+The orchestrator needs a remote Linux environment to run agents in. The `Sandbox` protocol in `base.py` abstracts this — you can swap Modal for E2B (or anything else) without changing the orchestrator.
 
 A sandbox provides four operations:
 - **`run(cmd)`** — Execute a shell command (with timeout, streaming, env vars)
@@ -16,7 +16,7 @@ The orchestrator uses these to upload environment files, start agents, run git o
 
 ## Files
 
-### `base.py` — SandboxBackend Protocol + CommandResult
+### `base.py` — Sandbox Protocol + CommandResult
 
 The protocol interface. Also defines `CommandResult`, a frozen dataclass with `exit_code`, `stdout`, `stderr`, and `duration_ms`. Use `.unpack()` for tuple destructuring:
 
@@ -37,16 +37,16 @@ Modal sandboxes are ephemeral — they're created per trajectory run and torn do
 
 Runs at sandbox start. Installs the envoi package, starts the envoi server (`main.py`) on port 8000, and verifies it's healthy before returning.
 
-### `modal/mcp_server.py` — MCP Test Server
+### `mcp_server.py` — MCP Test Server
 
 An MCP server that exposes a `run_tests(test_path)` tool. When an agent calls this tool, it hits the envoi server at `localhost:8000/run/{test_path}` and returns structured test results.
 
 ### `e2b/backend.py` — E2B Implementation
 
-Alternative sandbox using E2B's Code Interpreter. Same `SandboxBackend` interface, different cloud provider. Use with `--sandbox e2b`.
+Alternative sandbox using E2B's Code Interpreter. Same `Sandbox` interface, different cloud provider. Use with `--sandbox e2b`.
 
 ## Adding a New Sandbox Provider
 
-1. Create `sandbox/my_provider/backend.py` implementing `SandboxBackend`
-2. Add it as a choice in `scripts/trace.py`'s `--sandbox` argument
-3. Add the lazy import in `runner.py`'s `_run_trajectory_impl`
+1. Create `sandbox/my_provider/backend.py` implementing `Sandbox`
+2. Add a lazy import in `create_sandbox()` in `sandbox/__init__.py`
+3. Add it as a choice in `scripts/trace.py`'s `--sandbox` argument
