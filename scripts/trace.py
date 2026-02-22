@@ -32,7 +32,7 @@ def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
 
 
-def _common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str]:
+def common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str]:
     """Build runner.py argument list shared by both modal and direct execution."""
     parts: list[str] = [
         "--agent",
@@ -62,7 +62,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
     if args.detach:
         command.append("--detach")
     command.append("runner.py")
-    command.extend(_common_runner_args(args, trajectory_id))
+    command.extend(common_runner_args(args, trajectory_id))
     if args.non_preemptible:
         command.append("--non-preemptible")
     return command
@@ -71,7 +71,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
 def build_direct_command(args: argparse.Namespace, trajectory_id: str) -> list[str]:
     """Build a direct python invocation for non-Modal sandbox providers."""
     command: list[str] = ["python3", "runner.py"]
-    command.extend(_common_runner_args(args, trajectory_id))
+    command.extend(common_runner_args(args, trajectory_id))
     return command
 
 
@@ -111,7 +111,7 @@ def load_trace_session_end(
     )
 
 
-def _add_run_args(parser: argparse.ArgumentParser) -> None:
+def add_run_args(parser: argparse.ArgumentParser) -> None:
     """Add run-mode arguments to a parser."""
     parser.set_defaults(non_preemptible=True)
     parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
@@ -168,7 +168,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _run(args: argparse.Namespace) -> None:
+def run_command(args: argparse.Namespace) -> None:
     """Execute a trajectory run."""
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
     bucket = os.environ.get("AWS_S3_BUCKET")
@@ -241,7 +241,7 @@ def _run(args: argparse.Namespace) -> None:
         time.sleep(max(0, args.restart_delay_seconds))
 
 
-def _graph(args: argparse.Namespace) -> None:
+def graph_command(args: argparse.Namespace) -> None:
     """Execute graph generation (delegates to graph_trace)."""
     import asyncio
     import sys
@@ -285,14 +285,14 @@ def main() -> None:
     graph_parser.add_argument("--checkout-dest", default=None)
 
     # Default (no subcommand) = run mode: add run args to the main parser
-    _add_run_args(parser)
+    add_run_args(parser)
 
     args = parser.parse_args()
 
     if args.command == "graph":
-        _graph(args)
+        graph_command(args)
     else:
-        _run(args)
+        run_command(args)
 
 
 if __name__ == "__main__":

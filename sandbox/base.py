@@ -1,4 +1,4 @@
-"""SandboxBackend Protocol — the interface every sandbox must implement.
+"""Sandbox Protocol — the interface every sandbox must implement.
 
 A sandbox is a remote Linux environment where agents run in isolation. The
 orchestrator uses run() to execute commands, write_file()/read_file() to
@@ -31,7 +31,7 @@ class CommandResult:
 
 
 @runtime_checkable
-class SandboxBackend(Protocol):
+class Sandbox(Protocol):
     """Abstraction over a remote sandbox environment."""
 
     @property

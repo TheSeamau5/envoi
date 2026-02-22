@@ -23,9 +23,9 @@ class SolveTracker:
         self.required_paths_set = set(required_paths)
         self.solved: set[str] = set()
         self.all_calls: list[EnvoiCall] = []
-        self._seen_call_keys: set[str] = set()
+        self.seen_call_keys: set[str] = set()
 
-    def _call_key(self, call: EnvoiCall) -> str:
+    def call_key(self, call: EnvoiCall) -> str:
         return (
             f"{call.path}|{call.timestamp}"
             f"|{call.status_code}|{call.duration_ms}"
@@ -33,10 +33,10 @@ class SolveTracker:
 
     def update(self, envoi_calls: list[EnvoiCall]) -> None:
         for call in envoi_calls:
-            key = self._call_key(call)
-            if key in self._seen_call_keys:
+            key = self.call_key(call)
+            if key in self.seen_call_keys:
                 continue
-            self._seen_call_keys.add(key)
+            self.seen_call_keys.add(key)
             self.all_calls.append(call)
             if (
                 call.result

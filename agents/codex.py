@@ -5,7 +5,7 @@ This module has two roles:
 1. As a script running inside the sandbox: starts `codex app-server` over stdio,
    sends JSON-RPC requests (create_session, send_message), and parses streamed
    item notifications into TRACE_EVENT lines on stderr.
-2. As the CodexAgent class implementing AgentBackend: uploads itself into the
+2. As the CodexAgent class implementing Agent: uploads itself into the
    sandbox, manages sessions, and translates turn results for runner.py.
 
 The TRACE_EVENT protocol is how parts flow from the agent to the orchestrator
@@ -75,7 +75,7 @@ class CodexTurnResult(BaseModel):
     stderr: str = ""
 
 
-def _json_dumps(value: Any) -> str:
+def json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -131,24 +131,24 @@ def item_type_key(value: Any) -> str:
     return canonical_token(value) if isinstance(value, str) else "unknown"
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
+def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _as_list(value: Any) -> list[Any]:
+def as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
 def mcp_output_payload(result: Any, error: Any) -> str:
     if isinstance(error, dict) and error:
-        return _json_dumps(error)
+        return json_dumps(error)
 
-    result_obj = _as_dict(result)
+    result_obj = as_dict(result)
 
     for key in ("structured_content", "structuredContent"):
         structured = result_obj.get(key)
         if isinstance(structured, (dict, list)):
-            return _json_dumps(structured)
+            return json_dumps(structured)
 
     content = result_obj.get("content")
     if isinstance(content, list) and content:
@@ -158,13 +158,13 @@ def mcp_output_payload(result: Any, error: Any) -> str:
             if isinstance(text, str) and text.strip():
                 return text
             if first:
-                return _json_dumps(first)
+                return json_dumps(first)
         if isinstance(first, str) and first.strip():
             return first
-        return _json_dumps(content)
+        return json_dumps(content)
 
     if result_obj:
-        return _json_dumps(result_obj)
+        return json_dumps(result_obj)
     return ""
 
 
@@ -195,7 +195,7 @@ def extract_run_tests_call(item: dict[str, Any]) -> dict[str, Any] | None:
     if str(tool_name or "") != "run_tests":
         return None
 
-    result_obj = _as_dict(item.get("result"))
+    result_obj = as_dict(item.get("result"))
     payload: Any = result_obj.get("structured_content")
     if payload is None:
         payload = result_obj.get("structuredContent")
@@ -316,17 +316,17 @@ def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
             base[key] = value
 
 
-def _collect_usage_candidates(value: Any, sink: list[dict[str, Any]]) -> None:
+def collect_usage_candidates(value: Any, sink: list[dict[str, Any]]) -> None:
     if isinstance(value, dict):
         for key, nested in value.items():
             lower_key = key.lower()
             if isinstance(nested, dict) and ("token" in lower_key or "usage" in lower_key):
                 sink.append(nested)
-            _collect_usage_candidates(nested, sink)
+            collect_usage_candidates(nested, sink)
         return
     if isinstance(value, list):
         for item in value:
-            _collect_usage_candidates(item, sink)
+            collect_usage_candidates(item, sink)
 
 
 def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -334,12 +334,12 @@ def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | 
     for event in events:
         if not isinstance(event, dict):
             continue
-        params = _as_dict(event.get("params"))
+        params = as_dict(event.get("params"))
         for key in ("usage", "token_usage", "tokenUsage", "tokens"):
             value = params.get(key)
             if isinstance(value, dict):
                 candidates.append(value)
-        _collect_usage_candidates(params, candidates)
+        collect_usage_candidates(params, candidates)
     if not candidates:
         return None
     merged: dict[str, Any] = {}
@@ -439,7 +439,7 @@ def reasoning_text_from_item(item: dict[str, Any], deltas: dict[str, list[str]])
     if fragments:
         return "\n".join(fragments)
 
-    fallback = _json_dumps(item)
+    fallback = json_dumps(item)
     return fallback if fallback else ""
 
 
@@ -538,7 +538,7 @@ def part_from_item(
         state = {
             "status": "completed",
             "input": {"query": item.get("query", "")},
-            "output": _json_dumps({"action": item.get("action")}),
+            "output": json_dumps({"action": item.get("action")}),
         }
         return {"type": "tool", "tool": "web_search", "state": state}
 
@@ -549,7 +549,7 @@ def part_from_item(
 
 
 def event_token_usage(notification: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
-    params = _as_dict(notification.get("params"))
+    params = as_dict(notification.get("params"))
     for source in (
         params.get("usage"),
         params.get("token_usage"),
@@ -612,7 +612,7 @@ def trace_event_from_item(
     elif part_type == "tool":
         tool_name_raw = part.get("tool")
         tool_name = str(tool_name_raw) if tool_name_raw is not None else None
-        state = _as_dict(part.get("state"))
+        state = as_dict(part.get("state"))
         status_raw = state.get("status")
         tool_status = str(status_raw) if status_raw is not None else None
         tool_input = state.get("input")
@@ -734,16 +734,16 @@ def summarize_notification(notification: dict[str, Any]) -> tuple[str, str | Non
     if not isinstance(method, str):
         return None
     key = method_key(method)
-    params = _as_dict(notification.get("params"))
+    params = as_dict(notification.get("params"))
 
     if key in {"thread/started", "turn/started", "turn/completed"}:
         if key == "thread/started":
-            thread_obj = _as_dict(params.get("thread"))
+            thread_obj = as_dict(params.get("thread"))
             thread_id = thread_obj.get("id")
             if isinstance(thread_id, str) and thread_id:
                 return (key, f"thread_id={thread_id}")
         if key == "turn/completed":
-            turn_obj = _as_dict(params.get("turn"))
+            turn_obj = as_dict(params.get("turn"))
             status = turn_obj.get("status")
             error_obj = turn_obj.get("error")
             if isinstance(error_obj, dict):
@@ -754,7 +754,7 @@ def summarize_notification(notification: dict[str, Any]) -> tuple[str, str | Non
         return (key, None)
 
     if key == "item/completed":
-        item = _as_dict(params.get("item"))
+        item = as_dict(params.get("item"))
         kind = item_type_key(item.get("type"))
         if kind == "command_execution":
             command = str(item.get("command") or "").strip()
@@ -827,14 +827,14 @@ class AppServerRPC:
             self._stderr_reader.join(timeout=1)
         return "".join(self._stderr_chunks)
 
-    def _send(self, payload: dict[str, Any]) -> None:
+    def send(self, payload: dict[str, Any]) -> None:
         stdin = self._proc.stdin
         if stdin is None:
             raise RuntimeError("app-server stdin is not available")
-        stdin.write(_json_dumps(payload) + "\n")
+        stdin.write(json_dumps(payload) + "\n")
         stdin.flush()
 
-    def _read_message(self) -> dict[str, Any]:
+    def read_message(self) -> dict[str, Any]:
         stdout = self._proc.stdout
         if stdout is None:
             raise RuntimeError("app-server stdout is not available")
@@ -853,18 +853,18 @@ class AppServerRPC:
             if isinstance(parsed, dict):
                 return parsed
 
-    def _response_id(self, message: dict[str, Any]) -> int | None:
+    def response_id(self, message: dict[str, Any]) -> int | None:
         return parse_int_maybe(message.get("id"))
 
-    def _cache_response(self, message: dict[str, Any]) -> None:
-        rid = self._response_id(message)
+    def cache_response(self, message: dict[str, Any]) -> None:
+        rid = self.response_id(message)
         if rid is None:
             return
         self._pending_responses[rid] = message
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"method": method, "params": params or {}}
-        self._send(payload)
+        self.send(payload)
 
     def request(
         self,
@@ -875,7 +875,7 @@ class AppServerRPC:
     ) -> dict[str, Any]:
         rid = self._next_id
         self._next_id += 1
-        self._send({"method": method, "id": rid, "params": params or {}})
+        self.send({"method": method, "id": rid, "params": params or {}})
 
         while True:
             cached = self._pending_responses.pop(rid, None)
@@ -885,24 +885,17 @@ class AppServerRPC:
                     message = error.get("message")
                     if isinstance(message, str) and message:
                         raise RuntimeError(f"{method}: {message}")
-                    raise RuntimeError(f"{method}: {_json_dumps(error)}")
+                    raise RuntimeError(f"{method}: {json_dumps(error)}")
                 result = cached.get("result")
-                return result if isinstance(result, dict) else _as_dict(result)
+                return result if isinstance(result, dict) else as_dict(result)
 
-            message = self._read_message()
-            response_id = self._response_id(message)
+            message = self.read_message()
+            response_id = self.response_id(message)
             if response_id is not None:
-                self._cache_response(message)
+                self.cache_response(message)
                 continue
             if on_notification is not None:
                 on_notification(message)
-
-    def read_message(self) -> dict[str, Any]:
-        return self._read_message()
-
-    def cache_response(self, message: dict[str, Any]) -> None:
-        self._cache_response(message)
-
 
 def build_codex_env(api_key: str | None) -> dict[str, str]:
     env = dict(os.environ)
@@ -1022,24 +1015,24 @@ def run_codex_turn(
         if not isinstance(method, str):
             return
         key = method_key(method)
-        params = _as_dict(notification.get("params"))
+        params = as_dict(notification.get("params"))
 
         if key == "thread/started":
-            thread_obj = _as_dict(params.get("thread"))
+            thread_obj = as_dict(params.get("thread"))
             thread_started_id = thread_obj.get("id")
             if isinstance(thread_started_id, str) and thread_started_id:
                 resolved_thread_id = thread_started_id
             return
 
         if key == "turn/started":
-            turn_obj = _as_dict(params.get("turn"))
+            turn_obj = as_dict(params.get("turn"))
             turn_started_id = turn_obj.get("id")
             if isinstance(turn_started_id, str) and turn_started_id:
                 turn_id = turn_started_id
             return
 
         if key == "turn/completed":
-            turn_obj = _as_dict(params.get("turn"))
+            turn_obj = as_dict(params.get("turn"))
             status = turn_obj.get("status")
             if isinstance(status, str) and status:
                 turn_status = status
@@ -1052,11 +1045,11 @@ def run_codex_turn(
             if isinstance(diff_value, str):
                 latest_turn_diff = diff_value
             elif isinstance(diff_value, dict):
-                latest_turn_diff = _json_dumps(diff_value)
+                latest_turn_diff = json_dumps(diff_value)
             return
 
         if key == "thread/token_usage/updated":
-            _collect_usage_candidates(params, [])
+            collect_usage_candidates(params, [])
             for usage_key in ("usage", "token_usage", "tokenUsage", "tokens"):
                 candidate = params.get(usage_key)
                 if isinstance(candidate, dict) and candidate:
@@ -1084,7 +1077,7 @@ def run_codex_turn(
         if key != "item/completed":
             return
 
-        item = _as_dict(params.get("item"))
+        item = as_dict(params.get("item"))
         if not item:
             return
 
@@ -1183,7 +1176,7 @@ def run_codex_turn(
                 params_candidates=[{"threadId": base_thread_id}],
                 on_notification=on_notification,
             )
-            thread_obj = _as_dict(resume_result.get("thread"))
+            thread_obj = as_dict(resume_result.get("thread"))
             thread_id_value = thread_obj.get("id")
             resolved_thread_id = (
                 thread_id_value if isinstance(thread_id_value, str) else None
@@ -1196,7 +1189,7 @@ def run_codex_turn(
                     params_candidates=[{"threadId": session_value}],
                     on_notification=on_notification,
                 )
-                thread_obj = _as_dict(resume_result.get("thread"))
+                thread_obj = as_dict(resume_result.get("thread"))
                 resolved_thread_id = (
                     thread_obj.get("id") if isinstance(thread_obj.get("id"), str) else session_value
                 )
@@ -1207,7 +1200,7 @@ def run_codex_turn(
                     params_candidates=[{"model": model}, {}],
                     on_notification=on_notification,
                 )
-                thread_obj = _as_dict(start_result.get("thread"))
+                thread_obj = as_dict(start_result.get("thread"))
                 thread_id_value = thread_obj.get("id")
                 resolved_thread_id = (
                     thread_id_value if isinstance(thread_id_value, str) else None
@@ -1219,7 +1212,7 @@ def run_codex_turn(
                 params_candidates=[{"model": model}, {}],
                 on_notification=on_notification,
             )
-            thread_obj = _as_dict(start_result.get("thread"))
+            thread_obj = as_dict(start_result.get("thread"))
             thread_id_value = thread_obj.get("id")
             resolved_thread_id = (
                 thread_id_value if isinstance(thread_id_value, str) else None
@@ -1262,7 +1255,7 @@ def run_codex_turn(
             params_candidates=turn_start_candidates,
             on_notification=on_notification,
         )
-        turn_obj = _as_dict(turn_start_result.get("turn"))
+        turn_obj = as_dict(turn_start_result.get("turn"))
         started_turn_id = turn_obj.get("id")
         if isinstance(started_turn_id, str) and started_turn_id:
             turn_id = started_turn_id
@@ -1402,29 +1395,96 @@ if __name__ == "__main__":
 
 
 # -------------------------------------------------------------------
-# CodexAgent: AgentBackend implementation (runner-side only)
+# CodexAgent: Agent implementation (runner-side only)
 # -------------------------------------------------------------------
 # The code below is only executed when imported by runner.py, never
 # when this file runs as a standalone sandbox script.
 
 try:
-    import builtins as _builtins
+    import builtins
 
-    from agents.base import AgentTurnOutcome as _AgentTurnOutcome
-    from sandbox.base import SandboxBackend as _SandboxBackend
-    from utils.helpers import run_sandbox_client as _run_sandbox_client
-    from utils.parsing import (
-        agent_message_id as _agent_message_id,
+    from agents.base import (
+        AgentCredentials,
+        AgentSetupContext,
+        AgentTurnOutcome,
+        SandboxImageRequirements,
     )
-    from utils.parsing import (
-        parse_trace_event_line as _parse_trace_event_line,
+    from agents.setup import run_task_setup, run_workspace_init
+    from sandbox.base import Sandbox
+    from utils.helpers import (
+        decode_b64_to_text,
+        load_local_codex_auth_json_b64,
+        parse_codex_auth_json,
+        run_sandbox_client,
+        upload_files_parallel,
     )
+    from utils.parsing import agent_message_id, parse_trace_event_line
 
-    _CODEX_SCRIPT = "/sandbox/codex_client.py"
-    _CODEX_LABEL = "codex-cli"
+    CODEX_SCRIPT = "/sandbox/codex_client.py"
+    CODEX_LABEL = "codex-cli"
+    CODEX_HOME_DIR = "/tmp/codex-home"
+    DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+
+    CODEX_CONFIG_TOML = """\
+model = "MODEL_PLACEHOLDER"
+model_reasoning_effort = "high"
+
+[mcp_servers.tests]
+command = "python3"
+args = ["/sandbox/mcp_server.py"]
+enabled = true
+required = false
+tool_timeout_sec = 3600
+"""
+
+    CODEX_INSTALL_SCRIPT = """\
+set -euo pipefail
+export PATH="$HOME/.cargo/bin:$PATH"
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64)
+        TARGET_TRIPLE="x86_64-unknown-linux-musl"
+        ;;
+    aarch64|arm64)
+        TARGET_TRIPLE="aarch64-unknown-linux-musl"
+        ;;
+    *)
+        echo "[setup] ERROR: unsupported architecture for Codex binary: $ARCH"
+        exit 1
+        ;;
+esac
+
+CODEX_TARBALL_URL="https://github.com/openai/codex/releases/latest/download/codex-${TARGET_TRIPLE}.tar.gz"
+tmpdir="$(mktemp -d)"
+echo "[setup] downloading Codex CLI (${TARGET_TRIPLE})"
+curl -fsSL "$CODEX_TARBALL_URL" -o "$tmpdir/codex.tar.gz"
+echo "[setup] extracting Codex CLI archive"
+tar -xzf "$tmpdir/codex.tar.gz" -C "$tmpdir"
+
+CODEX_EXTRACTED_BIN="$tmpdir/codex-${TARGET_TRIPLE}"
+if [ ! -f "$CODEX_EXTRACTED_BIN" ]; then
+    echo "[setup] ERROR: expected Codex binary not found at ${CODEX_EXTRACTED_BIN}"
+    ls -la "$tmpdir"
+    exit 1
+fi
+
+echo "[setup] installing Codex CLI to /usr/local/bin"
+install -m 0755 "$CODEX_EXTRACTED_BIN" /usr/local/bin/codex
+if CODEX_VERSION="$(codex --version 2>/dev/null)"; then
+    echo "[setup] codex version: ${CODEX_VERSION}"
+fi
+mkdir -p /tmp/codex-home
+echo "[setup] codex install complete"
+"""
+
+    class CodexCredentials(AgentCredentials):
+        """Codex-specific credentials with optional auth.json."""
+
+        auth_json: str | None = None
 
     class CodexAgent:
-        """AgentBackend implementation for Codex."""
+        """Agent implementation for Codex."""
 
         @property
         def name(self) -> str:
@@ -1432,20 +1492,96 @@ try:
 
         @property
         def session_id(self) -> str | None:
-            return self._session_id
+            return self.current_session_id
+
+        @property
+        def log_files(self) -> list[str]:
+            return ["/tmp/codex.log", "/tmp/envoi.log"]
 
         def __init__(self) -> None:
-            self._sb: _SandboxBackend | None = None
-            self._model: str = ""
-            self._api_key: str = ""
-            self._auth_json: str | None = None
-            self._api_key_file: str | None = None
-            self._session_id: str | None = None
-            self._seen_message_ids: set[str] = set()
+            self.sandbox: Sandbox | None = None
+            self.agent_model: str = ""
+            self.api_key: str = ""
+            self.auth_json: str | None = None
+            self.api_key_file: str | None = None
+            self.current_session_id: str | None = None
+            self.seen_message_ids: set[str] = set()
 
-        # -- helpers ------------------------------------------------
+        # -- static methods -----------------------------------------
 
-        async def _run_client(
+        @staticmethod
+        def resolve_credentials(
+            codex_auth_json_b64: str | None = None,
+        ) -> CodexCredentials:
+            """Resolve Codex credentials from env vars / b64 arg."""
+            codex_auth_json: str | None = None
+            env_b64 = os.environ.get(
+                "CODEX_AUTH_JSON_B64", "",
+            ).strip()
+            env_raw = os.environ.get(
+                "CODEX_AUTH_JSON", "",
+            ).strip()
+
+            if codex_auth_json_b64:
+                decoded = decode_b64_to_text(
+                    codex_auth_json_b64,
+                    label="codex_auth_json_b64 arg",
+                )
+                codex_auth_json = parse_codex_auth_json(
+                    decoded, label="codex_auth_json_b64 arg",
+                )
+            elif env_b64:
+                decoded = decode_b64_to_text(
+                    env_b64, label="CODEX_AUTH_JSON_B64",
+                )
+                codex_auth_json = parse_codex_auth_json(
+                    decoded, label="CODEX_AUTH_JSON_B64",
+                )
+            elif env_raw:
+                codex_auth_json = parse_codex_auth_json(
+                    env_raw, label="CODEX_AUTH_JSON",
+                )
+
+            api_key = (
+                os.environ.get("CODEX_API_KEY", "").strip()
+                or os.environ.get("OPENAI_API_KEY", "").strip()
+            )
+            if not codex_auth_json and not api_key:
+                raise RuntimeError(
+                    "No Codex credentials found. Provide one of: "
+                    "~/.codex/auth.json via --codex-auth-file, "
+                    "CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON, "
+                    "or CODEX_API_KEY/OPENAI_API_KEY."
+                )
+            return CodexCredentials(
+                api_key=api_key, auth_json=codex_auth_json,
+            )
+
+        @staticmethod
+        def resolve_model(model: str | None) -> str:
+            return model or DEFAULT_CODEX_MODEL
+
+        @staticmethod
+        def image_requirements() -> SandboxImageRequirements:
+            return SandboxImageRequirements()
+
+        @staticmethod
+        def load_local_auth_b64(path: str) -> str | None:
+            """Load a local auth.json and return as base64."""
+            return load_local_codex_auth_json_b64(path)
+
+        # -- instance methods ----------------------------------------
+
+        def compute_turn_timeout(
+            self,
+            *,
+            remaining_parts: int,
+            remaining_run_seconds: float,
+            message_timeout_seconds: int,
+        ) -> int:
+            return max(1, int(remaining_run_seconds))
+
+        async def run_client(
             self,
             args: list[str],
             *,
@@ -1454,11 +1590,11 @@ try:
             stream_output: bool = False,
             on_stderr_line=None,
         ) -> dict[str, Any] | None:
-            assert self._sb is not None
-            return await _run_sandbox_client(
-                self._sb,
-                _CODEX_SCRIPT,
-                _CODEX_LABEL,
+            assert self.sandbox is not None
+            return await run_sandbox_client(
+                self.sandbox,
+                CODEX_SCRIPT,
+                CODEX_LABEL,
                 args,
                 timeout=timeout,
                 quiet=quiet,
@@ -1468,30 +1604,99 @@ try:
 
         # -- protocol methods ---------------------------------------
 
-        async def start(
+        async def setup(
             self,
-            *,
-            sb: _SandboxBackend,
-            model: str,
-            api_key: str,
-            setup_script: str = "",
-            env_files=None,
-            auth_json: str | None = None,
-            api_key_file: str | None = None,
-            **kwargs: Any,
+            sandbox: Sandbox,
+            ctx: AgentSetupContext,
         ) -> None:
-            self._sb = sb
-            self._model = model
-            self._api_key = api_key
-            self._auth_json = auth_json
-            self._api_key_file = api_key_file
+            self.sandbox = sandbox
+            self.agent_model = ctx.model
+            credentials = ctx.credentials
+            self.api_key = credentials.api_key
+
+            auth_json: str | None = None
+            if isinstance(credentials, CodexCredentials):
+                auth_json = credentials.auth_json
+            self.auth_json = auth_json
+
+            builtins.print(
+                f"[setup] agent=codex model={ctx.model}",
+                flush=True,
+            )
+            codex_config = CODEX_CONFIG_TOML.replace(
+                "MODEL_PLACEHOLDER", ctx.model,
+            )
+            setup_uploads: list[tuple[str, str]] = [
+                ("/tmp/upload/task_setup.sh", ctx.setup_script),
+                ("/sandbox/mcp_server.py", ctx.mcp_server_content),
+                ("/sandbox/codex_client.py", CODEX_CLIENT_CONTENT),
+                (
+                    f"{CODEX_HOME_DIR}/config.toml",
+                    codex_config,
+                ),
+                ("/workspace/.gitignore", ctx.workspace_gitignore),
+            ]
+            if self.api_key:
+                setup_uploads.append(
+                    ("/tmp/upload/codex_api_key.txt", self.api_key),
+                )
+                self.api_key_file = "/tmp/upload/codex_api_key.txt"
+            if auth_json:
+                setup_uploads.append(
+                    (f"{CODEX_HOME_DIR}/auth.json", auth_json),
+                )
+
+            await upload_files_parallel(
+                sandbox, setup_uploads, log_upload=True,
+            )
+
+            if ctx.env_files:
+                from utils.helpers import environment_upload_items
+
+                py, c, txt = ctx.env_files
+                await upload_files_parallel(
+                    sandbox,
+                    environment_upload_items(py, c, txt),
+                    log_upload=True,
+                )
+                builtins.print(
+                    f"[setup] uploaded {len(py)} py, "
+                    f"{len(c)} c, {len(txt)} txt files",
+                    flush=True,
+                )
+
+            await run_task_setup(sandbox)
+            await run_workspace_init(sandbox)
+
+            # Install codex binary
+            await sandbox.write_file(
+                "/tmp/codex_install.sh",
+                CODEX_INSTALL_SCRIPT,
+                ensure_dir=False,
+            )
+
+            async def handle_line(line: str) -> None:
+                stripped = line.strip()
+                if stripped and stripped.startswith("[setup]"):
+                    builtins.print(stripped, flush=True)
+
+            result = await sandbox.run(
+                "bash /tmp/codex_install.sh",
+                timeout=300,
+                on_stdout_line=handle_line,
+                on_stderr_line=handle_line,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    f"Codex install failed (exit {result.exit_code})"
+                )
 
         async def create_session(
             self,
             trajectory_id: str,
         ) -> str:
-            self._session_id = f"pending-{trajectory_id}"
-            return self._session_id
+            self.current_session_id = f"pending-{trajectory_id}"
+            return self.current_session_id
 
         async def run_turn(
             self,
@@ -1500,10 +1705,10 @@ try:
             timeout: int,
             remaining_parts_budget: int,
             on_stream_part=None,
-        ) -> _AgentTurnOutcome | None:
-            assert self._sb is not None
+        ) -> AgentTurnOutcome | None:
+            assert self.sandbox is not None
             prompt_path = "/tmp/prompt.txt"
-            await self._sb.write_file(
+            await self.sandbox.write_file(
                 prompt_path,
                 prompt_text,
                 ensure_dir=False,
@@ -1511,27 +1716,25 @@ try:
             args = [
                 "chat-stream",
                 "--session-id",
-                self._session_id or "",
+                self.current_session_id or "",
                 "--text-file",
                 prompt_path,
                 "--model",
-                self._model,
+                self.agent_model,
                 "--max-parts",
                 str(remaining_parts_budget),
             ]
-            if self._api_key_file:
+            if self.api_key_file:
                 args.extend(
-                    ["--api-key-file", self._api_key_file],
+                    ["--api-key-file", self.api_key_file],
                 )
 
-            async def handle_stderr_line(
-                line: str,
-            ) -> None:
-                await _parse_trace_event_line(
+            async def handle_stderr_line(line: str) -> None:
+                await parse_trace_event_line(
                     line, on_stream_part,
                 )
 
-            response = await self._run_client(
+            response = await self.run_client(
                 args,
                 timeout=timeout,
                 stream_output=True,
@@ -1543,17 +1746,16 @@ try:
                 error_text = str(response.get("error"))
                 if len(error_text) > 800:
                     error_text = (
-                        error_text[:800]
-                        + "...[truncated]"
+                        error_text[:800] + "...[truncated]"
                     )
-                _builtins.print(
+                builtins.print(
                     f"[codex] turn failed: {error_text}",
                     flush=True,
                 )
                 return None
             body = response.get("body")
             if not isinstance(body, dict):
-                _builtins.print(
+                builtins.print(
                     "[codex] missing body in response",
                     flush=True,
                 )
@@ -1564,18 +1766,18 @@ try:
                 updated_session_id
                 if isinstance(updated_session_id, str)
                 and updated_session_id
-                else self._session_id or ""
+                else self.current_session_id or ""
             )
 
             message_obj = body.get("_message")
             new_messages: list[dict[str, Any]] = []
             if isinstance(message_obj, dict):
-                mid = _agent_message_id(message_obj)
-                if mid and mid in self._seen_message_ids:
+                mid = agent_message_id(message_obj)
+                if mid and mid in self.seen_message_ids:
                     pass
                 else:
                     if mid:
-                        self._seen_message_ids.add(mid)
+                        self.seen_message_ids.add(mid)
                     new_messages.append(message_obj)
             if not new_messages:
                 fallback_msg = {
@@ -1594,18 +1796,16 @@ try:
                     },
                     "parts": body.get("parts", []),
                 }
-                fallback_mid = _agent_message_id(
-                    fallback_msg,
-                )
+                fallback_mid = agent_message_id(fallback_msg)
                 if fallback_mid:
-                    self._seen_message_ids.add(fallback_mid)
+                    self.seen_message_ids.add(fallback_mid)
                 new_messages.append(fallback_msg)
 
             session_obj = {
                 "id": effective_session_id,
                 "provider": "codex",
             }
-            return _AgentTurnOutcome(
+            return AgentTurnOutcome(
                 session_id=effective_session_id,
                 response=body,
                 session_objects=[session_obj],
@@ -1615,18 +1815,18 @@ try:
 
         def on_turn_complete(
             self,
-            outcome: _AgentTurnOutcome,
+            outcome: AgentTurnOutcome,
         ) -> None:
-            self._session_id = outcome.session_id
+            self.current_session_id = outcome.session_id
 
         def on_resume(
             self,
             existing_messages: list[dict[str, Any]],
         ) -> None:
             for msg in existing_messages:
-                mid = _agent_message_id(msg)
+                mid = agent_message_id(msg)
                 if mid:
-                    self._seen_message_ids.add(mid)
+                    self.seen_message_ids.add(mid)
 
         async def recover_session(
             self,
@@ -1634,11 +1834,21 @@ try:
             attempt: int,
         ) -> str:
             sid = f"recovery-{trajectory_id}-{attempt}"
-            self._session_id = sid
+            self.current_session_id = sid
             return sid
+
+        async def collect_crash_messages(
+            self,
+            session_id: str,
+        ) -> list[dict[str, Any]] | None:
+            return None
 
         async def stop(self) -> None:
             pass
+
+    # The content of this file (agents/codex.py) for uploading into the
+    # sandbox as the client script.
+    CODEX_CLIENT_CONTENT = Path(__file__).read_text()
 
 except ImportError:
     pass  # Running as standalone sandbox script

@@ -7,8 +7,8 @@ After every part, it persists trace.parquet to S3. After every file change, it
 creates a git checkpoint. At end-of-run, it uploads a repo.bundle with full
 git history.
 
-The two core abstractions are AgentBackend (how to talk to an agent) and
-SandboxBackend (where the agent runs). This file wires them together and
+The two core abstractions are Agent (how to talk to an agent) and
+Sandbox (where the agent runs). This file wires them together and
 manages the turn loop, resume logic, and artifact persistence.
 
 Usage (via CLI):
@@ -27,16 +27,15 @@ import os
 import shlex
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import modal
 
-from agents.base import AgentBackend
+from agents.base import Agent, AgentSetupContext
 from agents.codex import CodexAgent
-from agents.opencode import OPENCODE_CONFIG_TEMPLATE, OpenCodeAgent
+from agents.opencode import OpenCodeAgent
 from models import (
     AgentTrace,
     EnvoiCall,
@@ -44,26 +43,19 @@ from models import (
     SessionEnd,
     TurnRecord,
 )
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
 from sandbox.modal import ModalSandbox
 from utils.evaluation import (
     EVALUATION_CONCURRENCY,
-    _extract_leaf_paths,
-    _extract_suite_roots,
+    extract_leaf_paths,
+    extract_suite_roots,
     run_commit_evaluation,
 )
 from utils.git import get_git_commit
 from utils.helpers import (
-    compute_turn_timeout_seconds,
-    decode_b64_to_text,
-    environment_upload_items,
     load_environment_files,
-    load_local_codex_auth_json_b64,
-    parse_codex_auth_json,
-    resolve_model,
     tprint,
     truncate_text,
-    upload_files_parallel,
 )
 from utils.parsing import (
     count_meaningful_parts,
@@ -85,7 +77,6 @@ from utils.stream import make_stream_part_callback
 app = modal.App("envoi-trace")
 
 DEFAULT_AGENT = "codex"
-CODEX_HOME_DIR = "/tmp/codex-home"
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
 )  # hard cap per message turn
@@ -109,14 +100,10 @@ AGENT_BACKENDS: dict[str, type] = {
 # Load files at import time (Modal serializes these into the function image)
 # ---------------------------------------------------------------------------
 
-SETUP_SH = (Path(__file__).parent / "sandbox" / "modal" / "setup.sh").read_text()
 MCP_SERVER = (Path(__file__).parent / "sandbox" / "modal" / "mcp_server.py").read_text()
-OPENCODE_CLIENT = (Path(__file__).parent / "agents" / "opencode.py").read_text()
-CODEX_CLIENT = (Path(__file__).parent / "agents" / "codex.py").read_text()
-OPENCODE_CONFIG = OPENCODE_CONFIG_TEMPLATE
 
-_EXAMPLES_DIR = Path(__file__).parent / "examples"
-_DEFAULT_ENVIRONMENT_DIR = _EXAMPLES_DIR / "environments" / "c_compiler"
+EXAMPLES_DIR = Path(__file__).parent / "examples"
+DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
 
 
 async def load_task(
@@ -171,9 +158,7 @@ async def load_task(
             prompt = prompt.format(**params)
 
     return prompt, params
-_ENV_PY, _ENV_C, _ENV_TXT = load_environment_files(
-    _DEFAULT_ENVIRONMENT_DIR,
-)
+
 
 WORKSPACE_GITIGNORE = """\
 target/
@@ -186,18 +171,6 @@ test_*
 opencode.jsonc
 .opencode/
 .codex/
-"""
-
-CODEX_CONFIG_TOML = """\
-model = "MODEL_PLACEHOLDER"
-model_reasoning_effort = "high"
-
-[mcp_servers.tests]
-command = "python3"
-args = ["/sandbox/mcp_server.py"]
-enabled = true
-required = false
-tool_timeout_sec = 3600
 """
 
 
@@ -213,37 +186,30 @@ function_image = (
         remote_path="/root/models.py",
     )
     .add_local_dir(Path(__file__).parent / "utils", remote_path="/root/utils")
-    .add_local_dir(_EXAMPLES_DIR / "tasks", remote_path="/root/examples/tasks")
+    .add_local_dir(EXAMPLES_DIR / "tasks", remote_path="/root/examples/tasks")
     .add_local_dir(Path(__file__).parent / "agents", remote_path="/root/agents")
     .add_local_dir(Path(__file__).parent / "sandbox", remote_path="/root/sandbox")
     .add_local_dir(
-        _EXAMPLES_DIR / "environments",
+        EXAMPLES_DIR / "environments",
         remote_path="/root/examples/environments",
     )
 )
 
-sandbox_image = (
-    modal.Image.from_registry("ubuntu:24.04", add_python="3.12")
-    .apt_install(
-        "build-essential",
-        "gcc",
-        "g++",
-        "clang",
-        "git",
-        "curl",
-        "wget",
-        "pkg-config",
-        "libssl-dev",
-    )
-    .pip_install(
-        "envoi @ git+https://github.com/TheSeamau5/envoi.git",
-        "httpx>=0.27.0",
-        "opencode-ai>=0.1.0a36",
-        "pydantic>=2.0.0",
-        "mcp>=1.0.0",
-    )
-    .run_commands("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y")
-)
+
+def build_sandbox_image(
+    env_dockerfile: Path,
+    agent_cls: type,
+) -> modal.Image:
+    """Build the sandbox image from the environment Dockerfile + agent layers."""
+    image = modal.Image.from_dockerfile(str(env_dockerfile), add_python="3.12")
+    requirements = agent_cls.image_requirements()
+    if requirements.apt_packages:
+        image = image.apt_install(*requirements.apt_packages)
+    if requirements.pip_packages:
+        image = image.pip_install(*requirements.pip_packages)
+    for cmd in requirements.build_commands:
+        image = image.run_commands(cmd)
+    return image
 
 # ---------------------------------------------------------------------------
 # Sandbox helpers
@@ -251,21 +217,15 @@ sandbox_image = (
 
 
 async def dump_sandbox_logs(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     *,
-    agent: str,
+    agent: Agent,
     tail: int = 50,
 ) -> None:
     """Print the tail of agent + envoi logs from the sandbox."""
-    log_files = ["/tmp/envoi.log"]
-    if agent == "opencode":
-        log_files.insert(0, "/tmp/opencode.log")
-    elif agent == "codex":
-        log_files.insert(0, "/tmp/codex.log")
-
-    for log_file in log_files:
+    for log_file in agent.log_files:
         try:
-            _, stdout, _ = (await sb.run(
+            _, stdout, _ = (await sandbox.run(
                 f"[ -f {shlex.quote(log_file)} ] && tail -n {tail} {shlex.quote(log_file)} || true",
                 timeout=10,
                 quiet=True,
@@ -277,57 +237,6 @@ async def dump_sandbox_logs(
                     builtins.print(f"  {line}", flush=True)
         except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# Agent backends + sb setup
-# ---------------------------------------------------------------------------
-
-
-async def upload_environment_files(
-    sb: SandboxBackend,
-    py_files: dict[str, str] | None = None,
-    c_files: dict[str, str] | None = None,
-    txt_files: dict[str, str] | None = None,
-) -> None:
-    env_py = py_files if py_files is not None else _ENV_PY
-    env_c = c_files if c_files is not None else _ENV_C
-    env_txt = txt_files if txt_files is not None else _ENV_TXT
-    await upload_files_parallel(
-        sb,
-        environment_upload_items(env_py, env_c, env_txt),
-        log_upload=True,
-    )
-
-    print(
-        f"[setup] uploaded {len(env_py)} py, "
-        f"{len(env_c)} c, {len(env_txt)} txt files"
-    )
-
-
-async def run_setup_script(sb: SandboxBackend, agent: str) -> None:
-    print(f"[setup] running setup.sh (agent={agent})...")
-
-    async def handle_setup_line(line: str) -> None:
-        stripped = line.strip()
-        if not stripped:
-            return
-        if stripped.startswith("[setup]") or stripped.startswith("[fixtures]"):
-            print(stripped)
-            return
-        if stripped.startswith("ERROR:"):
-            print(f"[setup] {stripped}")
-
-    exit_code, stdout, stderr = (await sb.run(
-        f"AGENT_KIND={shlex.quote(agent)} bash /tmp/upload/setup.sh",
-        timeout=1800,
-        on_stdout_line=handle_setup_line,
-        on_stderr_line=handle_setup_line,
-    )).unpack()
-    if exit_code != 0:
-        print(f"[setup] FAILED:\n{stdout}\n{stderr}")
-        raise RuntimeError(f"Setup failed (exit {exit_code})")
-    print("[setup] done")
 
 
 def get_trace_last_part(trace: AgentTrace) -> int:
@@ -375,7 +284,7 @@ def build_unsolved_status_lines(tracker: SolveTracker) -> list[str]:
 
 async def restore_workspace_from_bundle(
     *,
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     trajectory_id: str,
     commit: str,
 ) -> bool:
@@ -403,7 +312,7 @@ async def restore_workspace_from_bundle(
         return False
 
     encoded = base64.b64encode(bundle_bytes).decode("ascii")
-    await sb.write_file(
+    await sandbox.write_file(
         "/tmp/resume.bundle.b64",
         encoded,
         ensure_dir=False,
@@ -424,7 +333,7 @@ async def restore_workspace_from_bundle(
         "git config user.email 'agent@example.com'\n"
         "git config user.name 'Agent'\n"
     )
-    exit_code, _, stderr = (await sb.run(
+    exit_code, _, stderr = (await sandbox.run(
         restore_cmd,
         timeout=300,
         quiet=True,
@@ -439,77 +348,13 @@ async def restore_workspace_from_bundle(
     return True
 
 
-async def setup_sandbox_opencode(
-    sb: SandboxBackend,
-    model: str,
-    api_key: str,
-    setup_script: str = "",
-    env_files: tuple[
-        dict[str, str], dict[str, str], dict[str, str]
-    ] | None = None,
-) -> None:
-    print(f"[setup] agent=opencode model={model}")
-    config = OPENCODE_CONFIG.replace("MODEL_PLACEHOLDER", model)
-    await upload_files_parallel(
-        sb,
-        [
-            ("/tmp/upload/setup.sh", SETUP_SH),
-            ("/tmp/upload/task_setup.sh", setup_script),
-            ("/sandbox/mcp_server.py", MCP_SERVER),
-            ("/sandbox/opencode_client.py", OPENCODE_CLIENT),
-            ("/tmp/upload/opencode_api_key.txt", api_key),
-            ("/workspace/opencode.jsonc", config),
-            ("/workspace/.gitignore", WORKSPACE_GITIGNORE),
-        ],
-        log_upload=True,
-    )
-    py, c, txt = env_files if env_files else (_ENV_PY, _ENV_C, _ENV_TXT)
-    await upload_environment_files(sb, py, c, txt)
-    await run_setup_script(sb, "opencode")
-
-
-async def setup_sandbox_codex(
-    sb: SandboxBackend,
-    model: str,
-    api_key: str,
-    auth_json: str | None = None,
-    setup_script: str = "",
-    env_files: tuple[
-        dict[str, str], dict[str, str], dict[str, str]
-    ] | None = None,
-) -> None:
-    print(f"[setup] agent=codex model={model}")
-    codex_config = CODEX_CONFIG_TOML.replace("MODEL_PLACEHOLDER", model)
-    setup_uploads: list[tuple[str, str]] = [
-        ("/tmp/upload/setup.sh", SETUP_SH),
-        ("/tmp/upload/task_setup.sh", setup_script),
-        ("/sandbox/mcp_server.py", MCP_SERVER),
-        ("/sandbox/codex_client.py", CODEX_CLIENT),
-        (f"{CODEX_HOME_DIR}/config.toml", codex_config),
-        ("/workspace/.gitignore", WORKSPACE_GITIGNORE),
-    ]
-    if api_key:
-        setup_uploads.append(("/tmp/upload/codex_api_key.txt", api_key))
-    if auth_json:
-        setup_uploads.append((f"{CODEX_HOME_DIR}/auth.json", auth_json))
-
-    await upload_files_parallel(
-        sb,
-        setup_uploads,
-        log_upload=True,
-    )
-    py, c, txt = env_files if env_files else (_ENV_PY, _ENV_C, _ENV_TXT)
-    await upload_environment_files(sb, py, c, txt)
-    await run_setup_script(sb, "codex")
-
-
 # ---------------------------------------------------------------------------
 # End session
 # ---------------------------------------------------------------------------
 
 
 async def end_session(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     agent_trace: AgentTrace,
     part_count: int,
     turn_count: int,
@@ -524,7 +369,7 @@ async def end_session(
         print("[end] nothing to save (0 parts), skipping S3 upload")
         return
 
-    final_commit = await get_git_commit(sb)
+    final_commit = await get_git_commit(sandbox)
     bundle_s3_uri: str | None = None
 
     agent_trace.session_end = SessionEnd(
@@ -536,12 +381,12 @@ async def end_session(
 
     # Upload git bundle
     try:
-        exit_code, _, _ = (await sb.run(
+        exit_code, _, _ = (await sandbox.run(
             "git bundle create /tmp/repo.bundle --all",
             quiet=True,
             cwd="/workspace",
         )).unpack()
-        _, size_out, _ = (await sb.run(
+        _, size_out, _ = (await sandbox.run(
             "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
             quiet=True,
         )).unpack()
@@ -549,7 +394,7 @@ async def end_session(
         print(f"[bundle] size={bundle_size} bytes")
 
         if bundle_size > 0:
-            _, b64, _ = (await sb.run("base64 /tmp/repo.bundle", quiet=True)).unpack()
+            _, b64, _ = (await sandbox.run("base64 /tmp/repo.bundle", quiet=True)).unpack()
             data = base64.b64decode(b64.strip())
             bundle_s3_uri = upload_file(agent_trace.trajectory_id, "repo.bundle", data)
             print(f"[bundle] uploaded ({len(data)} bytes)")
@@ -573,11 +418,237 @@ async def end_session(
 
 
 # ---------------------------------------------------------------------------
-# Modal images
+# Evaluation scheduler
 # ---------------------------------------------------------------------------
 
 
-async def _run_trajectory_impl(
+class EvaluationScheduler:
+    """Manages async commit evaluations during a trajectory run."""
+
+    def __init__(
+        self,
+        *,
+        sandbox: Sandbox,
+        agent_trace: AgentTrace,
+        trajectory_id: str,
+        environment: str,
+        task_params: dict[str, Any] | None,
+        suite_paths: list[str] | None,
+    ) -> None:
+        self.sandbox = sandbox
+        self.agent_trace = agent_trace
+        self.trajectory_id = trajectory_id
+        self.environment = environment
+        self.task_params = task_params
+        self.suite_paths = suite_paths
+        self.tasks: set[asyncio.Task[None]] = set()
+        self.seen_commits: set[str] = set(agent_trace.evaluations.keys())
+        self.semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
+
+        for evaluation in agent_trace.evaluations.values():
+            if evaluation.status in {"queued", "running"}:
+                evaluation.status = "failed"
+                evaluation.error = "Interrupted before evaluation completed"
+                evaluation.completed_at = datetime.now(UTC).isoformat()
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self.tasks)
+
+    def save(self) -> None:
+        save_trace_parquet(
+            self.trajectory_id, self.agent_trace,
+            environment=self.environment,
+            task_params=self.task_params,
+        )
+
+    @staticmethod
+    def str_or_none(value: Any) -> str | None:
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def int_or_none(value: Any) -> int | None:
+        return value if isinstance(value, int) else None
+
+    @staticmethod
+    def apply_result(
+        evaluation: EvaluationRecord,
+        run_payload: dict[str, Any],
+    ) -> None:
+        """Apply a successful run_commit_evaluation result."""
+        payload = run_payload.get("payload")
+        evaluation.command = EvaluationScheduler.str_or_none(
+            run_payload.get("command"),
+        )
+        evaluation.exit_code = EvaluationScheduler.int_or_none(
+            run_payload.get("exit_code"),
+        )
+        evaluation.stdout = EvaluationScheduler.str_or_none(
+            run_payload.get("stdout"),
+        )
+        evaluation.stderr = EvaluationScheduler.str_or_none(
+            run_payload.get("stderr"),
+        )
+
+        if (
+            isinstance(evaluation.exit_code, int)
+            and evaluation.exit_code != 0
+        ):
+            evaluation.status = "failed"
+            evaluation.error = (
+                "Evaluation command failed with exit code "
+                f"{evaluation.exit_code}"
+            )
+            evaluation.passed = 0
+            evaluation.failed = 0
+            evaluation.total = 0
+            evaluation.suite_results = {}
+        elif not isinstance(payload, dict):
+            evaluation.status = "failed"
+            evaluation.error = (
+                "Missing evaluation payload in command output"
+            )
+            evaluation.passed = 0
+            evaluation.failed = 0
+            evaluation.total = 0
+            evaluation.suite_results = {}
+        else:
+            evaluation.status = "completed"
+            evaluation.error = (
+                payload.get("error")
+                if isinstance(payload.get("error"), str)
+                else None
+            )
+            evaluation.duration_ms = int(
+                payload.get("duration_ms", 0) or 0,
+            )
+            evaluation.passed = int(payload.get("passed", 0) or 0)
+            evaluation.failed = int(payload.get("failed", 0) or 0)
+            evaluation.total = int(payload.get("total", 0) or 0)
+            suite_results = payload.get("suite_results")
+            evaluation.suite_results = (
+                suite_results if isinstance(suite_results, dict) else {}
+            )
+
+    @staticmethod
+    def apply_failure(
+        evaluation: EvaluationRecord,
+        error: Exception,
+        run_payload: dict[str, Any] | None,
+    ) -> None:
+        """Apply an exception result, salvaging partial output."""
+        evaluation.status = "failed"
+        evaluation.error = str(error)
+        evaluation.passed = 0
+        evaluation.failed = 0
+        evaluation.total = 0
+        evaluation.suite_results = {}
+        if run_payload is not None:
+            evaluation.command = EvaluationScheduler.str_or_none(
+                run_payload.get("command"),
+            )
+            evaluation.exit_code = EvaluationScheduler.int_or_none(
+                run_payload.get("exit_code"),
+            )
+            evaluation.stdout = EvaluationScheduler.str_or_none(
+                run_payload.get("stdout"),
+            )
+            evaluation.stderr = EvaluationScheduler.str_or_none(
+                run_payload.get("stderr"),
+            )
+
+    def schedule(self, commit: str, part: int) -> None:
+        if commit in self.seen_commits:
+            return
+        self.seen_commits.add(commit)
+        queued_at = datetime.now(UTC).isoformat()
+        print(f"[eval] queued commit {commit[:10]} from part {part}")
+        self.agent_trace.evaluations[commit] = EvaluationRecord(
+            commit=commit,
+            part=part,
+            status="queued",
+            queued_at=queued_at,
+        )
+        self.save()
+        task = asyncio.create_task(
+            self.run_one(commit, part, queued_at),
+        )
+        self.tasks.add(task)
+        task.add_done_callback(self.on_done)
+
+    async def run_one(
+        self, commit: str, part: int, queued_at: str,
+    ) -> None:
+        evaluation = self.agent_trace.evaluations.get(commit)
+        if evaluation is None:
+            evaluation = EvaluationRecord(
+                commit=commit, part=part,
+                status="queued", queued_at=queued_at,
+            )
+            self.agent_trace.evaluations[commit] = evaluation
+        evaluation.status = "running"
+        evaluation.started_at = datetime.now(UTC).isoformat()
+        self.save()
+
+        async with self.semaphore:
+            run_payload: dict[str, Any] | None = None
+            started_mono = time.monotonic()
+            try:
+                run_payload = await run_commit_evaluation(
+                    sandbox=self.sandbox,
+                    commit=commit,
+                    suite_paths=self.suite_paths or None,
+                )
+                self.apply_result(evaluation, run_payload)
+            except Exception as eval_error:
+                self.apply_failure(
+                    evaluation, eval_error, run_payload,
+                )
+            finally:
+                if evaluation.duration_ms is None:
+                    evaluation.duration_ms = int(
+                        (time.monotonic() - started_mono) * 1000,
+                    )
+                evaluation.completed_at = datetime.now(UTC).isoformat()
+                print(
+                    f"[eval] commit {commit[:10]} "
+                    f"status={evaluation.status} "
+                    f"passed={evaluation.passed}/{evaluation.total}"
+                )
+                self.save()
+
+    def on_done(self, done_task: asyncio.Task[None]) -> None:
+        self.tasks.discard(done_task)
+        try:
+            done_task.result()
+        except Exception as task_error:
+            print(f"[eval] unexpected task error: {task_error}")
+
+    async def wait(self) -> None:
+        while self.tasks:
+            pending = list(self.tasks)
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Main trajectory implementation
+# ---------------------------------------------------------------------------
+
+
+def build_followup_prompt(
+    tracker: SolveTracker,
+    continue_prompt: str = "Continue.",
+) -> str:
+    """Build the re-injection prompt with current test status."""
+    status = build_unsolved_status_lines(tracker)
+    if not status:
+        return continue_prompt
+    return continue_prompt + "\n\nCurrent test status:\n" + "\n".join(status)
+
+
+async def run_trajectory_impl(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
@@ -594,7 +665,7 @@ async def _run_trajectory_impl(
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
-    agent = (agent or DEFAULT_AGENT).strip().lower()
+    agent_name = (agent or DEFAULT_AGENT).strip().lower()
 
     task_path = Path(task_dir)
     env_path = Path(environment_dir)
@@ -608,13 +679,21 @@ async def _run_trajectory_impl(
         setup_script_file.read_text() if setup_script_file.exists() else ""
     )
 
-    effective_max_parts = max_parts
-    resolved_model = resolve_model(agent, model)
+    # Resolve agent class, model, and credentials via protocol
+    agent_cls = AGENT_BACKENDS.get(agent_name)
+    if agent_cls is None:
+        raise ValueError(f"Unknown agent: {agent_name}")
+    resolved_model = agent_cls.resolve_model(model)
+    credentials = agent_cls.resolve_credentials(
+        codex_auth_json_b64=codex_auth_json_b64,
+    )
+
     existing_trace = load_trace_snapshot(trajectory_id) if resume else None
-    if existing_trace is not None and existing_trace.agent != agent:
+    if existing_trace is not None and existing_trace.agent != agent_name:
         print(
-            f"[resume] existing trajectory agent={existing_trace.agent} differs from "
-            f"requested agent={agent}; starting new trace object"
+            f"[resume] existing trajectory agent={existing_trace.agent} "
+            f"differs from requested agent={agent_name}; "
+            "starting new trace object"
         )
         existing_trace = None
     trace_s3_uri = artifact_uri(trajectory_id, "trace.parquet")
@@ -625,55 +704,35 @@ async def _run_trajectory_impl(
     print(f"TRACE_S3_URI: {trace_s3_uri}")
     print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
     print(
-        f"agent={agent} model={resolved_model} max_parts={effective_max_parts} "
-        f"timeout={timeout_seconds}s message_timeout={message_timeout_seconds}s"
+        f"agent={agent_name} model={resolved_model} "
+        f"max_parts={max_parts} timeout={timeout_seconds}s "
+        f"message_timeout={message_timeout_seconds}s"
     )
     if existing_trace is not None:
         print(
-            f"[resume] found existing trace: parts={len(existing_trace.parts)} "
+            f"[resume] found existing trace: "
+            f"parts={len(existing_trace.parts)} "
             f"turns={len(existing_trace.turns)}"
         )
     print(banner)
 
-    agent_api_key = ""
-    codex_auth_json: str | None = None
-    if agent == "opencode":
-        agent_api_key = os.environ.get("OPENCODE_API_KEY", "").strip()
-        if not agent_api_key:
-            raise RuntimeError("OPENCODE_API_KEY not set")
-    else:
-        env_codex_auth_b64 = os.environ.get("CODEX_AUTH_JSON_B64", "").strip()
-        env_codex_auth_raw = os.environ.get("CODEX_AUTH_JSON", "").strip()
-        if codex_auth_json_b64:
-            decoded = decode_b64_to_text(codex_auth_json_b64, label="codex_auth_json_b64 arg")
-            codex_auth_json = parse_codex_auth_json(decoded, label="codex_auth_json_b64 arg")
-        elif env_codex_auth_b64:
-            decoded = decode_b64_to_text(env_codex_auth_b64, label="CODEX_AUTH_JSON_B64")
-            codex_auth_json = parse_codex_auth_json(decoded, label="CODEX_AUTH_JSON_B64")
-        elif env_codex_auth_raw:
-            codex_auth_json = parse_codex_auth_json(env_codex_auth_raw, label="CODEX_AUTH_JSON")
-
-        agent_api_key = (
-            os.environ.get("CODEX_API_KEY", "").strip()
-            or os.environ.get("OPENAI_API_KEY", "").strip()
-        )
-        if not codex_auth_json and not agent_api_key:
-            raise RuntimeError(
-                "No Codex credentials found. Provide one of: "
-                "~/.codex/auth.json via --codex-auth-file, "
-                "CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON, or CODEX_API_KEY/OPENAI_API_KEY."
-            )
-
-    sb: SandboxBackend | None = None
+    sandbox: Sandbox | None = None
     agent_trace: AgentTrace | None = None
+    agent_backend: Agent | None = None
+    evaluator: EvaluationScheduler | None = None
+    session_id: str = ""
+    prompt_text: str = ""
     turn_count = 0
     part_count = 0
-    end_reason: str | None = None
-    wait_for_evaluations_fn: Callable[[], Awaitable[None]] | None = None
+    end_reason: str = "agent_error"
 
     try:
+        # --- Create sandbox ---
         if sandbox_provider == "modal":
-            sb = await ModalSandbox.create(
+            sandbox_image = build_sandbox_image(
+                env_path / "Dockerfile", agent_cls,
+            )
+            sandbox = await ModalSandbox.create(
                 image=sandbox_image,
                 timeout=timeout_seconds,
                 app=app,
@@ -681,22 +740,27 @@ async def _run_trajectory_impl(
         elif sandbox_provider == "e2b":
             from sandbox.e2b import E2BSandbox
 
-            sb = await E2BSandbox.create(timeout=timeout_seconds)
+            sandbox = await E2BSandbox.create(
+                timeout=timeout_seconds,
+            )
         else:
-            raise ValueError(f"Unknown sandbox provider: {sandbox_provider}")
+            raise ValueError(
+                f"Unknown sandbox provider: {sandbox_provider}",
+            )
         start_time = time.monotonic()
 
-        # --- Setup ---
-        if agent == "opencode":
-            await setup_sandbox_opencode(
-                sb, resolved_model, agent_api_key,
-                setup_script=setup_script, env_files=env_files,
-            )
-        else:
-            await setup_sandbox_codex(
-                sb, resolved_model, agent_api_key, codex_auth_json,
-                setup_script=setup_script, env_files=env_files,
-            )
+        # --- Agent setup (one call, no branching) ---
+        agent_backend = agent_cls()
+        assert agent_backend is not None
+        ctx = AgentSetupContext(
+            model=resolved_model,
+            credentials=credentials,
+            setup_script=setup_script,
+            env_files=env_files,
+            mcp_server_content=MCP_SERVER,
+            workspace_gitignore=WORKSPACE_GITIGNORE,
+        )
+        await agent_backend.setup(sandbox, ctx)
 
         resume_commit = (
             get_trace_latest_commit(existing_trace)
@@ -709,50 +773,37 @@ async def _run_trajectory_impl(
             and resume_commit
         ):
             await restore_workspace_from_bundle(
-                sb=sb,
+                sandbox=sandbox,
                 trajectory_id=trajectory_id,
                 commit=resume_commit,
             )
 
-        # --- Create agent backend and session ---
-        agent_cls = AGENT_BACKENDS.get(agent)
-        if agent_cls is None:
-            raise ValueError(f"Unknown agent: {agent}")
-        agent_backend: AgentBackend = agent_cls()
-        codex_api_key_file = (
-            "/tmp/upload/codex_api_key.txt"
-            if agent == "codex" and agent_api_key
-            else None
-        )
-        await agent_backend.start(
-            sb=sb,
-            model=resolved_model,
-            api_key=agent_api_key,
-            auth_json=codex_auth_json,
-            api_key_file=codex_api_key_file,
-        )
+        # --- Create session ---
         session_id = await agent_backend.create_session(
             trajectory_id,
         )
         if not session_id:
             raise RuntimeError(
-                f"Failed to create session for agent={agent}",
+                f"Failed to create session for agent={agent_name}",
             )
 
         if existing_trace is not None:
             agent_trace = existing_trace
             agent_trace.session_id = session_id
-            agent_trace.agent = agent
+            agent_trace.agent = agent_name
             agent_trace.agent_model = resolved_model
             agent_trace.session_end = None
             part_count = get_trace_last_part(agent_trace)
             turn_count = get_trace_last_turn(agent_trace)
-            print(f"[resume] continuing from part={part_count} turn={turn_count}")
+            print(
+                f"[resume] continuing from part={part_count} "
+                f"turn={turn_count}"
+            )
         else:
             agent_trace = AgentTrace(
                 trajectory_id=trajectory_id,
                 session_id=session_id,
-                agent=agent,
+                agent=agent_name,
                 agent_model=resolved_model,
                 started_at=datetime.now(UTC).isoformat(),
             )
@@ -762,194 +813,21 @@ async def _run_trajectory_impl(
             task_params=task_params_loaded,
         )
 
-        evaluation_tasks: set[asyncio.Task[None]] = set()
-        evaluation_commits: set[str] = set(agent_trace.evaluations.keys())
-        evaluation_semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
-        for evaluation in agent_trace.evaluations.values():
-            if evaluation.status in {"queued", "running"}:
-                evaluation.status = "failed"
-                evaluation.error = "Interrupted before evaluation completed"
-                evaluation.completed_at = datetime.now(UTC).isoformat()
-
-        def schedule_commit_evaluation(commit: str, part: int) -> None:
-            if commit in evaluation_commits:
-                return
-            evaluation_commits.add(commit)
-            queued_at = datetime.now(UTC).isoformat()
-            print(f"[eval] queued commit {commit[:10]} from part {part}")
-            agent_trace.evaluations[commit] = EvaluationRecord(
-                commit=commit,
-                part=part,
-                status="queued",
-                queued_at=queued_at,
-            )
-            save_trace_parquet(
-                trajectory_id, agent_trace,
-                environment=environment,
-                task_params=task_params_loaded,
-            )
-
-            async def _runner() -> None:
-                started_at = datetime.now(UTC).isoformat()
-                evaluation = agent_trace.evaluations.get(commit)
-                if evaluation is None:
-                    evaluation = EvaluationRecord(
-                        commit=commit,
-                        part=part,
-                        status="queued",
-                        queued_at=queued_at,
-                    )
-                    agent_trace.evaluations[commit] = evaluation
-                evaluation.status = "running"
-                evaluation.started_at = started_at
-                save_trace_parquet(
-                    trajectory_id, agent_trace,
-                    environment=environment,
-                    task_params=task_params_loaded,
-                )
-
-                async with evaluation_semaphore:
-                    run_payload: dict[str, Any] | None = None
-                    started_mono = time.monotonic()
-                    try:
-                        run_payload = await run_commit_evaluation(
-                            sb=sb,
-                            commit=commit,
-                            suite_paths=suite_paths or None,
-                        )
-                        payload = run_payload.get("payload")
-                        exit_code_value = run_payload.get("exit_code")
-                        stdout_value = run_payload.get("stdout")
-                        stderr_value = run_payload.get("stderr")
-                        command_value = run_payload.get("command")
-
-                        evaluation.command = (
-                            command_value if isinstance(command_value, str) else None
-                        )
-                        evaluation.exit_code = (
-                            exit_code_value if isinstance(exit_code_value, int) else None
-                        )
-                        raw_stdout = stdout_value if isinstance(stdout_value, str) else None
-                        raw_stderr = stderr_value if isinstance(stderr_value, str) else None
-
-                        if (
-                            isinstance(evaluation.exit_code, int)
-                            and evaluation.exit_code != 0
-                        ):
-                            evaluation.status = "failed"
-                            evaluation.error = (
-                                f"Evaluation command failed with exit code {evaluation.exit_code}"
-                            )
-                            evaluation.stdout = raw_stdout
-                            evaluation.stderr = raw_stderr
-                            evaluation.passed = 0
-                            evaluation.failed = 0
-                            evaluation.total = 0
-                            evaluation.suite_results = {}
-                        elif not isinstance(payload, dict):
-                            evaluation.status = "failed"
-                            evaluation.error = "Missing evaluation payload in command output"
-                            evaluation.stdout = raw_stdout
-                            evaluation.stderr = raw_stderr
-                            evaluation.passed = 0
-                            evaluation.failed = 0
-                            evaluation.total = 0
-                            evaluation.suite_results = {}
-                        else:
-                            evaluation.status = "completed"
-                            evaluation.error = (
-                                payload.get("error")
-                                if isinstance(payload.get("error"), str)
-                                else None
-                            )
-                            evaluation.stdout = raw_stdout
-                            evaluation.stderr = raw_stderr
-                            evaluation.duration_ms = int(
-                                payload.get("duration_ms", 0) or 0
-                            )
-                            evaluation.passed = int(payload.get("passed", 0) or 0)
-                            evaluation.failed = int(payload.get("failed", 0) or 0)
-                            evaluation.total = int(payload.get("total", 0) or 0)
-                            suite_results = payload.get("suite_results")
-                            if isinstance(suite_results, dict):
-                                evaluation.suite_results = suite_results
-                            else:
-                                evaluation.suite_results = {}
-                    except Exception as eval_error:
-                        evaluation.status = "failed"
-                        evaluation.error = str(eval_error)
-                        evaluation.passed = 0
-                        evaluation.failed = 0
-                        evaluation.total = 0
-                        evaluation.suite_results = {}
-                        if run_payload is not None:
-                            exit_code_value = run_payload.get("exit_code")
-                            stdout_value = run_payload.get("stdout")
-                            stderr_value = run_payload.get("stderr")
-                            command_value = run_payload.get("command")
-                            evaluation.command = (
-                                command_value if isinstance(command_value, str) else None
-                            )
-                            evaluation.exit_code = (
-                                exit_code_value if isinstance(exit_code_value, int) else None
-                            )
-                            evaluation.stdout = (
-                                stdout_value if isinstance(stdout_value, str) else None
-                            )
-                            evaluation.stderr = (
-                                stderr_value if isinstance(stderr_value, str) else None
-                            )
-                    finally:
-                        if evaluation.duration_ms is None:
-                            evaluation.duration_ms = int(
-                                (time.monotonic() - started_mono) * 1000
-                            )
-                        evaluation.completed_at = datetime.now(UTC).isoformat()
-                        print(
-                            f"[eval] commit {commit[:10]} status={evaluation.status} "
-                            f"passed={evaluation.passed}/{evaluation.total}"
-                        )
-                        save_trace_parquet(
-                            trajectory_id, agent_trace,
-                            environment=environment,
-                            task_params=task_params_loaded,
-                        )
-
-            task = asyncio.create_task(_runner())
-            evaluation_tasks.add(task)
-
-            def _on_done(done_task: asyncio.Task[None]) -> None:
-                evaluation_tasks.discard(done_task)
-                try:
-                    done_task.result()
-                except Exception as task_error:
-                    print(
-                        f"[eval] unexpected task error for commit {commit}: {task_error}"
-                    )
-
-            task.add_done_callback(_on_done)
-
-        async def _wait_for_evaluations() -> None:
-            while evaluation_tasks:
-                pending = list(evaluation_tasks)
-                if not pending:
-                    break
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        wait_for_evaluations_fn = _wait_for_evaluations
-
         # --- Discover test paths from envoi /schema ---
         required_test_paths: list[str] = []
         suite_paths: list[str] = []
-        schema_result = await sb.run(
+        schema_result = await sandbox.run(
             "curl -sf http://localhost:8000/schema",
             quiet=True, timeout=30,
         )
-        if schema_result.exit_code == 0 and schema_result.stdout.strip():
+        if (
+            schema_result.exit_code == 0
+            and schema_result.stdout.strip()
+        ):
             try:
                 schema = json.loads(schema_result.stdout)
-                required_test_paths = _extract_leaf_paths(schema)
-                suite_paths = _extract_suite_roots(schema)
+                required_test_paths = extract_leaf_paths(schema)
+                suite_paths = extract_suite_roots(schema)
                 print(
                     f"[schema] discovered "
                     f"{len(required_test_paths)} test paths, "
@@ -958,9 +836,21 @@ async def _run_trajectory_impl(
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"[schema] parse error: {e}")
         else:
-            print("[schema] /schema not available, running without completion tracking")
+            print(
+                "[schema] /schema not available, "
+                "running without completion tracking"
+            )
 
-        # --- Main loop: blocking message calls with part budget ---
+        evaluator = EvaluationScheduler(
+            sandbox=sandbox,
+            agent_trace=agent_trace,
+            trajectory_id=trajectory_id,
+            environment=environment,
+            task_params=task_params_loaded,
+            suite_paths=suite_paths or None,
+        )
+
+        # --- Main loop ---
         required = set(required_test_paths)
         passing: set[str] = set()
         tracker = SolveTracker(required_test_paths)
@@ -969,274 +859,300 @@ async def _run_trajectory_impl(
         for path in tracker.solved:
             passing.add(path)
 
-        continue_prompt = "Continue."
-
-        def _followup() -> str:
-            status = build_unsolved_status_lines(tracker)
-            if not status:
-                return continue_prompt
-            return (
-                continue_prompt
-                + "\n\nCurrent test status:\n"
-                + "\n".join(status)
-            )
-
-        prompt_text = prompt if part_count == 0 else _followup()
+        prompt_text = (
+            prompt if part_count == 0
+            else build_followup_prompt(tracker)
+        )
         consecutive_turn_failures = 0
 
-        try:
-            while part_count < effective_max_parts:
-                elapsed = time.monotonic() - start_time
-                if elapsed > timeout_seconds:
-                    end_reason = "timeout"
-                    break
-                remaining_run_seconds = timeout_seconds - elapsed
-                remaining_parts = max(1, effective_max_parts - part_count)
-                if agent == "codex":
-                    # For Codex, don't short-circuit long productive turns with the
-                    # per-turn message timeout; only the overall run timeout applies.
-                    turn_timeout_seconds = max(1, int(remaining_run_seconds))
-                else:
-                    turn_timeout_seconds = compute_turn_timeout_seconds(
-                        remaining_parts=remaining_parts,
-                        remaining_run_seconds=remaining_run_seconds,
-                        message_timeout_seconds=message_timeout_seconds,
-                    )
+        while part_count < max_parts:
+            elapsed = time.monotonic() - start_time
+            if elapsed > timeout_seconds:
+                end_reason = "timeout"
+                break
+            remaining_run_seconds = timeout_seconds - elapsed
+            remaining_parts = max(1, max_parts - part_count)
 
-                banner = "=" * 60
-                builtins.print(f"\n{banner}", flush=True)
-                builtins.print(
-                    f" TURN {turn_count + 1}  "
-                    f"(part_count {part_count}/{effective_max_parts}, "
-                    f"timeout {turn_timeout_seconds}s)",
-                    flush=True,
-                )
-                builtins.print(banner, flush=True)
+            # Agent decides its own timeout (no branching)
+            turn_timeout_seconds = agent_backend.compute_turn_timeout(
+                remaining_parts=remaining_parts,
+                remaining_run_seconds=remaining_run_seconds,
+                message_timeout_seconds=message_timeout_seconds,
+            )
 
-                turn_started_at = datetime.now(UTC).isoformat()
-                per_call_parts_budget = remaining_parts
-                previous_part_count = part_count
-                streamed_parts = 0
-                observed_parts = 0
-                part_limit_abort = False
-                git_commit = await get_git_commit(sb)
-                turn_record: TurnRecord | None = None
+            turn_banner = "=" * 60
+            builtins.print(f"\n{turn_banner}", flush=True)
+            builtins.print(
+                f" TURN {turn_count + 1}  "
+                f"(part_count {part_count}/{max_parts}, "
+                f"timeout {turn_timeout_seconds}s)",
+                flush=True,
+            )
+            builtins.print(turn_banner, flush=True)
 
-                turn_count += 1
-                turn_record = TurnRecord(
-                    trajectory_id=trajectory_id,
-                    session_id=session_id,
-                    agent=agent,
-                    turn=turn_count,
-                    part_start=None,
-                    part_end=None,
-                    timestamp=turn_started_at,
-                    agent_model=resolved_model,
-                    prompt=prompt_text,
-                    git_commit=git_commit,
-                    repo_checkpoint=None,
-                    parts=[],
-                )
-                agent_trace.turns.append(turn_record)
+            turn_started_at = datetime.now(UTC).isoformat()
+            previous_part_count = part_count
+            streamed_parts = 0
+            observed_parts = 0
+            git_commit = await get_git_commit(sandbox)
 
-                stream_part_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-                stream_part_counter: list[int] = [part_count]
-                stream_git_commit_ref: list[str | None] = [git_commit]
-                stream_last_part_ts_ref: list[int | None] = [None]
-                stream_part_cb = make_stream_part_callback(
-                    sb=sb,
-                    trajectory_id=trajectory_id,
-                    agent_trace=agent_trace,
-                    tracker=tracker,
-                    environment=environment,
-                    task_params=task_params_loaded,
-                    agent_name=agent,
-                    resolved_model=resolved_model,
-                    effective_max_parts=effective_max_parts,
-                    part_counter=stream_part_counter,
-                    git_commit_ref=stream_git_commit_ref,
-                    last_part_timestamp_ms_ref=stream_last_part_ts_ref,
-                    turn_record=turn_record,
-                    session_id=session_id,
-                    schedule_commit_evaluation=schedule_commit_evaluation,
-                )
+            turn_count += 1
+            turn_record = TurnRecord(
+                trajectory_id=trajectory_id,
+                session_id=session_id,
+                agent=agent_name,
+                turn=turn_count,
+                part_start=None,
+                part_end=None,
+                timestamp=turn_started_at,
+                agent_model=resolved_model,
+                prompt=prompt_text,
+                git_commit=git_commit,
+                repo_checkpoint=None,
+                parts=[],
+            )
+            agent_trace.turns.append(turn_record)
 
-                # Send message and BLOCK until agent finishes
-                turn_outcome = await agent_backend.run_turn(
-                    prompt_text=prompt_text,
-                    timeout=turn_timeout_seconds,
-                    remaining_parts_budget=per_call_parts_budget,
-                    on_stream_part=stream_part_cb,
-                )
-                part_count = stream_part_counter[0]
-                git_commit = stream_git_commit_ref[0]
+            stream_part_counter: list[int] = [part_count]
+            stream_git_commit_ref: list[str | None] = [git_commit]
+            stream_last_part_ts_ref: list[int | None] = [None]
+            stream_part_cb = make_stream_part_callback(
+                sandbox=sandbox,
+                trajectory_id=trajectory_id,
+                agent_trace=agent_trace,
+                tracker=tracker,
+                environment=environment,
+                task_params=task_params_loaded,
+                agent_name=agent_name,
+                resolved_model=resolved_model,
+                effective_max_parts=max_parts,
+                part_counter=stream_part_counter,
+                git_commit_ref=stream_git_commit_ref,
+                last_part_timestamp_ms_ref=stream_last_part_ts_ref,
+                turn_record=turn_record,
+                session_id=session_id,
+                schedule_commit_evaluation=evaluator.schedule,
+            )
 
-                if turn_outcome is None:
-                    if turn_record is not None and not turn_record.parts:
-                        agent_trace.turns.pop()
-                    consecutive_turn_failures += 1
-                    print(
-                        "[progress] no response from agent "
-                        f"(recovery {consecutive_turn_failures}/{TURN_RECOVERY_RETRIES})"
-                    )
-                    await dump_sandbox_logs(sb, agent=agent)
-                    if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
-                        recovered_session_id = (
-                            await agent_backend.recover_session(
-                                trajectory_id,
-                                consecutive_turn_failures,
-                            )
-                        )
-                        if recovered_session_id:
-                            session_id = recovered_session_id
-                            agent_trace.session_id = recovered_session_id
-                            save_trace_parquet(
-                                trajectory_id, agent_trace,
-                                environment=environment,
-                                task_params=task_params_loaded,
-                            )
-                            prompt_text = _followup()
-                            continue
-                    end_reason = "agent_error"
-                    break
-                consecutive_turn_failures = 0
-                agent_backend.on_turn_complete(turn_outcome)
+            turn_outcome = await agent_backend.run_turn(
+                prompt_text=prompt_text,
+                timeout=turn_timeout_seconds,
+                remaining_parts_budget=remaining_parts,
+                on_stream_part=stream_part_cb,
+            )
+            part_count = stream_part_counter[0]
+            git_commit = stream_git_commit_ref[0]
 
-                response = turn_outcome.response
-                session_id = turn_outcome.session_id
-                if agent_trace.session_id != session_id:
-                    agent_trace.session_id = session_id
-
-                # Log what the agent did
-                info = response.get("info", {})
-                parts = response.get("parts", [])
-                response_message_id = info.get("id")
-                print(f"[progress] response id={response_message_id} parts={len(parts)}")
-                log_message_parts(response)
-
-                session_ids = turn_outcome.session_ids
-                session_objects = turn_outcome.session_objects
-                new_messages = turn_outcome.new_messages
-                print(f"[progress] new_messages={len(new_messages)} sessions={len(session_ids)}")
-                if turn_record is not None:
-                    turn_record.session_ids = session_ids
-                    turn_record.session_objects = session_objects
-                    turn_record.new_messages = new_messages
-                    turn_record.token_usage = extract_turn_token_usage(response, new_messages)
-
-                # Extract envoi calls from newly observed messages only.
-                new_envoi_calls: list[EnvoiCall] = []
-                for msg in new_messages:
-                    msg_parts = msg.get("parts", [])
-                    if isinstance(msg_parts, list):
-                        new_envoi_calls.extend(extract_envoi_calls(msg_parts))
-
-                tracker.update(new_envoi_calls)
-                for call in new_envoi_calls:
-                    if (
-                        call.result
-                        and call.result.total > 0
-                        and call.result.passed == call.result.total
-                    ):
-                        passing.add(call.path)
-
-                stream_meta = response.get("_stream", {}) if isinstance(response, dict) else {}
-                stream_meta_obj = stream_meta if isinstance(stream_meta, dict) else {}
-                streamed_parts = int(stream_meta_obj.get("meaningful_parts_seen", 0) or 0)
-                part_limit_abort = bool(stream_meta_obj.get("aborted_for_part_limit"))
-                observed_parts = count_meaningful_parts(new_messages)
-
-                new_parts = part_count - previous_part_count
-                if turn_record is not None:
-                    turn_record.session_id = session_id
-                    for record in turn_record.parts:
-                        record.session_id = session_id
-                    if turn_record.parts:
-                        last_part_record = turn_record.parts[-1]
-                        existing_keys = {
-                            tracker._call_key(call) for call in last_part_record.envoi_calls
-                        }
-                        for call in new_envoi_calls:
-                            key = tracker._call_key(call)
-                            if key not in existing_keys:
-                                last_part_record.envoi_calls.append(call)
-                                existing_keys.add(key)
-                        last_part_record.testing_state = tracker.snapshot()
-                        if turn_record.git_commit is None:
-                            turn_record.git_commit = last_part_record.git_commit
-                    else:
-                        turn_record.git_commit = git_commit
-                save_trace_parquet(
-                    trajectory_id, agent_trace,
-                    environment=environment,
-                    task_params=task_params_loaded,
-                )
-
-                if evaluation_tasks:
-                    print("[eval] waiting for pending commit evaluations before next turn")
-                    await _wait_for_evaluations()
-
-                solved_count = len(passing)
-                total_count = len(required)
+            if turn_outcome is None:
+                if turn_record is not None and not turn_record.parts:
+                    agent_trace.turns.pop()
+                consecutive_turn_failures += 1
                 print(
-                    f"[progress] turn={turn_count} commit={git_commit} "
-                    f"parts=+{new_parts} total={part_count}/{effective_max_parts} "
-                    f"(observed_parts={observed_parts} streamed_parts={streamed_parts}) "
-                    f"envoi_calls={len(new_envoi_calls)} "
-                    f"solved={solved_count}/{total_count} "
-                    f"started={turn_started_at}"
+                    "[progress] no response from agent "
+                    f"(recovery {consecutive_turn_failures}"
+                    f"/{TURN_RECOVERY_RETRIES})"
                 )
-
-                if required and passing >= required:
-                    end_reason = "solved"
-                    break
-
-                if part_limit_abort and part_count >= effective_max_parts:
-                    end_reason = "part_limit"
-                    break
-
-                if part_count >= effective_max_parts:
-                    end_reason = "part_limit"
-                    break
-
-                # Build re-injection prompt for next turn
-                prompt_text = _followup()
-
-            if end_reason is None:
-                end_reason = "part_limit"
-
-        except Exception as loop_err:
-            print(f"[error] crash during main loop: {loop_err}")
-            await dump_sandbox_logs(sb, agent=agent)
-            end_reason = "agent_error"
-            # Save whatever messages we have
-            try:
-                if (
-                    agent_backend.name == "opencode"
-                    and hasattr(
-                        agent_backend,
-                        "_collect_turn_messages",
-                    )
-                ):
-                    _, _, crash_new_messages = (
-                        await agent_backend._collect_turn_messages(
-                            session_id,
+                await dump_sandbox_logs(
+                    sandbox, agent=agent_backend,
+                )
+                if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
+                    recovered_session_id = (
+                        await agent_backend.recover_session(
+                            trajectory_id,
+                            consecutive_turn_failures,
                         )
                     )
+                    if recovered_session_id:
+                        session_id = recovered_session_id
+                        agent_trace.session_id = (
+                            recovered_session_id
+                        )
+                        save_trace_parquet(
+                            trajectory_id, agent_trace,
+                            environment=environment,
+                            task_params=task_params_loaded,
+                        )
+                        prompt_text = build_followup_prompt(
+                            tracker,
+                        )
+                        continue
+                end_reason = "agent_error"
+                break
+            consecutive_turn_failures = 0
+            agent_backend.on_turn_complete(turn_outcome)
+
+            response = turn_outcome.response
+            session_id = turn_outcome.session_id
+            if agent_trace.session_id != session_id:
+                agent_trace.session_id = session_id
+
+            info = response.get("info", {})
+            parts = response.get("parts", [])
+            response_message_id = info.get("id")
+            print(
+                f"[progress] response "
+                f"id={response_message_id} "
+                f"parts={len(parts)}"
+            )
+            log_message_parts(response)
+
+            session_ids = turn_outcome.session_ids
+            session_objects = turn_outcome.session_objects
+            new_messages = turn_outcome.new_messages
+            print(
+                f"[progress] new_messages="
+                f"{len(new_messages)} "
+                f"sessions={len(session_ids)}"
+            )
+            if turn_record is not None:
+                turn_record.session_ids = session_ids
+                turn_record.session_objects = session_objects
+                turn_record.new_messages = new_messages
+                turn_record.token_usage = (
+                    extract_turn_token_usage(
+                        response, new_messages,
+                    )
+                )
+
+            new_envoi_calls: list[EnvoiCall] = []
+            for msg in new_messages:
+                msg_parts = msg.get("parts", [])
+                if isinstance(msg_parts, list):
+                    new_envoi_calls.extend(
+                        extract_envoi_calls(msg_parts),
+                    )
+
+            tracker.update(new_envoi_calls)
+            for call in new_envoi_calls:
+                if (
+                    call.result
+                    and call.result.total > 0
+                    and call.result.passed == call.result.total
+                ):
+                    passing.add(call.path)
+
+            stream_meta = (
+                response.get("_stream", {})
+                if isinstance(response, dict)
+                else {}
+            )
+            stream_meta_obj = (
+                stream_meta
+                if isinstance(stream_meta, dict)
+                else {}
+            )
+            streamed_parts = int(
+                stream_meta_obj.get(
+                    "meaningful_parts_seen", 0,
+                )
+                or 0
+            )
+            observed_parts = count_meaningful_parts(
+                new_messages,
+            )
+
+            new_parts = part_count - previous_part_count
+            if turn_record is not None:
+                turn_record.session_id = session_id
+                for record in turn_record.parts:
+                    record.session_id = session_id
+                if turn_record.parts:
+                    last_part_record = turn_record.parts[-1]
+                    existing_keys = {
+                        tracker.call_key(call)
+                        for call in last_part_record.envoi_calls
+                    }
+                    for call in new_envoi_calls:
+                        key = tracker.call_key(call)
+                        if key not in existing_keys:
+                            last_part_record.envoi_calls.append(
+                                call,
+                            )
+                            existing_keys.add(key)
+                    last_part_record.testing_state = (
+                        tracker.snapshot()
+                    )
+                    if turn_record.git_commit is None:
+                        turn_record.git_commit = (
+                            last_part_record.git_commit
+                        )
                 else:
-                    crash_new_messages = []
-                if crash_new_messages:
+                    turn_record.git_commit = git_commit
+            save_trace_parquet(
+                trajectory_id, agent_trace,
+                environment=environment,
+                task_params=task_params_loaded,
+            )
+
+            if evaluator.has_pending:
+                print(
+                    "[eval] waiting for pending commit "
+                    "evaluations before next turn"
+                )
+                await evaluator.wait()
+
+            solved_count = len(passing)
+            total_count = len(required)
+            print(
+                f"[progress] turn={turn_count} "
+                f"commit={git_commit} "
+                f"parts=+{new_parts} "
+                f"total={part_count}/{max_parts} "
+                f"(observed_parts={observed_parts} "
+                f"streamed_parts={streamed_parts}) "
+                f"envoi_calls={len(new_envoi_calls)} "
+                f"solved={solved_count}/{total_count} "
+                f"started={turn_started_at}"
+            )
+
+            if required and passing >= required:
+                end_reason = "solved"
+                break
+
+            if part_count >= max_parts:
+                end_reason = "part_limit"
+                break
+
+            prompt_text = build_followup_prompt(tracker)
+
+        if end_reason == "agent_error":
+            end_reason = "part_limit"
+
+    except Exception as exc:
+        print(f"[error] {exc}")
+        if sandbox and agent_backend:
+            await dump_sandbox_logs(
+                sandbox, agent=agent_backend,
+            )
+        end_reason = "agent_error"
+        # Crash recovery via protocol (no name checks)
+        try:
+            if (
+                agent_trace is not None
+                and agent_backend is not None
+                and session_id
+            ):
+                crash_messages = (
+                    await agent_backend.collect_crash_messages(
+                        session_id,
+                    )
+                )
+                if crash_messages:
                     crash_record = TurnRecord(
                         trajectory_id=trajectory_id,
                         session_id=session_id,
-                        agent=agent,
+                        agent=agent_name,
                         turn=turn_count + 1,
                         part_start=part_count + 1,
                         part_end=part_count,
                         timestamp=datetime.now(UTC).isoformat(),
                         agent_model=resolved_model,
-                        prompt=prompt_text,
-                        git_commit=await get_git_commit(sb),
+                        prompt=prompt_text or "",
+                        git_commit=(
+                            await get_git_commit(sandbox)
+                            if sandbox
+                            else None
+                        ),
                         parts=[],
                     )
                     agent_trace.turns.append(crash_record)
@@ -1245,46 +1161,38 @@ async def _run_trajectory_impl(
                         environment=environment,
                         task_params=task_params_loaded,
                     )
-                    print(f"[error] saved {len(crash_new_messages)} new messages before crash")
-            except Exception:
-                print("[error] could not save crash messages")
+                    print(
+                        f"[error] saved {len(crash_messages)} "
+                        "new messages before crash"
+                    )
+        except Exception:
+            print("[error] could not save crash messages")
 
-        # Always end the session and save final state
-        if wait_for_evaluations_fn is not None:
-            await wait_for_evaluations_fn()
-        await end_session(
-            sb,
-            agent_trace,
-            part_count,
-            turn_count,
-            end_reason,
-            environment=environment,
-            task_params=task_params_loaded,
-        )
-        return trajectory_id
-
-    except Exception as e:
-        print(f"[error] {e}")
-        if sb is not None and agent_trace is not None:
+    finally:
+        if evaluator is not None:
             try:
-                if wait_for_evaluations_fn is not None:
-                    await wait_for_evaluations_fn()
+                await evaluator.wait()
+            except Exception:
+                pass
+        if sandbox is not None and agent_trace is not None:
+            try:
                 await end_session(
-                    sb,
+                    sandbox,
                     agent_trace,
                     part_count,
                     turn_count,
-                    "agent_error",
+                    end_reason,
                     environment=environment,
                     task_params=task_params_loaded,
                 )
             except Exception as end_err:
-                print(f"[error] failed to finalize session after exception: {end_err}")
-        return trajectory_id
-    finally:
-        if sb is not None:
+                print(
+                    "[error] failed to finalize session: "
+                    f"{end_err}"
+                )
+        if sandbox is not None:
             try:
-                await sb.terminate()
+                await sandbox.terminate()
             except Exception:
                 pass
 
@@ -1309,7 +1217,7 @@ async def run_trajectory(
     task_dir: str = "",
     environment_dir: str = "",
 ) -> str:
-    return await _run_trajectory_impl(
+    return await run_trajectory_impl(
         agent=agent,
         model=model,
         max_parts=max_parts,
@@ -1344,7 +1252,7 @@ async def run_trajectory_non_preemptible(
     task_dir: str = "",
     environment_dir: str = "",
 ) -> str:
-    return await _run_trajectory_impl(
+    return await run_trajectory_impl(
         agent=agent,
         model=model,
         max_parts=max_parts,
@@ -1384,12 +1292,25 @@ async def main(
 ) -> None:
     normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
     codex_auth_json_b64: str | None = None
-    if normalized_agent == "codex" and codex_auth_file.strip():
-        codex_auth_json_b64 = load_local_codex_auth_json_b64(codex_auth_file.strip())
+    agent_cls = AGENT_BACKENDS.get(normalized_agent)
+    if (
+        agent_cls is not None
+        and hasattr(agent_cls, "load_local_auth_b64")
+        and codex_auth_file.strip()
+    ):
+        codex_auth_json_b64 = agent_cls.load_local_auth_b64(
+            codex_auth_file.strip(),
+        )
         if codex_auth_json_b64:
-            print(f"[auth] loaded codex auth from {Path(codex_auth_file).expanduser()}")
+            print(
+                f"[auth] loaded auth from "
+                f"{Path(codex_auth_file).expanduser()}"
+            )
         else:
-            print(f"[auth] no codex auth file found at {Path(codex_auth_file).expanduser()}")
+            print(
+                f"[auth] no auth file found at "
+                f"{Path(codex_auth_file).expanduser()}"
+            )
 
     runner = get_non_preemptible_runner() if non_preemptible else run_trajectory
     try:
@@ -1419,40 +1340,54 @@ async def main(
 
 
 if __name__ == "__main__":
-    import argparse as _ap
+    import argparse as direct_ap
 
     from dotenv import load_dotenv
 
     load_dotenv()
 
-    _parser = _ap.ArgumentParser(description="Run trajectory directly (non-Modal).")
-    _parser.add_argument("--agent", default=DEFAULT_AGENT)
-    _parser.add_argument("--model", default=None)
-    _parser.add_argument("--max-parts", type=int, default=1000)
-    _parser.add_argument("--sandbox-provider", default="modal")
-    _parser.add_argument("--trajectory-id", default=None)
-    _parser.add_argument(
-        "--message-timeout-seconds", type=int, default=MESSAGE_TIMEOUT_SECONDS
+    parser = direct_ap.ArgumentParser(
+        description="Run trajectory directly (non-Modal).",
     )
-    _parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
-    _parser.add_argument("--task-dir", required=True)
-    _parser.add_argument("--environment-dir", required=True)
-    _args = _parser.parse_args()
+    parser.add_argument("--agent", default=DEFAULT_AGENT)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--max-parts", type=int, default=1000)
+    parser.add_argument("--sandbox-provider", default="modal")
+    parser.add_argument("--trajectory-id", default=None)
+    parser.add_argument(
+        "--message-timeout-seconds",
+        type=int,
+        default=MESSAGE_TIMEOUT_SECONDS,
+    )
+    parser.add_argument(
+        "--codex-auth-file", default="~/.codex/auth.json",
+    )
+    parser.add_argument("--task-dir", required=True)
+    parser.add_argument("--environment-dir", required=True)
+    args = parser.parse_args()
 
-    _codex_auth_json_b64: str | None = None
-    if (_args.agent or DEFAULT_AGENT).strip().lower() == "codex" and _args.codex_auth_file:
-        _codex_auth_json_b64 = load_local_codex_auth_json_b64(_args.codex_auth_file.strip())
+    codex_auth_b64: str | None = None
+    agent_name_raw = (args.agent or DEFAULT_AGENT).strip().lower()
+    cls = AGENT_BACKENDS.get(agent_name_raw)
+    if (
+        cls is not None
+        and hasattr(cls, "load_local_auth_b64")
+        and args.codex_auth_file
+    ):
+        codex_auth_b64 = cls.load_local_auth_b64(
+            args.codex_auth_file.strip(),
+        )
 
     asyncio.run(
-        _run_trajectory_impl(
-            agent=_args.agent,
-            model=_args.model,
-            max_parts=_args.max_parts,
-            message_timeout_seconds=_args.message_timeout_seconds,
-            trajectory_id=_args.trajectory_id,
-            codex_auth_json_b64=_codex_auth_json_b64,
-            sandbox_provider=_args.sandbox_provider,
-            task_dir=_args.task_dir,
-            environment_dir=_args.environment_dir,
+        run_trajectory_impl(
+            agent=args.agent,
+            model=args.model,
+            max_parts=args.max_parts,
+            message_timeout_seconds=args.message_timeout_seconds,
+            trajectory_id=args.trajectory_id,
+            codex_auth_json_b64=codex_auth_b64,
+            sandbox_provider=args.sandbox_provider,
+            task_dir=args.task_dir,
+            environment_dir=args.environment_dir,
         )
     )

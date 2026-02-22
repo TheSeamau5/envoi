@@ -1,11 +1,12 @@
-"""AgentBackend Protocol — the interface every agent must implement.
+"""Agent Protocol — the interface every agent must implement.
 
 The orchestrator (runner.py) never talks to an LLM directly. It calls methods
-on an AgentBackend: start() to provision the agent inside a sandbox, run_turn()
+on an Agent: setup() to provision the agent inside a sandbox, run_turn()
 to execute one prompt/response cycle, and stop() to tear down. Each agent
 implementation (Codex, OpenCode) handles the LLM-specific details internally.
 
-Also defines AgentTurnOutcome, the structured return value from run_turn().
+Also defines AgentTurnOutcome, Pydantic config models, and
+SandboxImageRequirements.
 """
 
 from __future__ import annotations
@@ -15,7 +16,45 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
+
+# --- Pydantic config models ---
+
+
+class AgentCredentials(BaseModel):
+    """Base credential container. Agents subclass to add their own fields."""
+
+    api_key: str = ""
+
+
+class AgentSetupContext(BaseModel):
+    """Everything an agent needs for sandbox provisioning.
+
+    The runner builds this once and passes it to agent.setup(). The agent
+    reads what it needs and ignores the rest.
+    """
+
+    model: str
+    credentials: AgentCredentials
+    setup_script: str = ""
+    env_files: (
+        tuple[dict[str, str], dict[str, str], dict[str, str]] | None
+    ) = None
+    mcp_server_content: str = ""
+    workspace_gitignore: str = ""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class SandboxImageRequirements(BaseModel):
+    """Declarative image needs that an agent layers onto the environment image."""
+
+    apt_packages: list[str] = Field(default_factory=list)
+    pip_packages: list[str] = Field(default_factory=list)
+    build_commands: list[str] = Field(default_factory=list)
+
+
+# --- Turn outcome ---
 
 
 class AgentTurnOutcome(BaseModel):
@@ -30,8 +69,11 @@ class AgentTurnOutcome(BaseModel):
     )
 
 
+# --- Protocol ---
+
+
 @runtime_checkable
-class AgentBackend(Protocol):
+class Agent(Protocol):
     """Abstraction over a coding agent running inside a sandbox."""
 
     @property
@@ -44,20 +86,51 @@ class AgentBackend(Protocol):
         """Current session ID, or None before create_session."""
         ...
 
-    async def start(
+    @property
+    def log_files(self) -> list[str]:
+        """Absolute paths to log files this agent writes inside the sandbox."""
+        ...
+
+    @staticmethod
+    def resolve_credentials(
+        codex_auth_json_b64: str | None = None,
+    ) -> AgentCredentials:
+        """Resolve credentials from environment variables."""
+        ...
+
+    @staticmethod
+    def resolve_model(model: str | None) -> str:
+        """Return the effective model string, applying agent-specific defaults."""
+        ...
+
+    @staticmethod
+    def image_requirements() -> SandboxImageRequirements:
+        """Declare additional image layers this agent needs beyond
+        what the environment Dockerfile provides."""
+        ...
+
+    def compute_turn_timeout(
         self,
         *,
-        sb: SandboxBackend,
-        model: str,
-        api_key: str,
-        setup_script: str = "",
-        env_files: (
-            tuple[dict[str, str], dict[str, str], dict[str, str]]
-            | None
-        ) = None,
-        **kwargs: Any,
+        remaining_parts: int,
+        remaining_run_seconds: float,
+        message_timeout_seconds: int,
+    ) -> int:
+        """Compute the timeout for the next turn."""
+        ...
+
+    async def setup(
+        self,
+        sandbox: Sandbox,
+        ctx: AgentSetupContext,
     ) -> None:
-        """Provision the agent inside the sandbox."""
+        """Provision this agent inside the sandbox.
+
+        Uploads client scripts, config files, credentials, environment
+        files. Runs the environment setup. Installs agent binaries and
+        starts agent servers. After this returns, the agent is ready
+        for create_session().
+        """
         ...
 
     async def create_session(
@@ -100,6 +173,17 @@ class AgentBackend(Protocol):
         attempt: int,
     ) -> str:
         """Create a recovery session after a turn failure."""
+        ...
+
+    async def collect_crash_messages(
+        self,
+        session_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Attempt to recover messages after a crash.
+
+        Returns a list of message dicts if the agent supports post-crash
+        message collection, or None if it does not.
+        """
         ...
 
     async def stop(self) -> None:

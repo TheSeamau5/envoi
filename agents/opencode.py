@@ -5,7 +5,7 @@ This module has two roles:
 1. As a script running inside the sandbox: starts the OpenCode server, uses the
    AsyncOpencode client to create sessions and send messages, and emits
    TRACE_EVENT lines on stderr for each part.
-2. As the OpenCodeAgent class implementing AgentBackend: uploads itself into the
+2. As the OpenCodeAgent class implementing Agent: uploads itself into the
    sandbox, manages the OpenCode config, and translates turn results for runner.py.
 
 Also exports OPENCODE_CONFIG_TEMPLATE, the JSON config that gets written to
@@ -234,7 +234,7 @@ def event_session_id(event: dict[str, Any]) -> str | None:
     return None
 
 
-def _tool_detail(tool: str, state: Any) -> str:
+def tool_detail(tool: str, state: Any) -> str:
     """Extract a short detail string from tool input."""
     if not isinstance(state, dict):
         return ""
@@ -279,7 +279,7 @@ def summarize_event(event: dict[str, Any]) -> str | None:
             # Only show completed (skip pending/running noise)
             if status != "completed":
                 return None
-            detail = _tool_detail(tool, state)
+            detail = tool_detail(tool, state)
             if detail:
                 return f"[tool] {tool}: {detail}"
             return f"[tool] {tool}"
@@ -884,29 +884,166 @@ if __name__ == "__main__":
 
 
 # -------------------------------------------------------------------
-# OpenCodeAgent: AgentBackend implementation (runner-side only)
+# OpenCodeAgent: Agent implementation (runner-side only)
 # -------------------------------------------------------------------
 # The code below is only executed when imported by runner.py, never
 # when this file runs as a standalone sandbox script.
 
 try:
-    import builtins as _builtins
+    import builtins
 
-    from agents.base import AgentTurnOutcome as _AgentTurnOutcome
-    from sandbox.base import SandboxBackend as _SandboxBackend
-    from utils.helpers import run_sandbox_client as _run_sandbox_client
-    from utils.parsing import (
-        agent_message_id as _agent_message_id,
+    from agents.base import (
+        AgentCredentials,
+        AgentSetupContext,
+        AgentTurnOutcome,
+        SandboxImageRequirements,
     )
-    from utils.parsing import (
-        parse_trace_event_line as _parse_trace_event_line,
+    from agents.setup import run_task_setup, run_workspace_init
+    from sandbox.base import Sandbox
+    from utils.helpers import (
+        compute_turn_timeout_seconds,
+        run_sandbox_client,
+        upload_files_parallel,
     )
+    from utils.parsing import agent_message_id, parse_trace_event_line
 
-    _OPENCODE_SCRIPT = "/sandbox/opencode_client.py"
-    _OPENCODE_LABEL = "opencode-sdk"
+    OPENCODE_SCRIPT = "/sandbox/opencode_client.py"
+    OPENCODE_LABEL = "opencode-sdk"
+    DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
+
+    OPENCODE_INSTALL_SCRIPT = """\
+set -euo pipefail
+export PATH="$HOME/.cargo/bin:$PATH"
+
+echo "[setup] installing NodeSource repository setup"
+bash -lc "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
+echo "[setup] installing nodejs"
+apt-get install -y -qq nodejs
+echo "[setup] installing OpenCode CLI"
+bash -lc "curl -fsSL https://opencode.ai/install | bash"
+
+OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+if [ ! -f "$OPENCODE_BIN" ]; then
+    echo "[setup] ERROR: expected OpenCode binary missing at ${OPENCODE_BIN}"
+    find / -name opencode -type f 2>/dev/null || true
+    exit 1
+fi
+echo "[setup] opencode install complete"
+"""
+
+    OPENCODE_START_SERVER_SCRIPT = """\
+set -euo pipefail
+
+if [ ! -f /tmp/upload/opencode_api_key.txt ]; then
+    echo "[setup] ERROR: /tmp/upload/opencode_api_key.txt not found"
+    exit 1
+fi
+OPENCODE_API_KEY="$(cat /tmp/upload/opencode_api_key.txt)"
+
+OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+echo "[setup] starting OpenCode server on :4096"
+cd /workspace
+OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+OPENCODE_CONFIG="/workspace/opencode.jsonc" \
+    "$OPENCODE_BIN" serve --port 4096 --hostname 0.0.0.0 > /tmp/opencode.log 2>&1 &
+OPENCODE_PID=$!
+echo "$OPENCODE_PID" > /tmp/opencode.pid
+echo "[setup] OpenCode process started (pid=${OPENCODE_PID})"
+
+# Wait for OpenCode server
+for i in $(seq 1 120); do
+    if curl -sf http://localhost:4096/global/health >/dev/null 2>&1; then
+        echo "[setup] opencode ready"
+        break
+    fi
+    if [ $((i % 5)) -eq 0 ]; then
+        echo "[setup] still waiting for opencode (${i}s)"
+    fi
+    sleep 1
+done
+curl -sf http://localhost:4096/global/health >/dev/null 2>&1 || {
+    echo "[setup] ERROR: timeout waiting for opencode"
+    exit 1
+}
+echo "[setup] setup complete: envoi=:8000 opencode=:4096"
+"""
+
+    # Module-level helpers for session tree walking
+
+    def session_object_id(
+        session: dict[str, Any],
+    ) -> str | None:
+        for key in ("id", "sessionID", "session_id"):
+            value = session.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def session_object_parent_id(
+        session: dict[str, Any],
+    ) -> str | None:
+        for key in (
+            "parentID",
+            "parent_id",
+            "parentId",
+        ):
+            value = session.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    def get_session_family(
+        root_session_id: str,
+        sessions: list[dict[str, Any]],
+    ) -> list[str]:
+        known_ids = {
+            sid
+            for s in sessions
+            if isinstance(s, dict)
+            if (sid := session_object_id(s))
+        }
+        if root_session_id not in known_ids:
+            return [root_session_id]
+
+        children_by_parent: dict[str, list[str]] = {}
+        for s in sessions:
+            if not isinstance(s, dict):
+                continue
+            sid = session_object_id(s)
+            parent_id = session_object_parent_id(s)
+            if sid and parent_id:
+                children_by_parent.setdefault(
+                    parent_id, [],
+                ).append(sid)
+
+        family: list[str] = []
+        queue = [root_session_id]
+        seen: set[str] = set()
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            family.append(current)
+            queue.extend(
+                children_by_parent.get(current, []),
+            )
+        return family
+
+    def message_created_ms(
+        message: dict[str, Any],
+    ) -> int:
+        info = message.get("info", {})
+        time_info = info.get("time", {})
+        created = time_info.get("created")
+        return (
+            int(created)
+            if isinstance(created, int)
+            else 0
+        )
 
     class OpenCodeAgent:
-        """AgentBackend implementation for OpenCode."""
+        """Agent implementation for OpenCode."""
 
         @property
         def name(self) -> str:
@@ -914,18 +1051,62 @@ try:
 
         @property
         def session_id(self) -> str | None:
-            return self._session_id
+            return self.current_session_id
+
+        @property
+        def log_files(self) -> list[str]:
+            return ["/tmp/opencode.log", "/tmp/envoi.log"]
 
         def __init__(self) -> None:
-            self._sb: _SandboxBackend | None = None
-            self._model: str = ""
-            self._api_key: str = ""
-            self._session_id: str | None = None
-            self._seen_message_ids: set[str] = set()
+            self.sandbox: Sandbox | None = None
+            self.agent_model: str = ""
+            self.api_key: str = ""
+            self.current_session_id: str | None = None
+            self.seen_message_ids: set[str] = set()
 
-        # -- helpers ------------------------------------------------
+        # -- static methods -----------------------------------------
 
-        async def _run_client(
+        @staticmethod
+        def resolve_credentials(
+            codex_auth_json_b64: str | None = None,
+        ) -> AgentCredentials:
+            """Resolve OpenCode credentials from env vars."""
+            api_key = os.environ.get(
+                "OPENCODE_API_KEY", "",
+            ).strip()
+            if not api_key:
+                raise RuntimeError("OPENCODE_API_KEY not set")
+            return AgentCredentials(api_key=api_key)
+
+        @staticmethod
+        def resolve_model(model: str | None) -> str:
+            raw = model or DEFAULT_OPENCODE_MODEL
+            if "/" in raw:
+                return raw
+            return f"opencode/{raw}"
+
+        @staticmethod
+        def image_requirements() -> SandboxImageRequirements:
+            return SandboxImageRequirements(
+                pip_packages=["opencode-ai>=0.1.0a36"],
+            )
+
+        # -- instance methods ----------------------------------------
+
+        def compute_turn_timeout(
+            self,
+            *,
+            remaining_parts: int,
+            remaining_run_seconds: float,
+            message_timeout_seconds: int,
+        ) -> int:
+            return compute_turn_timeout_seconds(
+                remaining_parts=remaining_parts,
+                remaining_run_seconds=remaining_run_seconds,
+                message_timeout_seconds=message_timeout_seconds,
+            )
+
+        async def run_client(
             self,
             args: list[str],
             *,
@@ -934,11 +1115,11 @@ try:
             stream_output: bool = False,
             on_stderr_line=None,
         ) -> dict[str, Any] | None:
-            assert self._sb is not None
-            return await _run_sandbox_client(
-                self._sb,
-                _OPENCODE_SCRIPT,
-                _OPENCODE_LABEL,
+            assert self.sandbox is not None
+            return await run_sandbox_client(
+                self.sandbox,
+                OPENCODE_SCRIPT,
+                OPENCODE_LABEL,
                 args,
                 timeout=timeout,
                 quiet=quiet,
@@ -948,24 +1129,110 @@ try:
 
         # -- protocol methods ---------------------------------------
 
-        async def start(
+        async def setup(
             self,
-            *,
-            sb: _SandboxBackend,
-            model: str,
-            api_key: str,
-            setup_script: str = "",
-            env_files=None,
-            **kwargs: Any,
+            sandbox: Sandbox,
+            ctx: AgentSetupContext,
         ) -> None:
-            self._sb = sb
-            self._model = model
-            self._api_key = api_key
-            await self._ensure_provider_connected()
+            self.sandbox = sandbox
+            self.agent_model = ctx.model
+            self.api_key = ctx.credentials.api_key
 
-        async def _ensure_provider_connected(self) -> None:
-            assert self._sb is not None
-            response = await self._run_client(
+            builtins.print(
+                f"[setup] agent=opencode model={ctx.model}",
+                flush=True,
+            )
+            config = OPENCODE_CONFIG_TEMPLATE.replace(
+                "MODEL_PLACEHOLDER", ctx.model,
+            )
+            setup_uploads: list[tuple[str, str]] = [
+                ("/tmp/upload/task_setup.sh", ctx.setup_script),
+                ("/sandbox/mcp_server.py", ctx.mcp_server_content),
+                (
+                    "/sandbox/opencode_client.py",
+                    OPENCODE_CLIENT_CONTENT,
+                ),
+                (
+                    "/tmp/upload/opencode_api_key.txt",
+                    self.api_key,
+                ),
+                ("/workspace/opencode.jsonc", config),
+                (
+                    "/workspace/.gitignore",
+                    ctx.workspace_gitignore,
+                ),
+            ]
+
+            await upload_files_parallel(
+                sandbox, setup_uploads, log_upload=True,
+            )
+
+            if ctx.env_files:
+                from utils.helpers import environment_upload_items
+
+                py, c, txt = ctx.env_files
+                await upload_files_parallel(
+                    sandbox,
+                    environment_upload_items(py, c, txt),
+                    log_upload=True,
+                )
+                builtins.print(
+                    f"[setup] uploaded {len(py)} py, "
+                    f"{len(c)} c, {len(txt)} txt files",
+                    flush=True,
+                )
+
+            await run_task_setup(sandbox)
+            await run_workspace_init(sandbox)
+
+            # Install opencode binary
+            await sandbox.write_file(
+                "/tmp/opencode_install.sh",
+                OPENCODE_INSTALL_SCRIPT,
+                ensure_dir=False,
+            )
+
+            async def handle_line(line: str) -> None:
+                stripped = line.strip()
+                if stripped and stripped.startswith("[setup]"):
+                    builtins.print(stripped, flush=True)
+
+            result = await sandbox.run(
+                "bash /tmp/opencode_install.sh",
+                timeout=300,
+                on_stdout_line=handle_line,
+                on_stderr_line=handle_line,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    "OpenCode install failed "
+                    f"(exit {result.exit_code})"
+                )
+
+            # Start opencode server
+            await sandbox.write_file(
+                "/tmp/opencode_start.sh",
+                OPENCODE_START_SERVER_SCRIPT,
+                ensure_dir=False,
+            )
+            result = await sandbox.run(
+                "bash /tmp/opencode_start.sh",
+                timeout=300,
+                on_stdout_line=handle_line,
+                on_stderr_line=handle_line,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    "OpenCode server start failed "
+                    f"(exit {result.exit_code})"
+                )
+
+            # Ensure provider is connected
+            await self.ensure_provider_connected()
+
+        async def ensure_provider_connected(self) -> None:
+            assert self.sandbox is not None
+            response = await self.run_client(
                 ["provider-status"],
                 timeout=30,
                 quiet=True,
@@ -978,7 +1245,7 @@ try:
                 connected = response["body"].get(
                     "connected", [],
                 )
-                _builtins.print(
+                builtins.print(
                     f"[provider] connected={connected}",
                     flush=True,
                 )
@@ -988,18 +1255,18 @@ try:
                 ):
                     return
 
-            _builtins.print(
+            builtins.print(
                 "[provider] opencode not connected, "
                 "setting auth...",
                 flush=True,
             )
             api_key_path = "/tmp/auth_opencode_api_key.txt"
-            await self._sb.write_file(
+            await self.sandbox.write_file(
                 api_key_path,
-                self._api_key,
+                self.api_key,
                 ensure_dir=False,
             )
-            auth_response = await self._run_client(
+            auth_response = await self.run_client(
                 [
                     "provider-auth",
                     "--api-key-file",
@@ -1020,9 +1287,9 @@ try:
             self,
             trajectory_id: str,
         ) -> str:
-            assert self._sb is not None
+            assert self.sandbox is not None
             title = f"trajectory-{trajectory_id}"
-            response = await self._run_client(
+            response = await self.run_client(
                 ["create-session", "--title", title],
                 timeout=60,
             )
@@ -1041,18 +1308,18 @@ try:
                 if isinstance(body, dict)
                 else None
             )
-            _builtins.print(
+            builtins.print(
                 f"[session] created id={sid}", flush=True,
             )
-            self._session_id = sid or ""
-            return self._session_id
+            self.current_session_id = sid or ""
+            return self.current_session_id
 
-        async def _get_all_messages(
+        async def get_all_messages(
             self,
             session_id: str,
         ) -> list[dict[str, Any]]:
-            assert self._sb is not None
-            response = await self._run_client(
+            assert self.sandbox is not None
+            response = await self.run_client(
                 [
                     "list-messages",
                     "--session-id",
@@ -1078,11 +1345,11 @@ try:
                         return value
             return []
 
-        async def _get_all_sessions(
+        async def get_all_sessions(
             self,
         ) -> list[dict[str, Any]]:
-            assert self._sb is not None
-            response = await self._run_client(
+            assert self.sandbox is not None
+            response = await self.run_client(
                 ["list-sessions"], timeout=60, quiet=True,
             )
             if response is None or not response.get("ok"):
@@ -1102,7 +1369,7 @@ try:
                         return value
             return []
 
-        async def _collect_turn_messages(
+        async def collect_turn_messages(
             self,
             root_session_id: str,
         ) -> tuple[
@@ -1110,21 +1377,21 @@ try:
             list[str],
             list[dict[str, Any]],
         ]:
-            sessions = await self._get_all_sessions()
-            session_ids = _get_session_family(
+            sessions = await self.get_all_sessions()
+            session_ids = get_session_family(
                 root_session_id, sessions,
             )
             session_map: dict[str, dict[str, Any]] = {}
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
-                sid = _session_object_id(s)
+                sid = session_object_id(s)
                 if sid and sid in session_ids:
                     session_map[sid] = s
 
             message_results = await asyncio.gather(
                 *[
-                    self._get_all_messages(sid)
+                    self.get_all_messages(sid)
                     for sid in session_ids
                 ],
             )
@@ -1143,15 +1410,15 @@ try:
                         info["sessionID"] = sid
                     all_messages.append(message)
 
-            all_messages.sort(key=_message_created_ms)
+            all_messages.sort(key=message_created_ms)
 
             new_messages: list[dict[str, Any]] = []
             for message in all_messages:
-                mid = _agent_message_id(message)
-                if mid and mid in self._seen_message_ids:
+                mid = agent_message_id(message)
+                if mid and mid in self.seen_message_ids:
                     continue
                 if mid:
-                    self._seen_message_ids.add(mid)
+                    self.seen_message_ids.add(mid)
                 new_messages.append(message)
 
             session_objects = [
@@ -1161,19 +1428,19 @@ try:
             ]
             return session_objects, session_ids, new_messages
 
-        async def _send_message_blocking(
+        async def send_message_blocking(
             self,
             text: str,
             timeout: int,
             remaining_parts_budget: int,
             on_stream_part=None,
         ) -> dict[str, Any] | None:
-            assert self._sb is not None
+            assert self.sandbox is not None
             prompt_path = "/tmp/prompt.txt"
-            await self._sb.write_file(
+            await self.sandbox.write_file(
                 prompt_path, text, ensure_dir=False,
             )
-            _builtins.print(
+            builtins.print(
                 f"[prompt] sending message ({len(text)} "
                 f"chars), waiting up to {timeout}s...",
                 flush=True,
@@ -1182,15 +1449,15 @@ try:
             async def handle_stderr_line(
                 line: str,
             ) -> None:
-                await _parse_trace_event_line(
+                await parse_trace_event_line(
                     line, on_stream_part,
                 )
 
-            response = await self._run_client(
+            response = await self.run_client(
                 [
                     "chat-stream",
                     "--session-id",
-                    self._session_id or "",
+                    self.current_session_id or "",
                     "--text-file",
                     prompt_path,
                     "--max-parts",
@@ -1213,14 +1480,14 @@ try:
             aborted_for_part_limit = bool(
                 meta_obj.get("aborted_for_part_limit"),
             )
-            _builtins.print(
+            builtins.print(
                 f"[prompt] done http={status_code} ok={ok}",
                 flush=True,
             )
 
             if not ok:
                 if aborted_for_part_limit:
-                    _builtins.print(
+                    builtins.print(
                         "[prompt] part limit reached during "
                         "stream; ending current turn",
                         flush=True,
@@ -1244,7 +1511,7 @@ try:
                         error_text[:1000]
                         + "...[truncated]"
                     )
-                _builtins.print(
+                builtins.print(
                     f"[prompt] ERROR: {error_text}",
                     flush=True,
                 )
@@ -1253,7 +1520,7 @@ try:
             if not isinstance(body, dict):
                 if aborted_for_part_limit:
                     return {"_stream": dict(meta_obj)}
-                _builtins.print(
+                builtins.print(
                     "[prompt] unexpected response type: "
                     f"{type(body).__name__}",
                     flush=True,
@@ -1277,8 +1544,8 @@ try:
             timeout: int,
             remaining_parts_budget: int,
             on_stream_part=None,
-        ) -> _AgentTurnOutcome | None:
-            response = await self._send_message_blocking(
+        ) -> AgentTurnOutcome | None:
+            response = await self.send_message_blocking(
                 prompt_text,
                 timeout=timeout,
                 remaining_parts_budget=remaining_parts_budget,
@@ -1290,11 +1557,11 @@ try:
                 session_objects,
                 session_ids,
                 new_messages,
-            ) = await self._collect_turn_messages(
-                self._session_id or "",
+            ) = await self.collect_turn_messages(
+                self.current_session_id or "",
             )
-            return _AgentTurnOutcome(
-                session_id=self._session_id or "",
+            return AgentTurnOutcome(
+                session_id=self.current_session_id or "",
                 response=response,
                 session_objects=session_objects,
                 session_ids=session_ids,
@@ -1303,18 +1570,18 @@ try:
 
         def on_turn_complete(
             self,
-            outcome: _AgentTurnOutcome,
+            outcome: AgentTurnOutcome,
         ) -> None:
-            self._session_id = outcome.session_id
+            self.current_session_id = outcome.session_id
 
         def on_resume(
             self,
             existing_messages: list[dict[str, Any]],
         ) -> None:
             for msg in existing_messages:
-                mid = _agent_message_id(msg)
+                mid = agent_message_id(msg)
                 if mid:
-                    self._seen_message_ids.add(mid)
+                    self.seen_message_ids.add(mid)
 
         async def recover_session(
             self,
@@ -1323,81 +1590,31 @@ try:
         ) -> str:
             return await self.create_session(trajectory_id)
 
+        async def collect_crash_messages(
+            self,
+            session_id: str,
+        ) -> list[dict[str, Any]] | None:
+            """Attempt to recover messages after a crash."""
+            try:
+                (
+                    _session_objects,
+                    _session_ids,
+                    new_messages,
+                ) = await self.collect_turn_messages(
+                    session_id,
+                )
+                if new_messages:
+                    return new_messages
+            except Exception:
+                pass
+            return None
+
         async def stop(self) -> None:
             pass
 
-    # Module-level helpers for session tree walking
-    def _session_object_id(
-        session: dict[str, Any],
-    ) -> str | None:
-        for key in ("id", "sessionID", "session_id"):
-            value = session.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return None
-
-    def _session_object_parent_id(
-        session: dict[str, Any],
-    ) -> str | None:
-        for key in (
-            "parentID",
-            "parent_id",
-            "parentId",
-        ):
-            value = session.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return None
-
-    def _get_session_family(
-        root_session_id: str,
-        sessions: list[dict[str, Any]],
-    ) -> list[str]:
-        known_ids = {
-            sid
-            for s in sessions
-            if isinstance(s, dict)
-            if (sid := _session_object_id(s))
-        }
-        if root_session_id not in known_ids:
-            return [root_session_id]
-
-        children_by_parent: dict[str, list[str]] = {}
-        for s in sessions:
-            if not isinstance(s, dict):
-                continue
-            sid = _session_object_id(s)
-            parent_id = _session_object_parent_id(s)
-            if sid and parent_id:
-                children_by_parent.setdefault(
-                    parent_id, [],
-                ).append(sid)
-
-        family: list[str] = []
-        queue = [root_session_id]
-        seen: set[str] = set()
-        while queue:
-            current = queue.pop(0)
-            if current in seen:
-                continue
-            seen.add(current)
-            family.append(current)
-            queue.extend(
-                children_by_parent.get(current, []),
-            )
-        return family
-
-    def _message_created_ms(
-        message: dict[str, Any],
-    ) -> int:
-        info = message.get("info", {})
-        time_info = info.get("time", {})
-        created = time_info.get("created")
-        return (
-            int(created)
-            if isinstance(created, int)
-            else 0
-        )
+    # The content of this file (agents/opencode.py) for uploading into
+    # the sandbox as the client script.
+    OPENCODE_CLIENT_CONTENT = Path(__file__).read_text()
 
 except ImportError:
     pass  # Running as standalone sandbox script

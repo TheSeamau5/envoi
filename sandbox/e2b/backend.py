@@ -1,6 +1,6 @@
 """E2B sandbox backend -- runs commands in an E2B cloud sandbox.
 
-Implements SandboxBackend using E2B's Code Interpreter API. Alternative to
+Implements Sandbox using E2B's Code Interpreter API. Alternative to
 Modal for environments that need a different cloud provider. Use with
 --sandbox e2b on the CLI.
 """
@@ -17,7 +17,7 @@ from sandbox.base import CommandResult
 
 
 class E2BSandbox:
-    """SandboxBackend implementation backed by E2B.
+    """Sandbox implementation backed by E2B.
 
     Requires ``e2b-code-interpreter`` (install via ``pip install e2b-code-interpreter``).
     The sandbox image must be pre-built as an E2B template — see ``sandbox/e2b/e2b.Dockerfile``.

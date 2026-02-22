@@ -13,7 +13,7 @@ import shlex
 import uuid
 from typing import Any
 
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
 from utils.helpers import tprint
 
 print = tprint
@@ -31,7 +31,7 @@ EVALUATION_ENVOI_URL = (
 EVALUATION_JSON_MARKER = "__ENVOI_EVAL_JSON__"
 
 
-def _extract_leaf_paths(schema: Any) -> list[str]:
+def extract_leaf_paths(schema: Any) -> list[str]:
     """Walk an envoi /schema tree and collect all leaf test paths."""
     leaves: list[str] = []
 
@@ -50,7 +50,7 @@ def _extract_leaf_paths(schema: Any) -> list[str]:
     return sorted(leaves) if leaves else []
 
 
-def _extract_suite_roots(schema: Any) -> list[str]:
+def extract_suite_roots(schema: Any) -> list[str]:
     """Extract top-level suite names from an envoi /schema tree."""
     if isinstance(schema, dict):
         children = schema.get("children") or schema.get("suites")
@@ -181,7 +181,7 @@ def parse_commit_evaluation_payload(
 
 async def run_commit_evaluation(
     *,
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     commit: str,
     suite_paths: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -194,7 +194,7 @@ async def run_commit_evaluation(
         suite_paths=suite_paths,
     )
     exit_code, stdout, stderr = (
-        await sb.run(
+        await sandbox.run(
             command,
             timeout=EVALUATION_TIMEOUT_SECONDS,
             quiet=True,

@@ -66,7 +66,7 @@ TRACE_SCHEMA = pa.schema([
     ("bundle_uri", pa.string()),
 ])
 
-_SCALAR_PART_KEYS = (
+SCALAR_PART_KEYS = (
     "trajectory_id", "session_id", "agent", "agent_model",
     "part", "timestamp", "role", "part_type", "item_type",
     "summary", "duration_ms", "git_commit", "content",
@@ -75,13 +75,13 @@ _SCALAR_PART_KEYS = (
     "tool_name", "tool_status", "tool_exit_code", "patch",
 )
 
-_JSON_PART_KEYS = (
+JSON_PART_KEYS = (
     "files", "tool_input", "tool_output", "tool_error",
     "token_usage", "envoi_calls", "testing_state", "repo_checkpoint",
 )
 
 
-def _json_or_none(value: Any) -> str | None:
+def json_or_none(value: Any) -> str | None:
     if value is None:
         return None
     if hasattr(value, "model_dump"):
@@ -89,7 +89,7 @@ def _json_or_none(value: Any) -> str | None:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-def _build_turn_map(trace: AgentTrace) -> dict[int, int]:
+def build_turn_map(trace: AgentTrace) -> dict[int, int]:
     mapping: dict[int, int] = {}
     for turn_rec in trace.turns:
         if turn_rec.part_start is not None and turn_rec.part_end is not None:
@@ -110,9 +110,9 @@ def agent_trace_to_rows(
 
     Produces one dict per part. Trajectory-level fields (session_end, evaluations,
     artifacts, suites) are denormalized into every row. Nested objects are serialized
-    to JSON strings via _json_or_none().
+    to JSON strings via json_or_none().
     """
-    turn_map = _build_turn_map(trace)
+    turn_map = build_turn_map(trace)
 
     se = trace.session_end
     se_reason = se.reason if se else None
@@ -120,12 +120,12 @@ def agent_trace_to_rows(
     se_total_turns = se.total_turns if se else None
     se_final_commit = se.final_git_commit if se else None
 
-    evals_json = _json_or_none(
+    evals_json = json_or_none(
         {k: v.model_dump(mode="json") for k, v in trace.evaluations.items()}
     )
-    suites_json = _json_or_none(suites)
-    artifacts_json = _json_or_none(trace.artifacts)
-    task_params_json = _json_or_none(task_params)
+    suites_json = json_or_none(suites)
+    artifacts_json = json_or_none(trace.artifacts)
+    task_params_json = json_or_none(task_params)
 
     rows: list[dict[str, Any]] = []
     for part_rec in trace.parts:
@@ -145,7 +145,7 @@ def agent_trace_to_rows(
             "summary": part_rec.summary,
             "duration_ms": part_rec.duration_ms,
             "git_commit": part_rec.git_commit,
-            "files": _json_or_none(part_rec.files) if part_rec.files else None,
+            "files": json_or_none(part_rec.files) if part_rec.files else None,
             "content": part_rec.content,
             "summary_word_count": part_rec.summary_word_count,
             "content_word_count": part_rec.content_word_count,
@@ -153,17 +153,17 @@ def agent_trace_to_rows(
             "content_token_estimate": part_rec.content_token_estimate,
             "tool_name": part_rec.tool_name,
             "tool_status": part_rec.tool_status,
-            "tool_input": _json_or_none(part_rec.tool_input),
-            "tool_output": _json_or_none(part_rec.tool_output),
-            "tool_error": _json_or_none(part_rec.tool_error),
+            "tool_input": json_or_none(part_rec.tool_input),
+            "tool_output": json_or_none(part_rec.tool_output),
+            "tool_error": json_or_none(part_rec.tool_error),
             "tool_exit_code": part_rec.tool_exit_code,
-            "token_usage": _json_or_none(part_rec.token_usage),
+            "token_usage": json_or_none(part_rec.token_usage),
             "patch": part_rec.patch,
-            "envoi_calls": _json_or_none(
+            "envoi_calls": json_or_none(
                 [c.model_dump(mode="json") for c in part_rec.envoi_calls]
             ) if part_rec.envoi_calls else None,
-            "testing_state": _json_or_none(part_rec.testing_state),
-            "repo_checkpoint": _json_or_none(part_rec.repo_checkpoint),
+            "testing_state": json_or_none(part_rec.testing_state),
+            "repo_checkpoint": json_or_none(part_rec.repo_checkpoint),
             "turn": turn_map.get(part_rec.part) if part_rec.part is not None else None,
             "session_end_reason": se_reason,
             "session_end_total_parts": se_total_parts,
@@ -187,7 +187,7 @@ def read_trace_parquet(source: str | io.BytesIO) -> list[dict[str, Any]]:
     return table.to_pylist()
 
 
-def _parse_json_field(value: Any) -> Any:
+def parse_json_field(value: Any) -> Any:
     if value is None:
         return None
     if isinstance(value, str):
@@ -198,7 +198,7 @@ def _parse_json_field(value: Any) -> Any:
     return value
 
 
-def _rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconstruct the trace dict from flat parquet rows.
 
     Returns a dict with: trajectory_id, session_id, agent, agent_model,
@@ -218,14 +218,14 @@ def _rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
     parts: list[dict[str, Any]] = []
     for row in rows:
         part: dict[str, Any] = {}
-        for key in _SCALAR_PART_KEYS:
+        for key in SCALAR_PART_KEYS:
             part[key] = row.get(key)
-        for key in _JSON_PART_KEYS:
-            part[key] = _parse_json_field(row.get(key))
+        for key in JSON_PART_KEYS:
+            part[key] = parse_json_field(row.get(key))
         parts.append(part)
 
-    evaluations = _parse_json_field(first.get("evaluations")) or {}
-    artifacts = _parse_json_field(first.get("artifacts")) or {}
+    evaluations = parse_json_field(first.get("evaluations")) or {}
+    artifacts = parse_json_field(first.get("artifacts")) or {}
 
     session_end = None
     se_reason = first.get("session_end_reason")
@@ -253,4 +253,4 @@ def _rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def parquet_to_trace_dict(source: str | io.BytesIO) -> dict[str, Any]:
     """Read a parquet file and reconstruct the trace dict."""
-    return _rows_to_trace_dict(read_trace_parquet(source))
+    return rows_to_trace_dict(read_trace_parquet(source))

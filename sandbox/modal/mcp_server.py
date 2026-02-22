@@ -19,7 +19,7 @@ mcp = FastMCP("tests")
 ENVOI_URL = "http://localhost:8000"
 
 
-def _fetch_schema_text() -> str:
+def fetch_schema_text() -> str:
     """Fetch the envoi /schema and format available test paths."""
     try:
         import httpx
@@ -27,7 +27,7 @@ def _fetch_schema_text() -> str:
         resp = httpx.get(f"{ENVOI_URL}/schema", timeout=30)
         resp.raise_for_status()
         schema = resp.json()
-        paths = _extract_paths(schema)
+        paths = extract_paths(schema)
         if paths:
             return (
                 "\n\nAvailable test paths:\n"
@@ -38,7 +38,7 @@ def _fetch_schema_text() -> str:
     return ""
 
 
-def _extract_paths(node: object, prefix: str = "") -> list[str]:
+def extract_paths(node: object, prefix: str = "") -> list[str]:
     """Walk a schema tree and collect all paths (leaves and branches)."""
     paths: list[str] = []
     if isinstance(node, dict):
@@ -47,19 +47,19 @@ def _extract_paths(node: object, prefix: str = "") -> list[str]:
             for key, child in children.items():
                 full = f"{prefix}/{key}" if prefix else key
                 paths.append(full)
-                paths.extend(_extract_paths(child, full))
+                paths.extend(extract_paths(child, full))
     return paths
 
 
-_SCHEMA_TEXT = _fetch_schema_text()
+SCHEMA_TEXT = fetch_schema_text()
 
-_TOOL_DESCRIPTION = f"""\
+TOOL_DESCRIPTION = f"""\
 Run task tests against a suite path.
-{_SCHEMA_TEXT}
+{SCHEMA_TEXT}
 """
 
 
-@mcp.tool(description=_TOOL_DESCRIPTION.strip())
+@mcp.tool(description=TOOL_DESCRIPTION.strip())
 async def run_tests(test_path: str) -> str:
     """
     Run task tests against a suite path.

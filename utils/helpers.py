@@ -1,9 +1,8 @@
 """Shared utilities used across envoi-trace.
 
-Timestamped printing (tprint), environment file loading, model name resolution,
-base64/JSON credential handling, text truncation, token estimation, usage map
-merging, secret redaction, adaptive turn timeout computation, and parallel file
-upload to sandboxes.
+Timestamped printing (tprint), environment file loading, base64/JSON credential
+handling, text truncation, token estimation, usage map merging, secret redaction,
+adaptive turn timeout computation, and parallel file upload to sandboxes.
 """
 
 from __future__ import annotations
@@ -20,10 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
 
-DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
-DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 SETUP_UPLOAD_CONCURRENCY = max(
     1, int(os.environ.get("SETUP_UPLOAD_CONCURRENCY", "8"))
 )
@@ -84,17 +81,6 @@ def load_environment_files(
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-
-def resolve_model(agent: str, model: str | None) -> str:
-    if agent == "opencode":
-        raw = model or DEFAULT_OPENCODE_MODEL
-        if "/" in raw:
-            return raw
-        return f"opencode/{raw}"
-    if agent == "codex":
-        return model or DEFAULT_CODEX_MODEL
-    raise ValueError(f"Unsupported agent: {agent}")
 
 
 def iso_from_epoch_ms(epoch_ms: int | None) -> str:
@@ -160,7 +146,7 @@ def token_estimate(text: str | None) -> int:
     return max(1, round(len(text) / 4))
 
 
-def _is_number(value: Any) -> bool:
+def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -174,7 +160,7 @@ def merge_usage_maps(
         existing = base[key]
         if isinstance(existing, dict) and isinstance(value, dict):
             merge_usage_maps(existing, value)
-        elif _is_number(existing) and _is_number(value):
+        elif is_number(existing) and is_number(value):
             base[key] = existing + value
         else:
             base[key] = value
@@ -251,7 +237,7 @@ def environment_upload_items(
 
 
 async def upload_files_parallel(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     uploads: list[tuple[str, str]],
     *,
     concurrency: int = SETUP_UPLOAD_CONCURRENCY,
@@ -264,7 +250,7 @@ async def upload_files_parallel(
     dirs = sorted({str(Path(path).parent) for path, _ in uploads})
     if dirs:
         mkdir_cmd = "mkdir -p " + " ".join(shlex.quote(d) for d in dirs)
-        await sb.run(mkdir_cmd, quiet=True)
+        await sandbox.run(mkdir_cmd, quiet=True)
 
     print(
         f"[setup] uploading {len(uploads)} files "
@@ -277,7 +263,7 @@ async def upload_files_parallel(
         if log_upload:
             print(f"[setup][upload] {path}")
         async with semaphore:
-            await sb.write_file(
+            await sandbox.write_file(
                 path,
                 content,
                 ensure_dir=False,
@@ -295,7 +281,7 @@ async def upload_files_parallel(
 
 
 async def run_sandbox_client(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     script_path: str,
     label: str,
     args: list[str],
@@ -316,7 +302,7 @@ async def run_sandbox_client(
         + " ".join(shlex.quote(a) for a in args)
     )
     exit_code, stdout, stderr = (
-        await sb.run(
+        await sandbox.run(
             command,
             timeout=timeout,
             quiet=quiet,

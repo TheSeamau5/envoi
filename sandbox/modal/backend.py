@@ -1,6 +1,6 @@
 """Modal sandbox backend -- runs commands in a Modal cloud sandbox.
 
-Implements SandboxBackend using Modal's Sandbox API. Each trajectory gets an
+Implements Sandbox using Modal's Sandbox API. Each trajectory gets an
 ephemeral sandbox with a pre-built image (Ubuntu 24.04, Python 3.12, Rust, etc.).
 Commands run via sandbox.exec(), files transfer via stdin/stdout piping.
 """
@@ -22,7 +22,7 @@ from sandbox.base import CommandResult
 
 
 class ModalSandbox:
-    """SandboxBackend implementation backed by modal.Sandbox."""
+    """Sandbox implementation backed by modal.Sandbox."""
 
     def __init__(self, inner: modal.Sandbox) -> None:
         self._inner = inner

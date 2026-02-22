@@ -1,6 +1,6 @@
 """Git operations inside the sandbox.
 
-Runs git commands via SandboxBackend.run() to manage the agent's workspace repo.
+Runs git commands via Sandbox.run() to manage the agent's workspace repo.
 Handles checkpoint commits (only when files changed), patch/diff extraction,
 bundle creation for portable history, and retry logic for transient failures.
 """
@@ -14,7 +14,7 @@ import shlex
 from typing import Any
 
 from models import RepoCheckpoint
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
 from utils.helpers import tprint, truncate_text
 from utils.storage import upload_file
 
@@ -33,7 +33,7 @@ INCREMENTAL_BUNDLE_UPLOAD = (
 
 
 async def run_git_command_with_retry(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     cmd: str,
     *,
     attempts: int = GIT_RETRY_ATTEMPTS,
@@ -43,7 +43,7 @@ async def run_git_command_with_retry(
     last: tuple[int, str, str] = (1, "", "")
     for attempt in range(1, max(1, attempts) + 1):
         exit_code, stdout, stderr = (
-            await sb.run(
+            await sandbox.run(
                 cmd,
                 timeout=timeout,
                 quiet=True,
@@ -75,9 +75,9 @@ async def run_git_command_with_retry(
     return last
 
 
-async def get_git_commit(sb: SandboxBackend) -> str | None:
+async def get_git_commit(sandbox: Sandbox) -> str | None:
     _, stdout, _ = await run_git_command_with_retry(
-        sb,
+        sandbox,
         "git rev-parse HEAD 2>/dev/null || echo none",
         cwd="/workspace",
     )
@@ -85,9 +85,9 @@ async def get_git_commit(sb: SandboxBackend) -> str | None:
     return commit if commit and commit != "none" else None
 
 
-async def get_changed_files(sb: SandboxBackend) -> list[str]:
+async def get_changed_files(sandbox: Sandbox) -> list[str]:
     exit_code, stdout, stderr = await run_git_command_with_retry(
-        sb,
+        sandbox,
         "git status --porcelain",
         cwd="/workspace",
     )
@@ -135,7 +135,7 @@ def parse_numstat_output(stdout: str) -> list[dict[str, Any]]:
 
 
 async def get_commit_patch_payload(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     commit: str,
 ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
     quoted_commit = shlex.quote(commit)
@@ -144,7 +144,7 @@ async def get_commit_patch_payload(
     numstat_rows: list[dict[str, Any]] = []
 
     patch_exit, patch_stdout, _ = (
-        await sb.run(
+        await sandbox.run(
             f"git show --format= --no-color --patch {quoted_commit}",
             quiet=True,
             cwd="/workspace",
@@ -154,7 +154,7 @@ async def get_commit_patch_payload(
         patch_text = patch_stdout
 
     stats_exit, stats_stdout, _ = (
-        await sb.run(
+        await sandbox.run(
             f"git show --format= --no-color --stat {quoted_commit}",
             quiet=True,
             cwd="/workspace",
@@ -164,7 +164,7 @@ async def get_commit_patch_payload(
         stats_text = stats_stdout
 
     numstat_exit, numstat_stdout, _ = (
-        await sb.run(
+        await sandbox.run(
             f"git show --format= --no-color --numstat {quoted_commit}",
             quiet=True,
             cwd="/workspace",
@@ -178,7 +178,7 @@ async def get_commit_patch_payload(
 
 async def upload_repo_bundle_snapshot(
     *,
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     trajectory_id: str,
     reason: str,
 ) -> str | None:
@@ -186,7 +186,7 @@ async def upload_repo_bundle_snapshot(
         return None
 
     exit_code, _, stderr = await run_git_command_with_retry(
-        sb,
+        sandbox,
         "git bundle create /tmp/repo.bundle --all",
         attempts=2,
         cwd="/workspace",
@@ -199,7 +199,7 @@ async def upload_repo_bundle_snapshot(
         return None
 
     _, size_out, _ = (
-        await sb.run(
+        await sandbox.run(
             "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
             quiet=True,
         )
@@ -209,7 +209,7 @@ async def upload_repo_bundle_snapshot(
         return None
 
     b64_exit, b64, b64_stderr = (
-        await sb.run(
+        await sandbox.run(
             "base64 /tmp/repo.bundle",
             quiet=True,
         )
@@ -230,7 +230,7 @@ async def upload_repo_bundle_snapshot(
 
 
 async def create_part_checkpoint(
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     trajectory_id: str,
     part: int,
     changed_files_hint: list[str] | None = None,
@@ -239,12 +239,12 @@ async def create_part_checkpoint(
     commit_before = (
         commit_before_hint
         if commit_before_hint is not None
-        else await get_git_commit(sb)
+        else await get_git_commit(sandbox)
     )
     changed_files = (
         [f for f in changed_files_hint if isinstance(f, str) and f]
         if changed_files_hint is not None
-        else await get_changed_files(sb)
+        else await get_changed_files(sandbox)
     )
     if not changed_files:
         return RepoCheckpoint(
@@ -254,7 +254,7 @@ async def create_part_checkpoint(
             changed_files=[],
         )
 
-    actual_changed_files = await get_changed_files(sb)
+    actual_changed_files = await get_changed_files(sandbox)
     if not actual_changed_files:
         return RepoCheckpoint(
             commit_before=commit_before,
@@ -266,7 +266,7 @@ async def create_part_checkpoint(
 
     commit_message = f"part {part} checkpoint"
     exit_code, _, stderr = await run_git_command_with_retry(
-        sb,
+        sandbox,
         "git add -A && "
         f"git commit -m {shlex.quote(commit_message)}",
         attempts=GIT_RETRY_ATTEMPTS,
@@ -284,16 +284,16 @@ async def create_part_checkpoint(
             changed_files=changed_files,
         )
 
-    commit_after = await get_git_commit(sb)
+    commit_after = await get_git_commit(sandbox)
     patch_text: str | None = None
     stats_text: str | None = None
     numstat_rows: list[dict[str, Any]] = []
     if commit_after:
         patch_text, stats_text, numstat_rows = (
-            await get_commit_patch_payload(sb, commit_after)
+            await get_commit_patch_payload(sandbox, commit_after)
         )
         await upload_repo_bundle_snapshot(
-            sb=sb,
+            sandbox=sandbox,
             trajectory_id=trajectory_id,
             reason=f"part {part}",
         )

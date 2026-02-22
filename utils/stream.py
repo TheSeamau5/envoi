@@ -19,7 +19,7 @@ from models import (
     RepoCheckpoint,
     TurnRecord,
 )
-from sandbox.base import SandboxBackend
+from sandbox.base import Sandbox
 from utils.git import create_part_checkpoint, get_changed_files
 from utils.helpers import (
     iso_from_epoch_ms,
@@ -36,7 +36,7 @@ print = tprint
 
 def make_stream_part_callback(
     *,
-    sb: SandboxBackend,
+    sandbox: Sandbox,
     trajectory_id: str,
     agent_trace: AgentTrace,
     tracker: SolveTracker,
@@ -185,7 +185,7 @@ def make_stream_part_callback(
             has_file_change = bool(
                 stream_event.get("has_file_change"),
             )
-            changed_files = await get_changed_files(sb)
+            changed_files = await get_changed_files(sandbox)
             detected_file_change = bool(changed_files)
             checkpoint: RepoCheckpoint | None = None
             should_checkpoint = (
@@ -199,7 +199,7 @@ def make_stream_part_callback(
                         f"state on part {absolute_part}"
                     )
                 checkpoint = await create_part_checkpoint(
-                    sb=sb,
+                    sandbox=sandbox,
                     trajectory_id=trajectory_id,
                     part=absolute_part,
                     changed_files_hint=(
