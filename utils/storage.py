@@ -9,7 +9,6 @@ from typing import Any
 import boto3
 
 from models import AgentTrace
-from tasks.resolver import EnvConfig
 from trace_format import agent_trace_to_rows, parquet_to_trace_dict, write_trace_parquet
 from utils.helpers import tprint
 
@@ -37,8 +36,9 @@ def get_bucket() -> str:
 def save_trace_parquet(
     trajectory_id: str,
     trace: AgentTrace,
-    env_config: EnvConfig,
     *,
+    environment: str,
+    task_params: dict[str, Any] | None = None,
     allow_empty: bool = False,
 ) -> None:
     part_count = len(trace.parts)
@@ -53,8 +53,8 @@ def save_trace_parquet(
 
     rows = agent_trace_to_rows(
         trace,
-        environment=env_config.environment,
-        task_params=env_config.params,
+        environment=environment,
+        task_params=task_params or {},
         suites=suites,
         bundle_uri=artifact_uri(trajectory_id, "repo.bundle"),
     )

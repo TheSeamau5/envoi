@@ -39,7 +39,6 @@ from models import (
 )
 from sandbox.base import SandboxBackend
 from sandbox.modal import ModalSandbox
-from tasks.resolver import EnvConfig, resolve_task
 from utils.evaluation import (
     EVALUATION_CONCURRENCY,
     _extract_leaf_paths,
@@ -112,9 +111,55 @@ OPENCODE_CONFIG = OPENCODE_CONFIG_TEMPLATE
 _DEFAULT_TASK = os.environ.get("ENVOI_TASK", "c_compiler")
 
 
-_default_env = resolve_task(_DEFAULT_TASK)
+async def load_task(
+    task_name: str, *, lang: str = "en",
+) -> tuple[str, dict[str, Any]]:
+    """Load a task prompt by convention.
+
+    Tier 3: tasks/<name>/task.py with generate()
+    Tier 2: prompt file + params.py
+    Tier 1: prompt file only
+    """
+    import importlib
+
+    task_dir = Path(__file__).parent / "tasks" / task_name
+
+    # Tier 3: full dynamic generation
+    if (task_dir / "task.py").exists():
+        mod = importlib.import_module(f"tasks.{task_name}.task")
+        gen = getattr(mod, "generate", None)
+        if gen is not None:
+            return await gen() if asyncio.iscoroutinefunction(gen) else gen()
+
+    # Tier 1/2: load prompt file
+    prompt_file = task_dir / f"{lang}.md"
+    if not prompt_file.exists():
+        prompt_file = task_dir / "prompt.md"
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"No prompt found in {task_dir}")
+
+    prompt = prompt_file.read_text().strip()
+
+    # Tier 2: apply params if params.py exists
+    params: dict[str, Any] = {}
+    if (task_dir / "params.py").exists():
+        params_mod = importlib.import_module(f"tasks.{task_name}.params")
+        params_fn = params_mod.params
+        params = (
+            await params_fn()
+            if asyncio.iscoroutinefunction(params_fn)
+            else params_fn()
+        )
+        prompt = prompt.format(**params)
+
+    return prompt, params
+
+
+_DEFAULT_ENVIRONMENT_DIR = (
+    Path(__file__).parent / "environments" / _DEFAULT_TASK
+)
 _ENV_PY, _ENV_C, _ENV_TXT = load_environment_files(
-    _default_env.environment_dir,
+    _DEFAULT_ENVIRONMENT_DIR,
 )
 
 WORKSPACE_GITIGNORE = """\
@@ -459,7 +504,9 @@ async def end_session(
     part_count: int,
     turn_count: int,
     reason: Literal["solved", "part_limit", "timeout", "agent_error", "envoi_error"],
-    env_config: EnvConfig | None = None,
+    *,
+    environment: str = "",
+    task_params: dict[str, Any] | None = None,
 ) -> None:
     print(f"[end] reason={reason} parts={part_count}")
 
@@ -504,8 +551,11 @@ async def end_session(
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": bundle_s3_uri,
     }
-    if env_config is not None:
-        save_trace_parquet(agent_trace.trajectory_id, agent_trace, env_config)
+    if environment:
+        save_trace_parquet(
+            agent_trace.trajectory_id, agent_trace,
+            environment=environment, task_params=task_params,
+        )
 
     print(
         f"[end] session ended: {reason}, {part_count} parts, commit={final_commit}"
@@ -535,10 +585,16 @@ async def _run_trajectory_impl(
         trajectory_id = str(uuid.uuid4())
     agent = (agent or DEFAULT_AGENT).strip().lower()
 
-    env_config = resolve_task(
-        task, lang=task_lang, params_overrides=task_params,
+    environment = task  # environment name = task name by convention
+    environment_dir = Path(__file__).parent / "environments" / environment
+    prompt, task_params_loaded = await load_task(task, lang=task_lang)
+    if task_params:
+        task_params_loaded.update(task_params)
+    env_files = load_environment_files(environment_dir)
+    setup_script_file = environment_dir / "setup.sh"
+    setup_script = (
+        setup_script_file.read_text() if setup_script_file.exists() else ""
     )
-    env_files = load_environment_files(env_config.environment_dir)
 
     effective_max_parts = max_parts
     resolved_model = resolve_model(agent, model)
@@ -619,7 +675,6 @@ async def _run_trajectory_impl(
         start_time = time.monotonic()
 
         # --- Setup ---
-        setup_script = env_config.setup_script if env_config else ""
         if agent == "opencode":
             await setup_sandbox_opencode(
                 sb, resolved_model, agent_api_key,
@@ -689,7 +744,11 @@ async def _run_trajectory_impl(
                 agent_model=resolved_model,
                 started_at=datetime.now(UTC).isoformat(),
             )
-        save_trace_parquet(trajectory_id, agent_trace, env_config)
+        save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
 
         evaluation_tasks: set[asyncio.Task[None]] = set()
         evaluation_commits: set[str] = set(agent_trace.evaluations.keys())
@@ -712,7 +771,11 @@ async def _run_trajectory_impl(
                 status="queued",
                 queued_at=queued_at,
             )
-            save_trace_parquet(trajectory_id, agent_trace, env_config)
+            save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
 
             async def _runner() -> None:
                 started_at = datetime.now(UTC).isoformat()
@@ -727,7 +790,11 @@ async def _run_trajectory_impl(
                     agent_trace.evaluations[commit] = evaluation
                 evaluation.status = "running"
                 evaluation.started_at = started_at
-                save_trace_parquet(trajectory_id, agent_trace, env_config)
+                save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
 
                 async with evaluation_semaphore:
                     run_payload: dict[str, Any] | None = None
@@ -736,7 +803,7 @@ async def _run_trajectory_impl(
                         run_payload = await run_commit_evaluation(
                             sb=sb,
                             commit=commit,
-                            suite_paths=env_config.suite_paths or None,
+                            suite_paths=suite_paths or None,
                         )
                         payload = run_payload.get("payload")
                         exit_code_value = run_payload.get("exit_code")
@@ -830,7 +897,11 @@ async def _run_trajectory_impl(
                             f"[eval] commit {commit[:10]} status={evaluation.status} "
                             f"passed={evaluation.passed}/{evaluation.total}"
                         )
-                        save_trace_parquet(trajectory_id, agent_trace, env_config)
+                        save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
 
             task = asyncio.create_task(_runner())
             evaluation_tasks.add(task)
@@ -856,6 +927,8 @@ async def _run_trajectory_impl(
         wait_for_evaluations_fn = _wait_for_evaluations
 
         # --- Discover test paths from envoi /schema ---
+        required_test_paths: list[str] = []
+        suite_paths: list[str] = []
         schema_result = await sb.run(
             "curl -sf http://localhost:8000/schema",
             quiet=True, timeout=30,
@@ -863,37 +936,40 @@ async def _run_trajectory_impl(
         if schema_result.exit_code == 0 and schema_result.stdout.strip():
             try:
                 schema = json.loads(schema_result.stdout)
-                env_config.required_test_paths = (
-                    _extract_leaf_paths(schema)
-                )
-                env_config.suite_paths = _extract_suite_roots(schema)
+                required_test_paths = _extract_leaf_paths(schema)
+                suite_paths = _extract_suite_roots(schema)
                 print(
                     f"[schema] discovered "
-                    f"{len(env_config.required_test_paths)} test paths, "
-                    f"{len(env_config.suite_paths)} suites"
+                    f"{len(required_test_paths)} test paths, "
+                    f"{len(suite_paths)} suites"
                 )
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"[schema] parse error: {e}")
         else:
-            print("[schema] /schema not available, using env_config defaults")
+            print("[schema] /schema not available, running without completion tracking")
 
         # --- Main loop: blocking message calls with part budget ---
-        tracker = SolveTracker(list(env_config.required_test_paths))
+        required = set(required_test_paths)
+        passing: set[str] = set()
+        tracker = SolveTracker(required_test_paths)
         for part_record in agent_trace.parts:
             tracker.update(list(part_record.envoi_calls))
+        for path in tracker.solved:
+            passing.add(path)
+
+        continue_prompt = "Continue."
+
         def _followup() -> str:
             status = build_unsolved_status_lines(tracker)
             if not status:
-                return env_config.continue_prompt
+                return continue_prompt
             return (
-                env_config.continue_prompt
+                continue_prompt
                 + "\n\nCurrent test status:\n"
                 + "\n".join(status)
             )
 
-        prompt_text = (
-            env_config.prompt if part_count == 0 else _followup()
-        )
+        prompt_text = prompt if part_count == 0 else _followup()
         consecutive_turn_failures = 0
 
         try:
@@ -960,7 +1036,8 @@ async def _run_trajectory_impl(
                     trajectory_id=trajectory_id,
                     agent_trace=agent_trace,
                     tracker=tracker,
-                    env_config=env_config,
+                    environment=environment,
+                    task_params=task_params_loaded,
                     agent_name=agent,
                     resolved_model=resolved_model,
                     effective_max_parts=effective_max_parts,
@@ -1001,7 +1078,11 @@ async def _run_trajectory_impl(
                         if recovered_session_id:
                             session_id = recovered_session_id
                             agent_trace.session_id = recovered_session_id
-                            save_trace_parquet(trajectory_id, agent_trace, env_config)
+                            save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
                             prompt_text = _followup()
                             continue
                     end_reason = "agent_error"
@@ -1039,6 +1120,13 @@ async def _run_trajectory_impl(
                         new_envoi_calls.extend(extract_envoi_calls(msg_parts))
 
                 tracker.update(new_envoi_calls)
+                for call in new_envoi_calls:
+                    if (
+                        call.result
+                        and call.result.total > 0
+                        and call.result.passed == call.result.total
+                    ):
+                        passing.add(call.path)
 
                 stream_meta = response.get("_stream", {}) if isinstance(response, dict) else {}
                 stream_meta_obj = stream_meta if isinstance(stream_meta, dict) else {}
@@ -1066,14 +1154,18 @@ async def _run_trajectory_impl(
                             turn_record.git_commit = last_part_record.git_commit
                     else:
                         turn_record.git_commit = git_commit
-                save_trace_parquet(trajectory_id, agent_trace, env_config)
+                save_trace_parquet(
+                    trajectory_id, agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
+                )
 
                 if evaluation_tasks:
                     print("[eval] waiting for pending commit evaluations before next turn")
                     await _wait_for_evaluations()
 
-                solved_count = len(tracker.solved)
-                total_count = len(tracker.required_paths)
+                solved_count = len(passing)
+                total_count = len(required)
                 print(
                     f"[progress] turn={turn_count} commit={git_commit} "
                     f"parts=+{new_parts} total={part_count}/{effective_max_parts} "
@@ -1083,7 +1175,7 @@ async def _run_trajectory_impl(
                     f"started={turn_started_at}"
                 )
 
-                if tracker.is_fully_solved():
+                if required and passing >= required:
                     end_reason = "solved"
                     break
 
@@ -1136,7 +1228,11 @@ async def _run_trajectory_impl(
                         parts=[],
                     )
                     agent_trace.turns.append(crash_record)
-                    save_trace_parquet(trajectory_id, agent_trace, env_config)
+                    save_trace_parquet(
+            trajectory_id, agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
                     print(f"[error] saved {len(crash_new_messages)} new messages before crash")
             except Exception:
                 print("[error] could not save crash messages")
@@ -1150,7 +1246,8 @@ async def _run_trajectory_impl(
             part_count,
             turn_count,
             end_reason,
-            env_config=env_config,
+            environment=environment,
+            task_params=task_params_loaded,
         )
         return trajectory_id
 
@@ -1166,7 +1263,8 @@ async def _run_trajectory_impl(
                     part_count,
                     turn_count,
                     "agent_error",
-                    env_config=env_config,
+                    environment=environment,
+                    task_params=task_params_loaded,
                 )
             except Exception as end_err:
                 print(f"[error] failed to finalize session after exception: {end_err}")

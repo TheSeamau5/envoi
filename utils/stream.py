@@ -14,7 +14,6 @@ from models import (
     TurnRecord,
 )
 from sandbox.base import SandboxBackend
-from tasks.resolver import EnvConfig
 from utils.git import create_part_checkpoint, get_changed_files
 from utils.helpers import (
     iso_from_epoch_ms,
@@ -35,7 +34,8 @@ def make_stream_part_callback(
     trajectory_id: str,
     agent_trace: AgentTrace,
     tracker: SolveTracker,
-    env_config: EnvConfig,
+    environment: str,
+    task_params: dict[str, Any] | None,
     agent_name: str,
     resolved_model: str,
     effective_max_parts: int,
@@ -300,7 +300,9 @@ def make_stream_part_callback(
             if checkpoint is not None:
                 turn_record.repo_checkpoint = checkpoint
             save_trace_parquet(
-                trajectory_id, agent_trace, env_config,
+                trajectory_id, agent_trace,
+                environment=environment,
+                task_params=task_params,
             )
         except Exception as callback_err:
             print(

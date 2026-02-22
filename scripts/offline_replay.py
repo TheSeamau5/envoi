@@ -30,12 +30,21 @@ import boto3
 import envoi
 import httpx
 
-from tasks.resolver import resolve_task
-
-_DEFAULT_TASK = os.environ.get("ENVOI_TASK", "c_compiler")
-_env = resolve_task(_DEFAULT_TASK)
-REQUIRED_PATHS: list[str] = list(_env.required_test_paths)
-SUITE_PATHS: list[str] = list(_env.suite_paths)
+SUITE_PATHS: list[str] = ["basics", "wacct", "c_testsuite", "torture"]
+REQUIRED_PATHS: list[str] = [
+    "basics",
+    *[f"wacct/chapter_{i}" for i in range(1, 21)],
+    *[f"c_testsuite/part_{i}" for i in range(1, 6)],
+    *[f"torture/part_{i}" for i in range(1, 11)],
+]
+HEAVY_TEST_ROOTS: dict[str, str] = {
+    "wacct": "/opt/tests/wacct/tests",
+    "c_testsuite": "/opt/tests/c-testsuite/tests/single-exec",
+    "torture": (
+        "/opt/tests/llvm-test-suite/SingleSource/Regression/C/"
+        "gcc-c-torture/execute"
+    ),
+}
 DEFAULT_TASK_FIXTURES_ROOT = Path("/opt/tests")
 
 
@@ -192,7 +201,7 @@ def default_fixtures_root() -> Path:
 
 def resolve_fixture_roots(fixtures_root: Path) -> dict[str, Path]:
     roots: dict[str, Path] = {}
-    for suite, configured in _env.heavy_test_roots.items():
+    for suite, configured in HEAVY_TEST_ROOTS.items():
         configured_path = Path(configured)
         if configured_path.is_absolute():
             try:

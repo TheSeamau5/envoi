@@ -1,32 +1,3 @@
-"""C compiler task definition."""
-
-from __future__ import annotations
-
-from pathlib import Path
-
-ENVIRONMENT = "c_compiler"
-
-CONTINUE_PROMPT = "Continue working on the compiler. Run tests and pass ALL suites."
-
-SUITE_PATHS: tuple[str, ...] = ("basics", "wacct", "c_testsuite", "torture")
-
-REQUIRED_TEST_PATHS: tuple[str, ...] = (
-    "basics",
-    *tuple(f"wacct/chapter_{i}" for i in range(1, 21)),
-    *tuple(f"c_testsuite/part_{i}" for i in range(1, 6)),
-    *tuple(f"torture/part_{i}" for i in range(1, 11)),
-)
-
-HEAVY_TEST_ROOTS: dict[str, str] = {
-    "wacct": "/opt/tests/wacct/tests",
-    "c_testsuite": "/opt/tests/c-testsuite/tests/single-exec",
-    "torture": (
-        "/opt/tests/llvm-test-suite/SingleSource/Regression/C/"
-        "gcc-c-torture/execute"
-    ),
-}
-
-SETUP_SH = """\
 #!/bin/bash
 set -euo pipefail
 
@@ -70,24 +41,3 @@ else
 fi
 
 echo "[fixtures] all task fixtures ready"
-"""
-
-
-def load_prompt(*, lang: str = "en") -> str:
-    """Load the system prompt for the given language."""
-    prompt_file = Path(__file__).parent / f"{lang}.md"
-    if not prompt_file.exists():
-        raise FileNotFoundError(
-            f"No prompt file for lang={lang!r} at {prompt_file}"
-        )
-    return prompt_file.read_text().strip()
-
-
-def build_followup_prompt(status_lines: list[str]) -> str:
-    if not status_lines:
-        return CONTINUE_PROMPT
-    return (
-        CONTINUE_PROMPT
-        + "\n\nCurrent test status:\n"
-        + "\n".join(status_lines)
-    )
