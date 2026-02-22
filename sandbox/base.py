@@ -5,8 +5,7 @@ orchestrator uses run() to execute commands, write_file()/read_file() to
 transfer files, and terminate() to tear down. Implementations exist for
 Modal (sandbox/modal/) and E2B (sandbox/e2b/).
 
-Also defines CommandResult, a frozen dataclass for command execution results.
-Use .unpack() for tuple destructuring: exit_code, stdout, stderr = result.unpack()
+Also defines CommandResult, SandboxConfig, and SandboxImageRequirements.
 """
 
 from __future__ import annotations
@@ -14,6 +13,8 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel, Field
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -28,6 +29,30 @@ class CommandResult:
     def unpack(self) -> tuple[int, str, str]:
         """Return (exit_code, stdout, stderr) for backward-compatible destructuring."""
         return self.exit_code, self.stdout, self.stderr
+
+
+class SandboxImageRequirements(BaseModel):
+    """Declarative image layers needed beyond the base environment Dockerfile."""
+
+    apt_packages: list[str] = Field(default_factory=list)
+    pip_packages: list[str] = Field(default_factory=list)
+    build_commands: list[str] = Field(default_factory=list)
+
+
+class SandboxConfig(BaseModel):
+    """Everything a sandbox backend needs for creation.
+
+    The runner builds this once. Each backend reads what it needs
+    and ignores the rest (same pattern as AgentSetupContext).
+    """
+
+    timeout: int = 14400
+    image_requirements: SandboxImageRequirements = Field(
+        default_factory=SandboxImageRequirements,
+    )
+    environment_dockerfile: str = ""
+    template: str | None = None
+    api_key: str | None = None
 
 
 @runtime_checkable

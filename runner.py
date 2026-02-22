@@ -1,19 +1,19 @@
 """
 Main orchestrator for envoi-trace.
 
-This module runs inside a Modal function. It creates a sandbox, provisions an
-agent (Codex or OpenCode), and runs a turn loop with a bounded part budget.
-After every part, it persists trace.parquet to S3. After every file change, it
-creates a git checkpoint. At end-of-run, it uploads a repo.bundle with full
-git history.
+Creates a sandbox, provisions an agent (Codex or OpenCode), and runs a turn
+loop with a bounded part budget. After every part, it persists trace.parquet
+to S3. After every file change, it creates a git checkpoint. At end-of-run,
+it uploads a repo.bundle with full git history.
 
 The two core abstractions are Agent (how to talk to an agent) and
 Sandbox (where the agent runs). This file wires them together and
 manages the turn loop, resume logic, and artifact persistence.
+It has zero knowledge of specific sandbox providers.
 
 Usage (via CLI):
-    envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
-    envoi-trace --agent codex --max-parts 1000 --task <path> --env <path>
+    uv run trace run --task examples/tasks/c_compiler --env examples/environments/c_compiler
+    python3 runner.py --agent codex --max-parts 1000 --task-dir <path> --environment-dir <path>
 """
 
 from __future__ import annotations
@@ -31,8 +31,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import modal
-
 from agents.base import Agent, AgentSetupContext
 from agents.codex import CodexAgent
 from agents.opencode import OpenCodeAgent
@@ -43,8 +41,8 @@ from models import (
     SessionEnd,
     TurnRecord,
 )
+from sandbox import SandboxConfig, create_sandbox
 from sandbox.base import Sandbox
-from sandbox.modal import ModalSandbox
 from utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
@@ -74,8 +72,6 @@ from utils.storage import (
 )
 from utils.stream import make_stream_part_callback
 
-app = modal.App("envoi-trace")
-
 DEFAULT_AGENT = "codex"
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
@@ -97,10 +93,10 @@ AGENT_BACKENDS: dict[str, type] = {
 }
 
 # ---------------------------------------------------------------------------
-# Load files at import time (Modal serializes these into the function image)
+# Load files at import time
 # ---------------------------------------------------------------------------
 
-MCP_SERVER = (Path(__file__).parent / "sandbox" / "modal" / "mcp_server.py").read_text()
+MCP_SERVER = (Path(__file__).parent / "sandbox" / "mcp_server.py").read_text()
 
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
@@ -173,43 +169,6 @@ opencode.jsonc
 .codex/
 """
 
-
-# ---------------------------------------------------------------------------
-# Modal images
-# ---------------------------------------------------------------------------
-
-function_image = (
-    modal.Image.debian_slim()
-    .pip_install("boto3", "pydantic", "pyarrow")
-    .add_local_file(
-        Path(__file__).parent / "models.py",
-        remote_path="/root/models.py",
-    )
-    .add_local_dir(Path(__file__).parent / "utils", remote_path="/root/utils")
-    .add_local_dir(EXAMPLES_DIR / "tasks", remote_path="/root/examples/tasks")
-    .add_local_dir(Path(__file__).parent / "agents", remote_path="/root/agents")
-    .add_local_dir(Path(__file__).parent / "sandbox", remote_path="/root/sandbox")
-    .add_local_dir(
-        EXAMPLES_DIR / "environments",
-        remote_path="/root/examples/environments",
-    )
-)
-
-
-def build_sandbox_image(
-    env_dockerfile: Path,
-    agent_cls: type,
-) -> modal.Image:
-    """Build the sandbox image from the environment Dockerfile + agent layers."""
-    image = modal.Image.from_dockerfile(str(env_dockerfile), add_python="3.12")
-    requirements = agent_cls.image_requirements()
-    if requirements.apt_packages:
-        image = image.apt_install(*requirements.apt_packages)
-    if requirements.pip_packages:
-        image = image.pip_install(*requirements.pip_packages)
-    for cmd in requirements.build_commands:
-        image = image.run_commands(cmd)
-    return image
 
 # ---------------------------------------------------------------------------
 # Sandbox helpers
@@ -728,25 +687,12 @@ async def run_trajectory_impl(
 
     try:
         # --- Create sandbox ---
-        if sandbox_provider == "modal":
-            sandbox_image = build_sandbox_image(
-                env_path / "Dockerfile", agent_cls,
-            )
-            sandbox = await ModalSandbox.create(
-                image=sandbox_image,
-                timeout=timeout_seconds,
-                app=app,
-            )
-        elif sandbox_provider == "e2b":
-            from sandbox.e2b import E2BSandbox
-
-            sandbox = await E2BSandbox.create(
-                timeout=timeout_seconds,
-            )
-        else:
-            raise ValueError(
-                f"Unknown sandbox provider: {sandbox_provider}",
-            )
+        config = SandboxConfig(
+            timeout=timeout_seconds,
+            image_requirements=agent_cls.image_requirements(),
+            environment_dockerfile=str(env_path / "Dockerfile"),
+        )
+        sandbox = await create_sandbox(sandbox_provider, config)
         start_time = time.monotonic()
 
         # --- Agent setup (one call, no branching) ---
@@ -1199,143 +1145,8 @@ async def run_trajectory_impl(
     return trajectory_id
 
 
-@app.function(
-    timeout=14400,
-    secrets=[modal.Secret.from_dotenv()],
-    image=function_image,
-)
-async def run_trajectory(
-    agent: str = DEFAULT_AGENT,
-    model: str | None = None,
-    max_parts: int = 1000,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
-    timeout_seconds: int = 14400,
-    trajectory_id: str | None = None,
-    codex_auth_json_b64: str | None = None,
-    resume: bool = RESUME_FROM_S3,
-    sandbox_provider: str = "modal",
-    task_dir: str = "",
-    environment_dir: str = "",
-) -> str:
-    return await run_trajectory_impl(
-        agent=agent,
-        model=model,
-        max_parts=max_parts,
-        message_timeout_seconds=message_timeout_seconds,
-        timeout_seconds=timeout_seconds,
-        trajectory_id=trajectory_id,
-        codex_auth_json_b64=codex_auth_json_b64,
-        resume=resume,
-        sandbox_provider=sandbox_provider,
-        task_dir=task_dir,
-        environment_dir=environment_dir,
-    )
-
-
-@app.function(
-    timeout=14400,
-    secrets=[modal.Secret.from_dotenv()],
-    image=function_image,
-    nonpreemptible=True,
-    name="run_trajectory_non_preemptible",
-)
-async def run_trajectory_non_preemptible(
-    agent: str = DEFAULT_AGENT,
-    model: str | None = None,
-    max_parts: int = 1000,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
-    timeout_seconds: int = 14400,
-    trajectory_id: str | None = None,
-    codex_auth_json_b64: str | None = None,
-    resume: bool = RESUME_FROM_S3,
-    sandbox_provider: str = "modal",
-    task_dir: str = "",
-    environment_dir: str = "",
-) -> str:
-    return await run_trajectory_impl(
-        agent=agent,
-        model=model,
-        max_parts=max_parts,
-        message_timeout_seconds=message_timeout_seconds,
-        timeout_seconds=timeout_seconds,
-        trajectory_id=trajectory_id,
-        codex_auth_json_b64=codex_auth_json_b64,
-        resume=resume,
-        sandbox_provider=sandbox_provider,
-        task_dir=task_dir,
-        environment_dir=environment_dir,
-    )
-
-
-def get_non_preemptible_runner() -> Any:
-    return run_trajectory_non_preemptible
-
-
 # ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-
-@app.local_entrypoint()
-async def main(
-    agent: str = DEFAULT_AGENT,
-    model: str | None = None,
-    max_parts: int = 1000,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
-    non_preemptible: bool = True,
-    trajectory_id: str | None = None,
-    codex_auth_file: str = "~/.codex/auth.json",
-    resume: bool = RESUME_FROM_S3,
-    sandbox_provider: str = "modal",
-    task_dir: str = "",
-    environment_dir: str = "",
-) -> None:
-    normalized_agent = (agent or DEFAULT_AGENT).strip().lower()
-    codex_auth_json_b64: str | None = None
-    agent_cls = AGENT_BACKENDS.get(normalized_agent)
-    if (
-        agent_cls is not None
-        and hasattr(agent_cls, "load_local_auth_b64")
-        and codex_auth_file.strip()
-    ):
-        codex_auth_json_b64 = agent_cls.load_local_auth_b64(
-            codex_auth_file.strip(),
-        )
-        if codex_auth_json_b64:
-            print(
-                f"[auth] loaded auth from "
-                f"{Path(codex_auth_file).expanduser()}"
-            )
-        else:
-            print(
-                f"[auth] no auth file found at "
-                f"{Path(codex_auth_file).expanduser()}"
-            )
-
-    runner = get_non_preemptible_runner() if non_preemptible else run_trajectory
-    try:
-        result = await runner.remote.aio(
-            agent=normalized_agent,
-            model=model,
-            max_parts=max_parts,
-            message_timeout_seconds=message_timeout_seconds,
-            trajectory_id=trajectory_id,
-            codex_auth_json_b64=codex_auth_json_b64,
-            resume=resume,
-            sandbox_provider=sandbox_provider,
-            task_dir=task_dir,
-            environment_dir=environment_dir,
-        )
-        print(f"Completed trajectory: {result}")
-    except Exception as e:
-        message = str(e).strip()
-        if not message:
-            message = "remote run stopped or failed"
-        print(f"[error] {message}")
-
-
-# ---------------------------------------------------------------------------
-# Direct execution entry point (for non-Modal sandbox providers)
+# Direct execution entry point
 # ---------------------------------------------------------------------------
 
 
@@ -1347,7 +1158,7 @@ if __name__ == "__main__":
     load_dotenv()
 
     parser = direct_ap.ArgumentParser(
-        description="Run trajectory directly (non-Modal).",
+        description="Run trajectory directly.",
     )
     parser.add_argument("--agent", default=DEFAULT_AGENT)
     parser.add_argument("--model", default=None)

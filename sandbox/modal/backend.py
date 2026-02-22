@@ -18,11 +18,13 @@ from typing import Any
 
 import modal
 
-from sandbox.base import CommandResult
+from sandbox.base import CommandResult, SandboxConfig
 
 
 class ModalSandbox:
     """Sandbox implementation backed by modal.Sandbox."""
+
+    app: modal.App | None = None
 
     def __init__(self, inner: modal.Sandbox) -> None:
         self._inner = inner
@@ -32,20 +34,40 @@ class ModalSandbox:
         return "modal"
 
     @staticmethod
-    async def create(
-        *,
-        image: modal.Image,
-        timeout: int,
-        app: modal.App,
-    ) -> ModalSandbox:
-        """Create a new Modal sandbox."""
+    def get_app() -> modal.App:
+        """Return (or lazily create) the shared Modal App."""
+        if ModalSandbox.app is None:
+            ModalSandbox.app = modal.App.lookup(
+                "envoi-trace", create_if_missing=True,
+            )
+        return ModalSandbox.app
+
+    @staticmethod
+    def build_image(config: SandboxConfig) -> modal.Image:
+        """Build a sandbox image from Dockerfile + agent requirements."""
+        image = modal.Image.from_dockerfile(
+            config.environment_dockerfile, add_python="3.12",
+        )
+        reqs = config.image_requirements
+        if reqs.apt_packages:
+            image = image.apt_install(*reqs.apt_packages)
+        if reqs.pip_packages:
+            image = image.pip_install(*reqs.pip_packages)
+        for cmd in reqs.build_commands:
+            image = image.run_commands(cmd)
+        return image
+
+    @staticmethod
+    async def create(config: SandboxConfig) -> ModalSandbox:
+        """Create a new Modal sandbox from config."""
+        image = ModalSandbox.build_image(config)
         inner = await modal.Sandbox.create.aio(
             "bash",
             "-c",
             "sleep infinity",
             image=image,
-            timeout=timeout,
-            app=app,
+            timeout=config.timeout,
+            app=ModalSandbox.get_app(),
         )
         return ModalSandbox(inner)
 

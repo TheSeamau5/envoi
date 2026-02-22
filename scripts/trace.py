@@ -61,7 +61,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
     command: list[str] = ["modal", "run"]
     if args.detach:
         command.append("--detach")
-    command.append("runner.py")
+    command.append("sandbox/modal/deploy.py")
     command.extend(common_runner_args(args, trajectory_id))
     if args.non_preemptible:
         command.append("--non-preemptible")

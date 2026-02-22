@@ -5,8 +5,7 @@ on an Agent: setup() to provision the agent inside a sandbox, run_turn()
 to execute one prompt/response cycle, and stop() to tear down. Each agent
 implementation (Codex, OpenCode) handles the LLM-specific details internally.
 
-Also defines AgentTurnOutcome, Pydantic config models, and
-SandboxImageRequirements.
+Also defines AgentTurnOutcome and Pydantic config models.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from sandbox.base import Sandbox
+from sandbox.base import Sandbox, SandboxImageRequirements
 
 # --- Pydantic config models ---
 
@@ -44,14 +43,6 @@ class AgentSetupContext(BaseModel):
     workspace_gitignore: str = ""
 
     model_config = {"arbitrary_types_allowed": True}
-
-
-class SandboxImageRequirements(BaseModel):
-    """Declarative image needs that an agent layers onto the environment image."""
-
-    apt_packages: list[str] = Field(default_factory=list)
-    pip_packages: list[str] = Field(default_factory=list)
-    build_commands: list[str] = Field(default_factory=list)
 
 
 # --- Turn outcome ---
