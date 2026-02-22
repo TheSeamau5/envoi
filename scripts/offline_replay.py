@@ -938,8 +938,8 @@ async def async_main() -> None:
     )
     parser.add_argument(
         "--bucket",
-        default=os.environ.get("AWS_S3_BUCKET", "envoi-trace-data"),
-        help="S3 bucket used with --trajectory-id (default: AWS_S3_BUCKET or envoi-trace-data)",
+        default=os.environ.get("AWS_S3_BUCKET"),
+        help="S3 bucket used with --trajectory-id (default: AWS_S3_BUCKET env var).",
     )
     parser.add_argument(
         "--output",

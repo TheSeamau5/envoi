@@ -1,35 +1,37 @@
 # AGENTS.md
 
 ## What This Repo Does
-This repo is an iterative harness to get an agent to build a C compiler against an envoi test environment.
+
+envoi-trace is an agent evaluation framework. It runs a coding agent inside a remote sandbox, lets the agent iteratively edit code and run tests against an envoi environment, and records everything as a parquet trace.
 
 Primary objective:
-- Increase compiler correctness over time until the agent passes all required suites.
+- Evaluate how well a coding agent performs against a test harness over a part budget.
 
 Operational objective:
-- Make each run replayable and diagnosable at part granularity.
+- Make every run replayable and diagnosable at part granularity.
 
-Core job:
-1. Run an agent in a Modal sandbox with a bounded part budget.
-2. Let the agent iteratively edit compiler code and run envoi tests.
-3. Capture what happened at part granularity.
-4. Capture repository state via git commits when code changed.
-5. Persist artifacts to S3 for replay and analysis.
+Core loop:
+1. Spin up a sandbox (Modal or E2B) with the environment installed.
+2. Run the agent (Codex or OpenCode) with a bounded part budget.
+3. The agent edits code, runs tests, and iterates.
+4. Capture every action as a part in `trace.parquet`.
+5. Checkpoint the repo via git whenever files change.
+6. Persist artifacts to S3 for replay and analysis.
 
-Hard requirement:
+Hard requirements:
 - Persist `trace.parquet` after every recorded part.
 - Create a git checkpoint immediately for any part that changed files.
 
 Schema policy:
 - No deprecated fields, aliases, compatibility shims, or dual schemas.
-- Do not keep old names alive after renames.
 - If a schema or term changes, migrate and delete the old one.
 - Rule: fix or delete.
 
 ## Vocabulary (Canonical)
+
 - `part`:
   - Most granular observable unit in the trace.
-  - A meaningful assistant part such as `reasoning`, `text`, `tool`, `tool_use`, `tool_result`, or `patch`.
+  - A meaningful assistant action: `reasoning`, `text`, `tool`, `tool_use`, `tool_result`, or `patch`.
   - Global part index is the authoritative progress counter.
   - Budgeting and limits are based on parts (`--max-parts`).
 - `turn`:
@@ -43,178 +45,131 @@ Schema policy:
   - Use `turn` for loop iterations and `part` for progress/accounting.
 
 ## Why Parts Are The Source Of Truth
+
 - Parts are the highest-fidelity unit we can observe and count consistently across providers.
 - A very capable model can do huge work in one turn; turn-count budgets miss this entirely.
 - Part-level indexing gives better recovery and replay granularity than turn-only indexing.
 - Artifact and replay contracts are keyed to part indices (`checkout-part`, `part_to_commit`).
 
-## Architecture At A Glance
-- `tasks/c_compiler/task.py`: canonical task definition (prompts, setup script, test paths).
-- `tasks/resolver.py`: dynamic task resolution (`resolve_task()` → `EnvConfig`).
-- `runner.py`: main controller. Starts Modal sandbox runtime, runs agent turns, captures trace, checkpoints git, uploads artifacts.
-- `trace_format.py`: parquet trace schema, conversion, and round-trip support.
-- `sandbox/modal/setup.sh`: boots envoi runtime (`:8000`) and agent runtime tooling inside Modal sandbox.
-- `sandbox/modal/mcp_server.py`: exposes `run_tests(test_path)` via MCP; runs envoi tests against `/workspace`.
-- `agents/opencode.py`: OpenCode agent client wrapper (stable JSON surface + inline OpenCode config template).
-- `agents/codex.py`: Codex agent client wrapper (stable JSON surface).
-- `environments/c_compiler/main.py`: envoi environment entrypoint (build + test suites).
-- `environments/c_compiler/tests/*`: suite implementations (`basics`, `wacct`, `c_testsuite`, `torture`).
-- `scripts/offline_replay.py`: offline artifact consumer (reconstruct repo at part `p`, replay tests by commit).
+## Architecture
 
-## Big Technical Decisions (Intent)
-- Parquet trace format (`trace.parquet`):
-  - One row per part, trajectory-level fields denormalized into every row.
-  - Enables DuckDB cross-trace queries via S3 globbing.
-  - `session_end_reason IS NULL` means in-progress; non-null means completed.
-- Git-first state capture:
-  - Checkpoint commits happen only when files changed (no duplicate commit noise).
-  - Final `repo.bundle` makes full history portable.
-- SDK isolation:
-  - OpenCode API access is centralized in `agents/opencode.py`.
-  - Orchestrator talks to one JSON CLI surface, decoupled from SDK internals.
+```
+envoi-trace CLI (scripts/trace.py)
+  └─ modal run runner.py
+       ├─ AgentBackend (agents/base.py)
+       │    ├─ CodexAgent (agents/codex.py) ── runs inside sandbox
+       │    └─ OpenCodeAgent (agents/opencode.py) ── runs inside sandbox
+       ├─ SandboxBackend (sandbox/base.py)
+       │    ├─ ModalSandbox (sandbox/modal/backend.py)
+       │    └─ E2BSandbox (sandbox/e2b/backend.py)
+       ├─ envoi server (localhost:8000) ── test harness from environment/main.py
+       └─ MCP server (sandbox/modal/mcp_server.py) ── bridges agent ↔ envoi
+```
+
+Key files:
+- `runner.py` — Main orchestrator. Runs inside Modal. Manages agent turns, git checkpoints, trace persistence, and session recovery.
+- `models.py` — Pydantic models: `PartRecord`, `TurnRecord`, `AgentTrace`, `SessionEnd`, `EnvoiCall`, `TestingState`, etc.
+- `agents/base.py` — `AgentBackend` Protocol. Every agent implements this.
+- `sandbox/base.py` — `SandboxBackend` Protocol + `CommandResult`. Every sandbox implements this.
+- `scripts/trace.py` — CLI entrypoint. Launches `runner.py` via Modal, handles auto-resume.
+- `examples/tasks/` — Task prompts (what to tell the agent).
+- `examples/environments/` — envoi test harnesses (what to evaluate the agent against).
+- `utils/trace_parquet.py` — Parquet serialization: `agent_trace_to_rows()`, `parquet_to_trace_dict()`.
+- `utils/storage.py` — S3 upload/download for trace and bundle artifacts.
+- `utils/git.py` — Git checkpoint operations inside the sandbox.
+- `utils/evaluation.py` — Concurrent commit evaluation against envoi.
+- `utils/parsing.py` — Parse agent responses into parts and envoi calls.
+- `utils/stream.py` — Real-time stream callback for part events.
+- `utils/solve.py` — `SolveTracker`: tracks which test paths have been solved.
+- `utils/helpers.py` — Small utilities: timestamps, text, tokens, file upload.
+
+## Task Loading
+
+`runner.py`'s `load_task(task_dir)` loads a task from a directory path. Three tiers:
+
+- **Tier 3**: `task_dir/task.py` with a `generate()` function → returns `(prompt, params)`
+- **Tier 2**: `task_dir/prompt.md` (or `en.md`) + `task_dir/params.py` → template substitution
+- **Tier 1**: `task_dir/prompt.md` (or `en.md`) only → static prompt
+
+Uses `importlib.util.spec_from_file_location` — task directories don't need to be Python packages.
+
+## Big Technical Decisions
+
+- **Parquet trace format**: One row per part, denormalized. Enables DuckDB cross-trace queries via S3 globbing. Nested objects stored as JSON strings.
+- **Git-first state capture**: Checkpoint commits happen only when files changed. Final `repo.bundle` makes full history portable.
+- **SDK isolation**: Agent scripts run inside the sandbox. The orchestrator talks to them via a JSON stdio surface, decoupled from agent SDK internals.
+- **Two Protocol abstractions**: `AgentBackend` for agents, `SandboxBackend` for sandboxes. Swap implementations without touching the orchestrator.
+
+## Trace Format (`trace.parquet`)
+
+One row per part, trajectory-level fields denormalized into every row.
+
+Each row records:
+- Identity: `part`, `timestamp`, `duration_ms`
+- Semantics: `role`, `part_type`, `item_type`, `summary`
+- Repository: `git_commit`, `repo_checkpoint` (commits, changed files, patch)
+- Testing: `envoi_calls` (test invocations), `testing_state` (solve progress)
+- Session end (null while in-progress): `session_end_reason`, `session_end_total_parts`
+
+`session_end_reason IS NULL` means in-progress; non-null means completed.
 
 ## Artifact Contract (S3)
-For trajectory `<id>`, artifacts are stored under:
-- `trajectories/<id>/trace.parquet` (canonical trace)
-- `trajectories/<id>/repo.bundle` (git history)
 
-Code-state source of truth:
-- `repo.bundle` contains full git history and is the canonical source for repository reconstruction.
-- `trace.parquet` maps each part to commit metadata (`git_commit` / `repo_checkpoint`).
+For trajectory `<id>`:
+- `trajectories/<id>/trace.parquet` — Canonical trace (written after every part)
+- `trajectories/<id>/repo.bundle` — Full git history (uploaded at end-of-run)
 
-`trace.parquet` schema (one row per part):
-- `parts`: canonical list of part records (source of truth)
-- Trajectory-level fields denormalized into every row
+`repo.bundle` is the canonical source for repository reconstruction. `trace.parquet` maps each part to its commit via `git_commit` / `repo_checkpoint`.
 
-Each part row includes:
-- identity and timing:
-  - `part`, `timestamp`, `duration_ms`
-- part semantics:
-  - `role` (`assistant` or `user`)
-  - `part_type` (`reasoning`, `text`, `tool`, `patch`, ...)
-  - `item_type` (provider-specific item kind)
-  - `summary` (concise content preview)
-- repository state:
-  - `git_commit`
-  - `repo_checkpoint`: `commit_before`, `commit_after`, `changed_files` (JSON string)
-- testing state:
-  - `envoi_calls` (new test calls observed on that part, JSON string)
-  - `testing_state` (solved progress + latest test status, JSON string)
-- session end (denormalized, null when in-progress):
-  - `session_end_reason`
-  - `session_end_total_parts`
-  - `session_end_total_turns`
-  - `session_end_final_commit`
+## CLI
 
-## Quick Trace Commands
 Run a trajectory:
 
 ```bash
-uv run trace
+envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
 ```
 
 Common options:
 
 ```bash
-uv run trace --agent codex --max-parts 100 --detach
+envoi-trace --agent codex --max-parts 100 --task <path> --env <path>
+envoi-trace --agent opencode --model opencode/gpt-5-nano --task <path> --env <path>
+envoi-trace --sandbox e2b --task <path> --env <path>
+envoi-trace --preemptible --task <path> --env <path>
+envoi-trace --detach --task <path> --env <path>
 ```
 
-`trace` prints:
-- `TRAJECTORY_ID`
-- `TRACE_S3_URI`
-- `BUNDLE_S3_URI`
-
-Analyze a trajectory:
+Analyze:
 
 ```bash
-uv run graph_trace <trajectory_id>
+envoi-trace graph <trajectory_id>
+envoi-trace graph <trajectory_id> --part 42 --checkout-dest ./repo_at_42
 ```
 
-This auto-downloads trace + bundle from S3 and runs suite-level analysis.
-
-For a specific part checkout:
+Offline replay:
 
 ```bash
-uv run graph_trace <trajectory_id> --part <p>
+replay --mode checkout-part --trajectory-id <id> --part <p> --checkout-dest ./out
+replay --mode evaluate --trajectory-id <id> --output eval.json
 ```
-
-## How To Reconstruct Repo At Part `p`
-Use the `replay` CLI (implemented in `scripts/offline_replay.py`) when you need full control:
-
-```bash
-uv run replay \
-  --mode checkout-part \
-  --trajectory-id <trajectory_id> \
-  --part <p> \
-  --checkout-dest output/repo_part_<p> \
-  --output output/repo_part_<p>.json
-```
-
-What it does:
-1. Resolves/downloads `trace.parquet` and `repo.bundle`.
-2. Reads commit for part `p`.
-3. Clones bundle and checks out that commit.
-
-## How To Replay Tests Offline
-Use the `replay` CLI (implemented in `scripts/offline_replay.py`) when you need full control:
-```bash
-uv run replay \
-  --mode evaluate \
-  --trajectory-id <trajectory_id> \
-  --output output/offline_eval.json
-```
-
-Behavior:
-- Deduplicates commits across parts.
-- Evaluates each unique commit once.
-- Maps results back onto each part (`part_to_commit`, `part_evaluations`).
 
 ## Where To Edit What
-- Task definition: `tasks/c_compiler/task.py`.
-- Task resolution: `tasks/resolver.py`.
-- Trace schema/capture behavior: `runner.py` (`PartRecord`, `TurnRecord`, `make_stream_part_callback`, main loop).
-- Trace format: `trace_format.py`.
-- OpenCode agent integration: `agents/opencode.py`.
-- Codex agent integration: `agents/codex.py`.
-- Sandbox boot/runtime services: `sandbox/modal/setup.sh`.
-- Tool exposure: `agents/opencode.py` (inline config template) and `sandbox/modal/mcp_server.py`.
-- Test suite behavior: `environments/c_compiler/tests/*.py`.
-- Offline reconstruction/reporting: `scripts/offline_replay.py`.
-- Short launchers: `scripts/trace.py`, `scripts/graph_trace.py`.
 
-## Operational Notes
-- Use `uv` for local Python workflows.
-- Default run behavior:
-  - agent: `codex`
-  - max parts: `1000`
-  - non-preemptible Modal execution: enabled
-- Normal workflow:
-  - run trajectory (`uv run trace`)
-  - capture `TRAJECTORY_ID` from startup logs
-  - analyze (`uv run graph_trace <trajectory_id>`)
-- Main run command (simple):
-  ```bash
-  uv run trace
-  ```
-- With explicit options:
-  ```bash
-  uv run trace --agent codex --max-parts 100 --detach
-  ```
-- Optional opt-out for preemptible execution:
-  ```bash
-  uv run trace --preemptible
-  ```
-- Direct Modal command (full control):
-  ```bash
-  modal run runner.py --agent codex --max-parts <n>
-  ```
-- Lint/check:
-  ```bash
-  uv run ruff check
-  ```
+- Task prompt: `examples/tasks/<name>/en.md` (or `prompt.md`)
+- Environment harness: `examples/environments/<name>/main.py`
+- Test suites: `examples/environments/<name>/tests/*.py`
+- Fixture installation: `examples/environments/<name>/setup.sh`
+- Trace schema/capture: `runner.py` (main loop, `PartRecord`, `TurnRecord`)
+- Trace parquet serialization: `utils/trace_parquet.py`
+- Agent integration: `agents/codex.py`, `agents/opencode.py`
+- Sandbox runtime: `sandbox/modal/setup.sh`, `sandbox/modal/mcp_server.py`
+- CLI launcher: `scripts/trace.py`
+- Offline analysis: `scripts/graph_trace.py`, `scripts/offline_replay.py`
 
 ## Important Gotchas
+
 - A turn may produce no new commit when files did not change.
-- `repo.bundle` is uploaded at end-of-run; if run dies early, bundle may be missing.
+- `repo.bundle` is uploaded at end-of-run; if the run dies early, bundle may be missing.
 - Full offline evaluation requires heavy fixtures at `/opt/tests/...`.
-- `envoi-repo/` is a local reference; orchestrator runtime uses installed `envoi` in sandbox image.
+- `--task` and `--env` are required path arguments — there are no defaults.
+- `envoi-repo/` is a local reference; the sandbox uses the installed `envoi` package.

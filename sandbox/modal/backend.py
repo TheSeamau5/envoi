@@ -1,4 +1,9 @@
-"""Modal sandbox backend implementation."""
+"""Modal sandbox backend -- runs commands in a Modal cloud sandbox.
+
+Implements SandboxBackend using Modal's Sandbox API. Each trajectory gets an
+ephemeral sandbox with a pre-built image (Ubuntu 24.04, Python 3.12, Rust, etc.).
+Commands run via sandbox.exec(), files transfer via stdin/stdout piping.
+"""
 
 from __future__ import annotations
 

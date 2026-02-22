@@ -1,4 +1,13 @@
-"""Pydantic models for envoi-trace."""
+"""Pydantic models shared across envoi-trace.
+
+PartRecord is the fundamental unit — one row in trace.parquet. TurnRecord groups
+parts from a single agent request/response. AgentTrace is the top-level container
+that holds all parts, turns, evaluations, and session metadata for one trajectory.
+
+Supporting models: EnvoiCall (a test invocation), TestingState (solve progress
+snapshot), RepoCheckpoint (git state before/after a part), SessionEnd (why the
+run stopped), EvaluationRecord (offline commit evaluation).
+"""
 
 from __future__ import annotations
 

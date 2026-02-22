@@ -1,4 +1,9 @@
-"""E2B sandbox backend implementation."""
+"""E2B sandbox backend -- runs commands in an E2B cloud sandbox.
+
+Implements SandboxBackend using E2B's Code Interpreter API. Alternative to
+Modal for environments that need a different cloud provider. Use with
+--sandbox e2b on the CLI.
+"""
 
 from __future__ import annotations
 

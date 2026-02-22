@@ -1,10 +1,17 @@
 """
 Main orchestrator for envoi-trace.
 
-Runs an agent backend with a part budget and saves a trace.parquet artifact
-containing per-part records, git checkpoints, and parsed envoi test calls.
+This module runs inside a Modal function. It creates a sandbox, provisions an
+agent (Codex or OpenCode), and runs a turn loop with a bounded part budget.
+After every part, it persists trace.parquet to S3. After every file change, it
+creates a git checkpoint. At end-of-run, it uploads a repo.bundle with full
+git history.
 
-Usage:
+The two core abstractions are AgentBackend (how to talk to an agent) and
+SandboxBackend (where the agent runs). This file wires them together and
+manages the turn loop, resume logic, and artifact persistence.
+
+Usage (via CLI):
     envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
     envoi-trace --agent codex --max-parts 1000 --task <path> --env <path>
 """
@@ -14,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import builtins
+import inspect
 import json
 import os
 import shlex
@@ -114,11 +122,17 @@ _DEFAULT_ENVIRONMENT_DIR = _EXAMPLES_DIR / "environments" / "c_compiler"
 async def load_task(
     task_dir: Path, *, lang: str = "en",
 ) -> tuple[str, dict[str, Any]]:
-    """Load a task prompt by convention.
+    """Load a task prompt from a directory path.
 
-    Tier 3: task_dir/task.py with generate()
-    Tier 2: prompt file + params.py
-    Tier 1: prompt file only
+    Three tiers, checked in order:
+      Tier 3: task_dir/task.py with a generate() function -> (prompt, params)
+      Tier 2: prompt file (en.md or prompt.md) + params.py -> template substitution
+      Tier 1: prompt file only -> static prompt text
+
+    Task directories don't need to be Python packages. Uses
+    importlib.util.spec_from_file_location for file-based module loading.
+
+    Returns (prompt_text, params_dict).
     """
     import importlib.util
 
@@ -130,7 +144,7 @@ async def load_task(
             spec.loader.exec_module(mod)
             gen = getattr(mod, "generate", None)
             if gen is not None:
-                return await gen() if asyncio.iscoroutinefunction(gen) else gen()
+                return await gen() if inspect.iscoroutinefunction(gen) else gen()
 
     # Tier 1/2: load prompt file
     prompt_file = task_dir / f"{lang}.md"
@@ -151,7 +165,7 @@ async def load_task(
             params_fn = params_mod.params
             params = (
                 await params_fn()
-                if asyncio.iscoroutinefunction(params_fn)
+                if inspect.iscoroutinefunction(params_fn)
                 else params_fn()
             )
             prompt = prompt.format(**params)

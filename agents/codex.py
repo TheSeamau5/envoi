@@ -1,9 +1,15 @@
 """
-Codex app-server wrapper for non-interactive turns.
+Codex agent backend -- wraps the Codex app-server for non-interactive turns.
 
-This script runs inside the Modal sandbox, starts `codex app-server` over stdio,
-and maps streamed item notifications to the part-level trace protocol consumed by
-runner.py (`TRACE_EVENT { ... }`).
+This module has two roles:
+1. As a script running inside the sandbox: starts `codex app-server` over stdio,
+   sends JSON-RPC requests (create_session, send_message), and parses streamed
+   item notifications into TRACE_EVENT lines on stderr.
+2. As the CodexAgent class implementing AgentBackend: uploads itself into the
+   sandbox, manages sessions, and translates turn results for runner.py.
+
+The TRACE_EVENT protocol is how parts flow from the agent to the orchestrator
+in real time. Each event is a JSON line prefixed with "TRACE_EVENT " on stderr.
 """
 
 from __future__ import annotations

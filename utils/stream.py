@@ -1,4 +1,10 @@
-"""Stream callback factory for live part events."""
+"""Real-time stream callback for agent part events.
+
+Creates the on_stream_part callback that runner.py passes to agent.run_turn().
+When the agent emits a part event (via TRACE_EVENT on stderr), this callback
+records it as a PartRecord, triggers git checkpoints for file changes, extracts
+envoi test calls, and persists the updated trace to S3.
+"""
 
 from __future__ import annotations
 

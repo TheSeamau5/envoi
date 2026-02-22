@@ -1,4 +1,9 @@
-"""SolveTracker: tracks which required test paths have been solved."""
+"""SolveTracker: tracks which required test paths have been solved.
+
+Used by the stream callback to maintain a running snapshot of test progress.
+A path is considered solved when an envoi call returns all tests passing.
+The snapshot() method produces a TestingState for inclusion in each PartRecord.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,13 @@ from models import EnvoiCall, TestingState
 
 
 class SolveTracker:
+    """Tracks which required test paths the agent has solved.
+
+    Initialized with the list of test paths from the envoi schema. As envoi
+    calls come in (via update()), marks paths as solved when all tests pass.
+    The snapshot() method returns a TestingState for the current PartRecord.
+    """
+
     def __init__(self, required_paths: list[str]) -> None:
         self.required_paths = required_paths
         self.required_paths_set = set(required_paths)

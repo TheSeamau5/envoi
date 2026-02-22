@@ -1,4 +1,14 @@
-"""Parquet serialization for AgentTrace."""
+"""Parquet serialization for AgentTrace.
+
+Converts between the in-memory AgentTrace model and the flat one-row-per-part
+parquet format. Trajectory-level fields are denormalized into every row so that
+any single row is self-contained. Nested objects (envoi_calls, testing_state,
+repo_checkpoint, token_usage) are stored as JSON strings.
+
+Key functions:
+  agent_trace_to_rows() -- AgentTrace -> list of flat row dicts
+  parquet_to_trace_dict() -- parquet bytes -> reconstructed trace dict
+"""
 
 from __future__ import annotations
 
@@ -96,7 +106,12 @@ def agent_trace_to_rows(
     suites: dict[str, Any],
     bundle_uri: str | None,
 ) -> list[dict[str, Any]]:
-    """Convert AgentTrace to flat row dicts (one per part)."""
+    """Convert an AgentTrace to flat row dicts for parquet serialization.
+
+    Produces one dict per part. Trajectory-level fields (session_end, evaluations,
+    artifacts, suites) are denormalized into every row. Nested objects are serialized
+    to JSON strings via _json_or_none().
+    """
     turn_map = _build_turn_map(trace)
 
     se = trace.session_end

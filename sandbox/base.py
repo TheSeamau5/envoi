@@ -1,4 +1,13 @@
-"""Base protocol for sandbox backends."""
+"""SandboxBackend Protocol — the interface every sandbox must implement.
+
+A sandbox is a remote Linux environment where agents run in isolation. The
+orchestrator uses run() to execute commands, write_file()/read_file() to
+transfer files, and terminate() to tear down. Implementations exist for
+Modal (sandbox/modal/) and E2B (sandbox/e2b/).
+
+Also defines CommandResult, a frozen dataclass for command execution results.
+Use .unpack() for tuple destructuring: exit_code, stdout, stderr = result.unpack()
+"""
 
 from __future__ import annotations
 

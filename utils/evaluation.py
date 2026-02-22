@@ -1,4 +1,9 @@
-"""Commit evaluation: build commands, parse results, run evaluations."""
+"""Concurrent commit evaluation against envoi.
+
+After a part changes files and creates a git checkpoint, this module evaluates
+the commit by running the environment's test suites via the envoi server. Uses
+bounded concurrency to evaluate multiple commits without overwhelming the sandbox.
+"""
 
 from __future__ import annotations
 

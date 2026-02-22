@@ -1,4 +1,10 @@
-"""Small helpers: timestamps, text truncation, token estimation, usage merging."""
+"""Shared utilities used across envoi-trace.
+
+Timestamped printing (tprint), environment file loading, model name resolution,
+base64/JSON credential handling, text truncation, token estimation, usage map
+merging, secret redaction, adaptive turn timeout computation, and parallel file
+upload to sandboxes.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +61,11 @@ print = tprint
 def load_environment_files(
     env_dir: Path,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """Load py/c/txt files from an environment directory."""
+    """Load all source files from an environment directory for sandbox upload.
+
+    Returns three dicts mapping relative paths to file contents: (py, c, txt).
+    These get passed to environment_upload_items() to produce sandbox paths.
+    """
     py_files = {
         str(p.relative_to(env_dir)): p.read_text()
         for p in env_dir.rglob("*.py")
@@ -194,7 +204,12 @@ def compute_turn_timeout_seconds(
     remaining_run_seconds: float,
     message_timeout_seconds: int,
 ) -> int:
-    """Derive an adaptive per-turn timeout."""
+    """Derive an adaptive per-turn timeout based on remaining budget.
+
+    Takes the minimum of: the hard cap (message_timeout_seconds), the
+    parts-based estimate (remaining_parts * SECONDS_PER_REMAINING_PART),
+    and the wall-clock budget remaining. Ensures at least 1 second.
+    """
     timeout_from_parts = max(
         MIN_TURN_TIMEOUT_SECONDS,
         remaining_parts * SECONDS_PER_REMAINING_PART,
@@ -290,7 +305,12 @@ async def run_sandbox_client(
     stream_output: bool = False,
     on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
-    """Run a sandbox client script and return parsed JSON stdout."""
+    """Run an agent client script inside the sandbox and parse its JSON output.
+
+    Executes a Python script (e.g. codex.py, opencode.py) with the given args.
+    The script is expected to print a single JSON object to stdout. Returns
+    None on non-zero exit or invalid JSON.
+    """
     command = (
         f"python3 -u {shlex.quote(script_path)} "
         + " ".join(shlex.quote(a) for a in args)

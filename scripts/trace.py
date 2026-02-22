@@ -1,5 +1,12 @@
 """
-envoi-trace CLI.
+envoi-trace CLI -- the main entrypoint for running and analyzing trajectories.
+
+Run mode (default, no subcommand): launches runner.py via Modal to execute an
+agent trajectory. Handles auto-resume on retryable failures (agent_error,
+timeout, envoi_error) and prints trajectory ID + S3 URIs at startup.
+
+Graph mode (subcommand): downloads trace + bundle from S3 and generates
+suite-level analysis graphs.
 
 Usage:
     envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
@@ -164,7 +171,9 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
 def _run(args: argparse.Namespace) -> None:
     """Execute a trajectory run."""
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
-    bucket = os.environ.get("AWS_S3_BUCKET", "envoi-trace-data")
+    bucket = os.environ.get("AWS_S3_BUCKET")
+    if not bucket:
+        raise SystemExit("AWS_S3_BUCKET environment variable is required")
     trace_uri = artifact_uri(bucket, trajectory_id, "trace.parquet")
     bundle_uri = artifact_uri(bucket, trajectory_id, "repo.bundle")
 
@@ -269,7 +278,7 @@ def main() -> None:
     graph_parser.add_argument("trajectory_id", help="Trajectory ID in S3.")
     graph_parser.add_argument(
         "--bucket",
-        default=os.environ.get("AWS_S3_BUCKET", "envoi-trace-data"),
+        default=os.environ.get("AWS_S3_BUCKET"),
     )
     graph_parser.add_argument("--output", default=None)
     graph_parser.add_argument("--part", type=int, default=None)

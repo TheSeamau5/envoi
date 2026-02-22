@@ -1,4 +1,9 @@
-"""Message parsing: envoi call extraction, trace event parsing, etc."""
+"""Parse agent responses into parts and envoi calls.
+
+Extracts structured data from raw agent turn responses: counts meaningful parts,
+extracts envoi test calls from tool outputs, aggregates token usage, and logs
+part summaries. Used by runner.py after each turn to update the trace.
+"""
 
 from __future__ import annotations
 

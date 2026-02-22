@@ -1,14 +1,16 @@
 """
-Minimal OpenCode API wrapper using the Python SDK.
+OpenCode agent backend -- wraps the OpenCode Python SDK.
 
-This script runs inside the Modal sandbox and talks to the local OpenCode server.
-It prints one JSON object to stdout with the shape:
-{
-  "ok": bool,
-  "status_code": int | null,
-  "body": any,
-  "error": str | null
-}
+This module has two roles:
+1. As a script running inside the sandbox: starts the OpenCode server, uses the
+   AsyncOpencode client to create sessions and send messages, and emits
+   TRACE_EVENT lines on stderr for each part.
+2. As the OpenCodeAgent class implementing AgentBackend: uploads itself into the
+   sandbox, manages the OpenCode config, and translates turn results for runner.py.
+
+Also exports OPENCODE_CONFIG_TEMPLATE, the JSON config that gets written to
+.opencode.jsonc in the sandbox workspace. This config sets up the model, MCP
+server, and tool permissions.
 """
 
 from __future__ import annotations

@@ -1,4 +1,9 @@
-"""Git operations: checkpoints, bundles, patches, retry logic."""
+"""Git operations inside the sandbox.
+
+Runs git commands via SandboxBackend.run() to manage the agent's workspace repo.
+Handles checkpoint commits (only when files changed), patch/diff extraction,
+bundle creation for portable history, and retry logic for transient failures.
+"""
 
 from __future__ import annotations
 

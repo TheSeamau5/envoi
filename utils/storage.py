@@ -1,4 +1,9 @@
-"""S3 helpers: trace parquet save/load, file upload, artifact URIs."""
+"""S3 persistence for trace artifacts.
+
+Handles saving trace.parquet after every part (save_trace_parquet), loading a
+prior trace for resume (load_trace_snapshot), uploading raw files like
+repo.bundle (upload_file), and constructing S3 URIs (artifact_uri).
+"""
 
 from __future__ import annotations
 
@@ -30,7 +35,10 @@ def get_s3_client():
 
 
 def get_bucket() -> str:
-    return os.environ.get("AWS_S3_BUCKET", "envoi-trace-data")
+    bucket = os.environ.get("AWS_S3_BUCKET")
+    if not bucket:
+        raise RuntimeError("AWS_S3_BUCKET environment variable is required")
+    return bucket
 
 
 def save_trace_parquet(
@@ -41,6 +49,11 @@ def save_trace_parquet(
     task_params: dict[str, Any] | None = None,
     allow_empty: bool = False,
 ) -> None:
+    """Serialize the current AgentTrace to parquet and upload to S3.
+
+    Called after every part to ensure the trace is always persisted. Skips
+    upload if the trace has no parts/turns (unless allow_empty=True).
+    """
     part_count = len(trace.parts)
     turn_count = len(trace.turns)
     if not allow_empty and turn_count == 0 and part_count == 0:
@@ -79,6 +92,11 @@ def artifact_uri(trajectory_id: str, filename: str) -> str:
 
 
 def load_trace_snapshot(trajectory_id: str) -> AgentTrace | None:
+    """Download and parse a prior trace from S3 for resume.
+
+    Returns None if the trace doesn't exist or can't be parsed. Used at the
+    start of a run to restore state from a previous (possibly crashed) session.
+    """
     s3 = get_s3_client()
     bucket = get_bucket()
     key = f"trajectories/{trajectory_id}/trace.parquet"

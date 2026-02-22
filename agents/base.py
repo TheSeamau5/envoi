@@ -1,4 +1,12 @@
-"""AgentBackend Protocol and shared agent types."""
+"""AgentBackend Protocol — the interface every agent must implement.
+
+The orchestrator (runner.py) never talks to an LLM directly. It calls methods
+on an AgentBackend: start() to provision the agent inside a sandbox, run_turn()
+to execute one prompt/response cycle, and stop() to tear down. Each agent
+implementation (Codex, OpenCode) handles the LLM-specific details internally.
+
+Also defines AgentTurnOutcome, the structured return value from run_turn().
+"""
 
 from __future__ import annotations
 

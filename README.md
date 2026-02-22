@@ -1,31 +1,88 @@
 # envoi-trace
 
-This repo runs agent trajectories where the agent tries to build a real C compiler and improve it against the envoi test harness.
+Run a coding agent inside a remote sandbox, record every action as a trace, and evaluate the results.
 
-The practical loop is:
-`run agent -> collect trace/artifacts -> analyze -> adjust -> run again`.
+## Quick Start
 
-## 1) Prerequisites
+```bash
+envoi-trace \
+  --agent codex \
+  --max-parts 1000 \
+  --task examples/tasks/c_compiler \
+  --env examples/environments/c_compiler
+```
+
+This does three things:
+
+1. Spins up a Modal sandbox with your environment (test fixtures, compilers, etc.)
+2. Runs the agent (Codex or OpenCode) against your task prompt
+3. Saves a `trace.parquet` to S3 after every part, plus a `repo.bundle` at the end
+
+The launcher prints a `TRAJECTORY_ID` at startup. Save it — you use it for everything else.
+
+## What a Simple Environment Looks Like
+
+An environment is an [envoi](https://github.com/TheSeamau5/envoi.git) test harness. Here is the simplest possible one:
+
+```
+my_task/
+  prompt.md          # what to tell the agent
+my_env/
+  main.py            # envoi test harness
+  setup.sh           # (optional) install fixtures
+```
+
+**prompt.md** — the system prompt the agent receives:
+
+```markdown
+Write a Python function that sorts a list using merge sort.
+You have access to a run_tests tool. Use it after each change.
+```
+
+**main.py** — the envoi environment entrypoint:
+
+```python
+import envoi
+
+sort_tests = envoi.suite("sort")
+
+@sort_tests.test()
+async def run_sort_tests():
+    result = await envoi.run("python3 -m pytest /opt/tests/", timeout_seconds=60)
+    return {"passed": ..., "failed": ..., "total": ...}
+
+@envoi.setup
+async def setup(submission: envoi.Documents):
+    await envoi.run("pip install pytest", timeout_seconds=60)
+```
+
+Then run it:
+
+```bash
+envoi-trace --task my_task --env my_env
+```
+
+The `--task` directory must contain a prompt file (`en.md`, `prompt.md`, or a `task.py`).
+The `--env` directory must contain a `main.py` that uses the envoi SDK.
+
+## Prerequisites
 
 - Python 3.12+
 - `uv` installed
 - Modal CLI installed and authenticated (`modal setup`)
 - AWS credentials with S3 access (for trace + bundle upload)
-- Agent credentials for whichever backend you use:
-  - Codex: `~/.codex/auth.json` (default path used by `uv run trace`)
-    - fallback: `CODEX_API_KEY` or `OPENAI_API_KEY`
-  - OpenCode: `OPENCODE_API_KEY`
+- Agent credentials:
+  - **Codex**: `~/.codex/auth.json` (or `CODEX_API_KEY` / `OPENAI_API_KEY`)
+  - **OpenCode**: `OPENCODE_API_KEY`
 
-## 2) Setup
-
-From repo root:
+## Setup
 
 ```bash
 uv sync
 cp .env.example .env
 ```
 
-Edit `.env` and fill values:
+Edit `.env`:
 
 ```env
 AWS_ACCESS_KEY_ID=...
@@ -33,77 +90,82 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=...
 AWS_S3_BUCKET=...
 
+# Only needed for --agent opencode
 OPENCODE_API_KEY=...
 ```
 
-Notes:
-- `OPENCODE_API_KEY` is only required when using `--agent opencode`.
-- If you plan to run local analysis commands (`uv run graph_trace`, `uv run replay`), make sure your shell has the same env vars from `.env`.
+## CLI Reference
 
-## 3) Run A Trajectory
-
-Default run (recommended starting point):
+### Run a Trajectory
 
 ```bash
-uv run trace
+# Minimal (Codex, 1000 parts, Modal, non-preemptible)
+envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
+
+# OpenCode with a specific model
+envoi-trace --agent opencode --model opencode/gpt-5-nano --task <path> --env <path>
+
+# Preemptible execution (cheaper, may be interrupted)
+envoi-trace --preemptible --task <path> --env <path>
+
+# Detach from Modal (run in background)
+envoi-trace --detach --task <path> --env <path>
+
+# E2B sandbox instead of Modal
+envoi-trace --sandbox e2b --task <path> --env <path>
 ```
 
-Defaults:
-- agent: `codex`
-- max parts: `1000`
-- non-preemptible Modal execution: `enabled`
+The launcher automatically resumes on retryable failures (agent errors, timeouts). Disable with `--no-auto-resume`.
 
-The launcher prints these immediately at startup:
-- `TRAJECTORY_ID`
-- `TRACE_S3_URI`
-- `BUNDLE_S3_URI`
-
-Save the `TRAJECTORY_ID`; you use it for analysis.
-
-Useful options:
+### Analyze a Trajectory
 
 ```bash
-uv run trace --detach
-uv run trace --max-parts 200
-uv run trace --agent opencode --model opencode/gpt-5-nano
-uv run trace --preemptible
+# Full analysis with suite-level graphs
+envoi-trace graph <trajectory_id>
+
+# Checkout repo state at a specific part
+envoi-trace graph <trajectory_id> --part 42 --checkout-dest ./part_42_repo
 ```
 
-## 4) Analyze A Trajectory
+## What Gets Stored
 
-Given a trajectory id:
+For trajectory `<id>`, two artifacts go to S3:
 
-```bash
-uv run graph_trace <trajectory_id>
+| Artifact | Path | Description |
+|---|---|---|
+| `trace.parquet` | `trajectories/<id>/trace.parquet` | One row per part. Test calls, git state, timing, content summaries. |
+| `repo.bundle` | `trajectories/<id>/repo.bundle` | Full git history. Reconstruct the repo at any part. |
+
+`trace.parquet` is written after every part, so you always have a partial trace even if the run dies. `repo.bundle` is uploaded at end-of-run.
+
+## How the Trace Works
+
+Every observable action the agent takes is a **part**. Parts are the fundamental unit of measurement — not turns, not steps.
+
+A part is one of: `reasoning`, `text`, `tool`, `tool_use`, `tool_result`, or `patch`.
+
+Each row in `trace.parquet` records:
+- **Identity**: `part` index, `timestamp`, `duration_ms`
+- **Semantics**: `role`, `part_type`, `item_type`, `summary`
+- **Repository state**: `git_commit`, `repo_checkpoint` (before/after commits, changed files)
+- **Test state**: `envoi_calls` (test invocations), `testing_state` (solve progress)
+- **Session end** (null while in-progress): `session_end_reason`, `session_end_total_parts`
+
+Trajectory-level fields are denormalized into every row, so any single row tells you the full trajectory context.
+
+## Project Layout
+
+```
+runner.py              Main orchestrator. Runs inside Modal.
+models.py              Pydantic models (PartRecord, TurnRecord, AgentTrace, etc.)
+agents/                Agent backends (Codex, OpenCode). See agents/README.md.
+sandbox/               Sandbox backends (Modal, E2B). See sandbox/README.md.
+scripts/               CLI entrypoints. See scripts/README.md.
+examples/              Task prompts + environment harnesses. See examples/README.md.
+utils/                 Internal helpers (parsing, storage, git, evaluation).
 ```
 
-Checkout repository state at a specific part:
-
-```bash
-uv run graph_trace <trajectory_id> --part <p>
-```
-
-## 5) What Gets Stored
-
-For trajectory `<id>`, artifacts are uploaded to:
-
-- `s3://<bucket>/trajectories/<id>/trace.parquet`
-- `s3://<bucket>/trajectories/<id>/repo.bundle`
-
-`trace.parquet` is part-centric (one row per part) and records per-part timing, content summary, repo checkpoint state, and test call state. `session_end_reason IS NULL` means the trace is in-progress.
-
-## 6) Where To Change Behavior
-
-- Task definition and prompt: `tasks/c_compiler/task.py`
-- Task resolution: `tasks/resolver.py`
-- Main orchestration: `runner.py`
-- Trace format: `trace_format.py`
-- Agent backends: `agents/codex.py`, `agents/opencode.py`
-- Modal sandbox runtime: `sandbox/modal/setup.sh`
-- Test MCP server: `sandbox/modal/mcp_server.py`
-- Offline replay/analysis engine: `scripts/offline_replay.py`
-
-## 7) Quick Dev Check
+## Dev
 
 ```bash
 uv run ruff check
