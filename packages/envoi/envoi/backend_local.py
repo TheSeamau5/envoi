@@ -12,14 +12,16 @@ import argparse
 import asyncio
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
 
 from . import environment
+from .runtime import load_environment
 from .utils import Documents, parse_params, serialize_object, working_dir
 
 
@@ -77,8 +79,6 @@ def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, An
 
 
 def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
-    from .runtime import load_environment
-
     load_environment(module_file)
     app = FastAPI(title="envoi session worker")
 

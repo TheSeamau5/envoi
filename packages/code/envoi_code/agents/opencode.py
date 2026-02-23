@@ -485,7 +485,7 @@ def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
         existing = base[key]
         if isinstance(existing, dict) and isinstance(value, dict):
             merge_usage_maps(existing, value)
-        elif isinstance(existing, (int, float)) and isinstance(value, (int, float)):
+        elif isinstance(existing, int | float) and isinstance(value, int | float):
             base[key] = existing + value
         else:
             base[key] = value
@@ -902,6 +902,7 @@ try:
     from envoi_code.sandbox.base import Sandbox
     from envoi_code.utils.helpers import (
         compute_turn_timeout_seconds,
+        environment_upload_items,
         run_sandbox_client,
         upload_files_parallel,
     )
@@ -1168,8 +1169,6 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             )
 
             if ctx.env_files:
-                from envoi_code.utils.helpers import environment_upload_items
-
                 py, c, txt = ctx.env_files
                 await upload_files_parallel(
                     sandbox,

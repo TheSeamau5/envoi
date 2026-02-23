@@ -22,6 +22,17 @@ from envoi_code.scripts.offline_replay import (
 )
 from envoi_code.utils.trace_parquet import parquet_to_trace_dict
 
+try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    matplotlib.use("Agg")
+except Exception:
+    matplotlib = None
+    plt = None
+    MaxNLocator = None
+
 
 def parse_int(value: Any) -> int | None:
     if isinstance(value, bool):
@@ -79,17 +90,11 @@ def slugify(value: str) -> str:
 
 
 def import_matplotlib() -> tuple[Any, Any]:
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.ticker import MaxNLocator
-    except Exception as exc:  # pragma: no cover - runtime dependency guard
+    if plt is None or MaxNLocator is None:  # pragma: no cover - runtime dependency guard
         raise RuntimeError(
             "matplotlib is required to generate PNG charts. "
             "Install with `uv add matplotlib`."
-        ) from exc
+        )
     return plt, MaxNLocator
 
 
@@ -286,7 +291,7 @@ def render_chart(
 
         if x_mode == "elapsed_minutes":
             elapsed = point.get("elapsed_minutes")
-            if not isinstance(elapsed, (int, float)):
+            if not isinstance(elapsed, int | float):
                 continue
             x_values.append(float(elapsed))
             if isinstance(y, int):

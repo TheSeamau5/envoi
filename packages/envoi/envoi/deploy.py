@@ -95,7 +95,9 @@ def build_runtime_image(project_root: Path, image_name: str, environment_dir: Pa
     run_command_checked(build_command)
 
 
-def run_command_checked(command: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+def run_command_checked(
+    command: list[str], *, capture_output: bool = False
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         check=True,
@@ -114,7 +116,10 @@ def main() -> None:
     parser.add_argument(
         "--module",
         default=None,
-        help="When --path is a folder, Python module filename to run (for example: polish_notation.py)",
+        help=(
+            "When --path is a folder, Python module filename to run"
+            " (for example: polish_notation.py)"
+        ),
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--image", default=DEFAULT_IMAGE_NAME)

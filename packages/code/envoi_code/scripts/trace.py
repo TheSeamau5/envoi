@@ -17,14 +17,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import os
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
 import boto3
+import pyarrow.parquet as pq
+
+from envoi_code.scripts.graph_trace import async_main as graph_async_main
 
 RETRYABLE_SESSION_END_REASONS = {"agent_error", "timeout", "envoi_error"}
 
@@ -96,8 +101,6 @@ def load_trace_session_end(
     if body is None:
         return None, None
     try:
-        import pyarrow.parquet as pq
-
         buf = io.BytesIO(body.read())
         table = pq.read_table(
             buf, columns=["session_end_reason", "session_end_total_parts"],
@@ -246,11 +249,6 @@ def run_command(args: argparse.Namespace) -> None:
 
 def graph_command(args: argparse.Namespace) -> None:
     """Execute graph generation (delegates to graph_trace)."""
-    import asyncio
-    import sys
-
-    from envoi_code.scripts.graph_trace import async_main as graph_async_main
-
     argv_backup = sys.argv
     sys.argv = ["envoi-trace graph", args.trajectory_id]
     if args.bucket:

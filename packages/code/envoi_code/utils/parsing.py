@@ -12,7 +12,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from envoi_code.models import EnvoiCall
-from envoi_code.utils.helpers import merge_usage_maps, redact_secrets, truncate_text
+from envoi_code.utils.helpers import (
+    merge_usage_maps,
+    redact_secrets,
+    tprint,
+    truncate_text,
+)
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
@@ -89,8 +94,6 @@ def log_message_parts(
     _print: Callable[..., Any] | None = None,
 ) -> None:
     """Print a human-readable summary of every part in a message."""
-    from envoi_code.utils.helpers import tprint
-
     out = _print or tprint
     info = message.get("info", {})
     role = info.get("role", "?")

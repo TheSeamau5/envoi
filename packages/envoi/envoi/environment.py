@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, get_type_hints
+from collections.abc import Callable
+from typing import Any, get_type_hints
 
 from .utils import Documents
 
 _test_registry: dict[str, Callable[..., Any]] = {}
-_global_suites: list["Suite"] = []
+_global_suites: list[Suite] = []
 setup_fn: Callable[..., Any] | None = None
 teardown_fn: Callable[..., Any] | None = None
 
@@ -57,7 +58,11 @@ class Suite:
         explicit_name = function_or_name
 
         def decorator(function: Callable[..., Any]) -> Callable[..., Any]:
-            leaf_name = function.__name__ if explicit_name is None else validate_segment(explicit_name)
+            leaf_name = (
+                function.__name__
+                if explicit_name is None
+                else validate_segment(explicit_name)
+            )
             register_test(f"{self.path}/{leaf_name}", function)
             return function
 

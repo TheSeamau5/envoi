@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 
 import envoi
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("tests")
@@ -22,8 +23,6 @@ ENVOI_URL = "http://localhost:8000"
 def fetch_schema_text() -> str:
     """Fetch the envoi /schema and format available test paths."""
     try:
-        import httpx
-
         resp = httpx.get(f"{ENVOI_URL}/schema", timeout=30)
         resp.raise_for_status()
         schema = resp.json()

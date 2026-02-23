@@ -24,6 +24,33 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+include = [
+    "packages",
+]
+extraPaths = [
+    "packages/envoi",
+    "packages/code",
+    "packages/cli",
+]
+exclude = [
+    ".venv",
+    "**/.venv/**",
+    "**/*.egg-info/**",
+    "output",
+    "examples",
+    "**/node_modules/**",
+]
+executionEnvironments = [
+    { root = "packages/envoi" },
+    { root = "packages/code" },
+    { root = "packages/cli" },
+]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

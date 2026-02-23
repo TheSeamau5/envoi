@@ -10,19 +10,17 @@ from envoi_code.sandbox.base import (
     SandboxConfig,
     SandboxImageRequirements,
 )
+from envoi_code.sandbox.e2b import E2BSandbox
+from envoi_code.sandbox.modal import ModalSandbox
 
 
 async def create_sandbox(
     provider: str, config: SandboxConfig,
 ) -> Sandbox:
-    """Create a sandbox from the named provider. Lazy-imports backends."""
+    """Create a sandbox from the named provider."""
     if provider == "modal":
-        from envoi_code.sandbox.modal import ModalSandbox
-
         return await ModalSandbox.create(config)
     if provider == "e2b":
-        from envoi_code.sandbox.e2b import E2BSandbox
-
         return await E2BSandbox.create(config)
     raise ValueError(f"Unknown sandbox provider: {provider}")
 

@@ -13,6 +13,7 @@ dependencies = [
     "mcp>=1.0.0",
     "boto3>=1.34.0",
     "modal>=0.60.0",
+    "e2b-code-interpreter>=1.0.0",
     "python-dotenv>=1.0.0",
     "opencode-ai>=0.1.0a36",
     "matplotlib>=3.10.8",
@@ -20,9 +21,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-e2b = [
-    "e2b-code-interpreter>=1.0.0",
-]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",

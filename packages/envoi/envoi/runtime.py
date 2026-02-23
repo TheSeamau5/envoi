@@ -10,8 +10,9 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import uvicorn
@@ -23,6 +24,8 @@ from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
 from .utils import Documents, parse_params, serialize_object, working_dir
 
 sessions: dict[str, dict[str, Any]] = {}
+
+_OPTIONAL_FILE = File(default=None)
 
 
 def load_environment(module_file: str) -> None:
@@ -311,7 +314,7 @@ def build_app(module_file: str) -> FastAPI:
 
     @app.post("/test")
     async def run_all_tests(
-        file: UploadFile | None = File(default=None),
+        file: UploadFile | None = _OPTIONAL_FILE,
         params: str = Form(default="{}"),
     ) -> Any:
         return await run_local_tests("", file, params)
@@ -319,14 +322,14 @@ def build_app(module_file: str) -> FastAPI:
     @app.post("/test/{path:path}")
     async def run_test(
         path: str,
-        file: UploadFile | None = File(default=None),
+        file: UploadFile | None = _OPTIONAL_FILE,
         params: str = Form(default="{}"),
     ) -> Any:
         return await run_local_tests(path, file, params)
 
     @app.post("/session")
     async def create_session(
-        file: UploadFile | None = File(default=None),
+        file: UploadFile | None = _OPTIONAL_FILE,
         params: str = Form(default="{}"),
         timeout: int = Form(default=DEFAULT_SESSION_TIMEOUT_SECONDS),
     ) -> Any:

@@ -33,6 +33,13 @@ EVALUATION_JSON_MARKER = "__ENVOI_EVAL_JSON__"
 
 def extract_leaf_paths(schema: Any) -> list[str]:
     """Walk an envoi /schema tree and collect all leaf test paths."""
+    # Handle the flat envoi format: {"tests": ["basics", "wacct", ...]}
+    if isinstance(schema, dict):
+        tests = schema.get("tests")
+        if isinstance(tests, list):
+            return sorted(t for t in tests if isinstance(t, str) and t)
+
+    # Fallback: walk nested children/suites dicts
     leaves: list[str] = []
 
     def _walk(node: Any, prefix: str) -> None:
@@ -51,8 +58,13 @@ def extract_leaf_paths(schema: Any) -> list[str]:
 
 
 def extract_suite_roots(schema: Any) -> list[str]:
-    """Extract top-level suite names from an envoi /schema tree."""
+    """Extract top-level suite/test names from an envoi /schema response."""
     if isinstance(schema, dict):
+        # Handle the flat envoi format: {"tests": ["basics", "wacct", ...]}
+        tests = schema.get("tests")
+        if isinstance(tests, list):
+            return sorted(t for t in tests if isinstance(t, str) and t)
+        # Fallback: nested children/suites dicts
         children = schema.get("children") or schema.get("suites")
         if isinstance(children, dict):
             return sorted(children.keys())

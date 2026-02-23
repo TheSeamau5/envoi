@@ -6,21 +6,20 @@ import json
 import tarfile
 import tempfile
 import tomllib
+from collections.abc import Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
-
-T = TypeVar("T")
 
 
 class Documents:
     def __init__(self, paths: str | Path | Iterable[str | Path] | None = None):
         if paths is None:
             self.paths: list[Path] = []
-        elif isinstance(paths, (str, Path)):
+        elif isinstance(paths, str | Path):
             self.paths = [Path(paths)]
         else:
             self.paths = [Path(path) for path in paths]
@@ -115,7 +114,7 @@ async def run(
             process.communicate(),
             timeout=timeout_seconds,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         if process is not None:
             process.kill()
             await process.wait()
@@ -152,12 +151,12 @@ def to_jsonable(value: Any) -> Any:
         return value.model_dump()
     if isinstance(value, dict):
         return {key: to_jsonable(inner_value) for key, inner_value in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [to_jsonable(item) for item in value]
     return value
 
 
-def schema_item_values(items: Any, field: str, value_type: type[T]) -> list[T]:
+def schema_item_values[T](items: Any, field: str, value_type: type[T]) -> list[T]:
     if not isinstance(items, list):
         return []
 

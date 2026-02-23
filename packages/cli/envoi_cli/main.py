@@ -5,6 +5,18 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from envoi.deploy import deploy
+
+try:
+    from envoi_code.scripts.trace import (
+        add_run_args,
+        graph_command,
+        run_command,
+    )
+except ImportError:
+    add_run_args = None
+    graph_command = None
+    run_command = None
 
 
 def main() -> None:
@@ -28,12 +40,7 @@ def main() -> None:
     deploy_parser.add_argument("--port", type=int, default=8000)
 
     # --- code subcommand (available when envoi-code is installed) ---
-    try:
-        from envoi_code.scripts.trace import add_run_args  # noqa: F401
-
-        _has_code = True
-    except ImportError:
-        _has_code = False
+    _has_code = add_run_args is not None
 
     if _has_code:
         code_parser = subparsers.add_parser("code", help="Run coding agent trajectories")
@@ -46,8 +53,7 @@ def main() -> None:
             default=None,
             help="Path to example dir (resolves task/ and environment/ within it)",
         )
-        from envoi_code.scripts.trace import add_run_args
-
+        assert add_run_args is not None
         add_run_args(run_parser)
 
         # Also add run args + --example directly on the code parser so
@@ -73,8 +79,6 @@ def main() -> None:
         sys.exit(1)
 
     if args.command == "deploy":
-        from envoi.deploy import deploy
-
         result = deploy(path=args.path, port=args.port)
         if result["container_id"]:
             print(f"Started container: {result['container_id']}")
@@ -102,12 +106,10 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            from envoi_code.scripts.trace import run_command
-
+            assert run_command is not None
             run_command(args)
         elif code_command == "graph":
-            from envoi_code.scripts.trace import graph_command
-
+            assert graph_command is not None
             graph_command(args)
         else:
             parser.parse_args(["code", "--help"])

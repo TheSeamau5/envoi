@@ -8,10 +8,13 @@ Modal for environments that need a different cloud provider. Use with
 from __future__ import annotations
 
 import builtins
+import os
 import shlex
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from e2b_code_interpreter import AsyncSandbox
 
 from envoi_code.sandbox.base import CommandResult, SandboxConfig
 
@@ -40,10 +43,6 @@ class E2BSandbox:
         or ``"envoi-trace"``). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
-        import os
-
-        from e2b_code_interpreter import AsyncSandbox
-
         resolved_template = (
             config.template
             or os.environ.get("E2B_TEMPLATE", "envoi-trace")

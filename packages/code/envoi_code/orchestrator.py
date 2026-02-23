@@ -18,9 +18,11 @@ Usage (via CLI):
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import builtins
+import importlib.util
 import inspect
 import json
 import os
@@ -30,6 +32,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+
+from dotenv import load_dotenv
 
 from envoi_code.agents.base import Agent, AgentSetupContext
 from envoi_code.agents.codex import CodexAgent
@@ -117,8 +121,6 @@ async def load_task(
 
     Returns (prompt_text, params_dict).
     """
-    import importlib.util
-
     # Tier 3: full dynamic generation
     if (task_dir / "task.py").exists():
         spec = importlib.util.spec_from_file_location("_task", task_dir / "task.py")
@@ -1151,13 +1153,9 @@ async def run_trajectory(
 
 
 if __name__ == "__main__":
-    import argparse as direct_ap
-
-    from dotenv import load_dotenv
-
     load_dotenv()
 
-    parser = direct_ap.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Run trajectory directly.",
     )
     parser.add_argument("--agent", default=DEFAULT_AGENT)

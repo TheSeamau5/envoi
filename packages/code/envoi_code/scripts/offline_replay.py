@@ -30,6 +30,8 @@ import boto3
 import envoi
 import httpx
 
+from envoi_code.utils.trace_parquet import parquet_to_trace_dict
+
 SUITE_PATHS: list[str] = ["basics", "wacct", "c_testsuite", "torture"]
 REQUIRED_PATHS: list[str] = [
     "basics",
@@ -87,8 +89,6 @@ def download_if_needed(source: str, destination_dir: Path) -> Path:
 
 def load_trace(path: Path) -> dict[str, Any]:
     if path.suffix == ".parquet":
-        from envoi_code.utils.trace_parquet import parquet_to_trace_dict
-
         return parquet_to_trace_dict(str(path))
     data = json.loads(path.read_text())
     if not isinstance(data, dict):

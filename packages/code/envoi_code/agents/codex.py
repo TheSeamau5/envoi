@@ -147,7 +147,7 @@ def mcp_output_payload(result: Any, error: Any) -> str:
 
     for key in ("structured_content", "structuredContent"):
         structured = result_obj.get(key)
-        if isinstance(structured, (dict, list)):
+        if isinstance(structured, dict | list):
             return json_dumps(structured)
 
     content = result_obj.get("content")
@@ -231,7 +231,7 @@ def extract_run_tests_call(item: dict[str, Any]) -> dict[str, Any] | None:
 
 def format_generic_structured(value: Any) -> str:
     parsed = parse_json_maybe(value)
-    if isinstance(parsed, (dict, list)):
+    if isinstance(parsed, dict | list):
         return json.dumps(parsed, indent=2, ensure_ascii=False)
     return str(parsed)
 
@@ -254,7 +254,7 @@ def format_run_tests_output(value: Any) -> str:
         lines.append(f"path: {path}")
     if isinstance(status_code, int):
         lines.append(f"status_code: {status_code}")
-    if isinstance(duration_ms, (int, float)):
+    if isinstance(duration_ms, int | float):
         lines.append(f"duration_ms: {duration_ms}")
     if error:
         lines.append(f"error: {error}")
@@ -310,7 +310,7 @@ def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
         existing = base[key]
         if isinstance(existing, dict) and isinstance(value, dict):
             merge_usage_maps(existing, value)
-        elif isinstance(existing, (int, float)) and isinstance(value, (int, float)):
+        elif isinstance(existing, int | float) and isinstance(value, int | float):
             base[key] = existing + value
         else:
             base[key] = value
@@ -1413,6 +1413,7 @@ try:
     from envoi_code.sandbox.base import Sandbox
     from envoi_code.utils.helpers import (
         decode_b64_to_text,
+        environment_upload_items,
         load_local_codex_auth_json_b64,
         parse_codex_auth_json,
         run_sandbox_client,
@@ -1651,8 +1652,6 @@ echo "[setup] codex install complete"
             )
 
             if ctx.env_files:
-                from envoi_code.utils.helpers import environment_upload_items
-
                 py, c, txt = ctx.env_files
                 await upload_files_parallel(
                     sandbox,

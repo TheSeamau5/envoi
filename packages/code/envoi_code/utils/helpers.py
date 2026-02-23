@@ -147,7 +147,7 @@ def token_estimate(text: str | None) -> int:
 
 
 def is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def merge_usage_maps(

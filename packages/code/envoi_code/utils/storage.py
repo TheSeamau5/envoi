@@ -15,7 +15,11 @@ import boto3
 
 from envoi_code.models import AgentTrace
 from envoi_code.utils.helpers import tprint
-from envoi_code.utils.trace_parquet import agent_trace_to_rows, parquet_to_trace_dict, write_trace_parquet
+from envoi_code.utils.trace_parquet import (
+    agent_trace_to_rows,
+    parquet_to_trace_dict,
+    write_trace_parquet,
+)
 
 print = tprint
 

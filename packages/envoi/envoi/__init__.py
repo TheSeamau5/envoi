@@ -4,6 +4,7 @@ from .client import (
     connect,
     connect_session,
 )
+from .deploy import deploy
 from .environment import (
     clear_environment,
     setup,
@@ -34,9 +35,3 @@ __all__ = [
 
 def hello() -> None:
     print("Hello from envoi!")
-
-
-def deploy(*args, **kwargs):
-    from .deploy import deploy as deploy_function
-
-    return deploy_function(*args, **kwargs)
