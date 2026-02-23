@@ -56,6 +56,7 @@ TRACE_SCHEMA = pa.schema([
     ("testing_state", pa.string()),
     ("repo_checkpoint", pa.string()),
     ("turn", pa.int32()),
+    ("turn_prompt", pa.string()),
     ("session_end_reason", pa.string()),
     ("session_end_total_parts", pa.int32()),
     ("session_end_total_turns", pa.int32()),
@@ -73,6 +74,7 @@ SCALAR_PART_KEYS = (
     "summary_word_count", "content_word_count",
     "summary_token_estimate", "content_token_estimate",
     "tool_name", "tool_status", "tool_exit_code", "patch",
+    "turn_prompt",
 )
 
 JSON_PART_KEYS = (
@@ -98,6 +100,16 @@ def build_turn_map(trace: AgentTrace) -> dict[int, int]:
     return mapping
 
 
+def build_turn_prompt_map(trace: AgentTrace) -> dict[int, str | None]:
+    mapping: dict[int, str | None] = {}
+    for turn_rec in trace.turns:
+        if turn_rec.part_start is None or turn_rec.part_end is None:
+            continue
+        for p in range(turn_rec.part_start, turn_rec.part_end + 1):
+            mapping[p] = turn_rec.prompt
+    return mapping
+
+
 def agent_trace_to_rows(
     trace: AgentTrace,
     *,
@@ -113,6 +125,7 @@ def agent_trace_to_rows(
     to JSON strings via json_or_none().
     """
     turn_map = build_turn_map(trace)
+    turn_prompt_map = build_turn_prompt_map(trace)
 
     se = trace.session_end
     se_reason = se.reason if se else None
@@ -165,6 +178,11 @@ def agent_trace_to_rows(
             "testing_state": json_or_none(part_rec.testing_state),
             "repo_checkpoint": json_or_none(part_rec.repo_checkpoint),
             "turn": turn_map.get(part_rec.part) if part_rec.part is not None else None,
+            "turn_prompt": (
+                turn_prompt_map.get(part_rec.part)
+                if part_rec.part is not None
+                else None
+            ),
             "session_end_reason": se_reason,
             "session_end_total_parts": se_total_parts,
             "session_end_total_turns": se_total_turns,

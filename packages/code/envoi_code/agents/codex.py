@@ -683,13 +683,21 @@ def log_progress(
     *,
     parts_seen: int,
     max_parts: int,
+    part_offset: int = 0,
+    part_total: int = 0,
     description: str,
     content: str | None = None,
     truncate_content: bool = True,
 ) -> None:
-    total_label = str(max_parts) if max_parts > 0 else "?"
+    shown_parts = max(0, part_offset) + max(0, parts_seen)
+    if part_total > 0:
+        total_label = str(part_total)
+    elif max_parts > 0:
+        total_label = str(max(0, part_offset) + max_parts)
+    else:
+        total_label = "?"
     print(
-        f"[{progress_timestamp()}] [{parts_seen} / {total_label} parts] {description}",
+        f"[{progress_timestamp()}] [{shown_parts} / {total_label} parts] {description}",
         file=sys.stderr,
         flush=True,
     )
@@ -706,6 +714,8 @@ def start_progress_heartbeat(
     stop_event: threading.Event,
     *,
     max_parts: int,
+    part_offset: int = 0,
+    part_total: int = 0,
     interval_sec: int = 15,
 ) -> threading.Thread:
     def _heartbeat() -> None:
@@ -713,6 +723,8 @@ def start_progress_heartbeat(
             log_progress(
                 parts_seen=int(stats["meaningful_parts"]),
                 max_parts=max_parts,
+                part_offset=part_offset,
+                part_total=part_total,
                 description="heartbeat",
             )
 
@@ -940,10 +952,14 @@ def run_codex_turn(
     model: str,
     api_key: str | None,
     max_parts: int = 0,
+    part_offset: int = 0,
+    part_total: int = 0,
 ) -> CodexTurnResult:
     log_progress(
         parts_seen=0,
         max_parts=max_parts,
+        part_offset=part_offset,
+        part_total=part_total,
         description="launching codex app-server",
     )
 
@@ -966,6 +982,8 @@ def run_codex_turn(
         progress_stats,
         heartbeat_stop,
         max_parts=max_parts,
+        part_offset=part_offset,
+        part_total=part_total,
     )
 
     resolved_thread_id: str | None = None
@@ -1006,6 +1024,8 @@ def run_codex_turn(
             log_progress(
                 parts_seen=meaningful_parts_seen,
                 max_parts=max_parts,
+                part_offset=part_offset,
+                part_total=part_total,
                 description=description,
                 content=content,
                 truncate_content="mcp_tool_call" not in description,
@@ -1118,6 +1138,8 @@ def run_codex_turn(
             log_progress(
                 parts_seen=meaningful_parts_seen,
                 max_parts=max_parts,
+                part_offset=part_offset,
+                part_total=part_total,
                 description="part limit reached",
                 content="sending turn/interrupt",
             )
@@ -1134,6 +1156,8 @@ def run_codex_turn(
                 log_progress(
                     parts_seen=meaningful_parts_seen,
                     max_parts=max_parts,
+                    part_offset=part_offset,
+                    part_total=part_total,
                     description="turn/interrupt warning",
                     content=str(error),
                 )
@@ -1332,6 +1356,8 @@ def run_codex_turn(
         log_progress(
             parts_seen=meaningful_parts_seen,
             max_parts=max_parts,
+            part_offset=part_offset,
+            part_total=part_total,
             description="completed",
             content=(
                 f"status={turn_status} elapsed={elapsed}s events={len(events)} "
@@ -1370,6 +1396,8 @@ def main() -> None:
     chat_stream.add_argument("--text-file", required=True)
     chat_stream.add_argument("--model", required=True)
     chat_stream.add_argument("--max-parts", type=int, default=0)
+    chat_stream.add_argument("--part-offset", type=int, default=0)
+    chat_stream.add_argument("--part-total", type=int, default=0)
     chat_stream.add_argument("--api-key-file", default="")
 
     args = parser.parse_args()
@@ -1385,6 +1413,8 @@ def main() -> None:
             model=args.model,
             api_key=api_key or None,
             max_parts=max(0, args.max_parts),
+            part_offset=max(0, args.part_offset),
+            part_total=max(0, args.part_total),
         )
         print(result.model_dump_json())
         return
@@ -1703,6 +1733,8 @@ echo "[setup] codex install complete"
             prompt_text: str,
             timeout: int,
             remaining_parts_budget: int,
+            global_part_count: int,
+            global_max_parts: int,
             on_stream_part=None,
         ) -> AgentTurnOutcome | None:
             assert self.sandbox is not None
@@ -1722,6 +1754,10 @@ echo "[setup] codex install complete"
                 self.agent_model,
                 "--max-parts",
                 str(remaining_parts_budget),
+                "--part-offset",
+                str(max(0, global_part_count)),
+                "--part-total",
+                str(max(0, global_max_parts)),
             ]
             if self.api_key_file:
                 args.extend(

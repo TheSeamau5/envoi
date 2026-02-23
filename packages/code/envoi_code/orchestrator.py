@@ -51,6 +51,7 @@ from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
     run_commit_evaluation,
+    run_workspace_evaluation,
 )
 from envoi_code.utils.git import get_git_commit
 from envoi_code.utils.helpers import (
@@ -596,13 +597,63 @@ class EvaluationScheduler:
 
 def build_followup_prompt(
     tracker: SolveTracker,
+    evaluation_feedback: str | None = None,
     continue_prompt: str = "Continue.",
 ) -> str:
     """Build the re-injection prompt with current test status."""
+    sections: list[str] = [continue_prompt]
+    if evaluation_feedback:
+        sections.append(
+            "End-of-turn evaluation feedback:\n"
+            + evaluation_feedback
+        )
     status = build_unsolved_status_lines(tracker)
-    if not status:
-        return continue_prompt
-    return continue_prompt + "\n\nCurrent test status:\n" + "\n".join(status)
+    if status:
+        sections.append(
+            "Current test status:\n" + "\n".join(status)
+        )
+    return "\n\n".join(section for section in sections if section)
+
+
+def format_turn_end_evaluation_feedback(
+    run_payload: dict[str, Any],
+) -> str:
+    """Render blocking turn-end evaluation output for the next prompt."""
+    payload = run_payload.get("payload")
+    exit_code = run_payload.get("exit_code")
+    stdout = run_payload.get("stdout")
+    stderr = run_payload.get("stderr")
+
+    lines: list[str] = [
+        "Turn-end full evaluation result:",
+    ]
+    if isinstance(exit_code, int):
+        lines.append(f"exit_code: {exit_code}")
+    if isinstance(payload, dict):
+        passed = int(payload.get("passed", 0) or 0)
+        failed = int(payload.get("failed", 0) or 0)
+        total = int(payload.get("total", 0) or 0)
+        duration_ms = int(payload.get("duration_ms", 0) or 0)
+        lines.append(
+            "summary: "
+            f"passed={passed} failed={failed} total={total} "
+            f"duration_ms={duration_ms}"
+        )
+        lines.append("payload:")
+        lines.append(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+        )
+    else:
+        lines.append("payload: null")
+
+    if isinstance(stdout, str) and stdout.strip():
+        lines.append("stdout:")
+        lines.append(stdout.rstrip())
+    if isinstance(stderr, str) and stderr.strip():
+        lines.append("stderr:")
+        lines.append(stderr.rstrip())
+
+    return "\n".join(lines).strip()
 
 
 async def run_trajectory(
@@ -889,6 +940,8 @@ async def run_trajectory(
                 prompt_text=prompt_text,
                 timeout=turn_timeout_seconds,
                 remaining_parts_budget=remaining_parts,
+                global_part_count=part_count,
+                global_max_parts=max_parts,
                 on_stream_part=stream_part_cb,
             )
             part_count = stream_part_counter[0]
@@ -1034,13 +1087,35 @@ async def run_trajectory(
                 environment=environment,
                 task_params=task_params_loaded,
             )
-
-            if evaluator.has_pending:
-                print(
-                    "[eval] waiting for pending commit "
-                    "evaluations before next turn"
+            turn_end_eval_feedback = ""
+            try:
+                turn_end_eval = await run_workspace_evaluation(
+                    sandbox=sandbox,
                 )
-                await evaluator.wait()
+                turn_end_eval_feedback = (
+                    format_turn_end_evaluation_feedback(
+                        turn_end_eval,
+                    )
+                )
+                payload = turn_end_eval.get("payload")
+                if isinstance(payload, dict):
+                    print(
+                        "[eval] turn_end "
+                        f"passed={int(payload.get('passed', 0) or 0)}/"
+                        f"{int(payload.get('total', 0) or 0)} "
+                        f"status_error={bool(payload.get('error'))}"
+                    )
+                else:
+                    print("[eval] turn_end payload missing")
+            except Exception as turn_end_eval_error:
+                turn_end_eval_feedback = (
+                    "Turn-end full evaluation failed:\n"
+                    + str(turn_end_eval_error)
+                )
+                print(
+                    "[eval] turn_end failed: "
+                    f"{turn_end_eval_error}"
+                )
 
             solved_count = len(passing)
             total_count = len(required)
@@ -1064,7 +1139,10 @@ async def run_trajectory(
                 end_reason = "part_limit"
                 break
 
-            prompt_text = build_followup_prompt(tracker)
+            prompt_text = build_followup_prompt(
+                tracker,
+                evaluation_feedback=turn_end_eval_feedback,
+            )
 
         if end_reason == "agent_error":
             end_reason = "part_limit"
