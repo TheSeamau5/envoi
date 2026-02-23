@@ -1,0 +1,47 @@
+---
+title: "Introduction"
+description: "API-backed evaluation environments for AI agents"
+---
+
+# Welcome to Envoi
+
+Envoi is a framework for building evaluation environments for AI coding agents. It provides three packages that work together:
+
+## Packages
+
+<CardGroup cols={3}>
+  <Card title="envoi" icon="cube">
+    The SDK. Write test harnesses with `@envoi.suite()`, `@envoi.test()`, and `@envoi.setup()`. Deploy them as API servers.
+  </Card>
+  <Card title="envoi-code" icon="robot">
+    The runner. Orchestrate coding agents (Codex, OpenCode) against envoi environments inside remote sandboxes. Capture traces.
+  </Card>
+  <Card title="envoi-cli" icon="terminal">
+    The CLI. One `envoi` command that routes to deploy, run, and analyze subcommands.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+1. **Author an environment** — define test suites that validate agent work
+2. **Deploy it** — run the environment as a local Docker container or in a remote sandbox
+3. **Run an agent** — point a coding agent at a task and environment, and let it iterate
+4. **Capture traces** — every agent action is recorded as a part in a parquet trace
+5. **Analyze** — use the trace to understand agent behavior, debug failures, and compare runs
+
+## Quick Start
+
+```bash
+uv sync
+uv run envoi code run --example examples/c_compiler
+```
+
+## Architecture
+
+```
+envoi CLI
+  ├── envoi deploy    → SDK (envoi)
+  └── envoi code run  → Runner (envoi-code) → SDK (envoi)
+```
+
+The runner orchestrates agents inside sandboxes (Modal or E2B), where they edit code and run tests against an envoi environment server. Every action is captured as a **part** in a denormalized parquet trace, persisted to S3 after every part.

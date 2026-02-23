@@ -1,0 +1,32 @@
+[project]
+name = "envoi-cli"
+version = "0.1.0"
+description = "Unified CLI for the envoi platform"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "envoi",
+]
+
+[project.optional-dependencies]
+code = [
+    "envoi-code",
+]
+all = [
+    "envoi-code",
+]
+
+[project.scripts]
+envoi = "envoi_cli.main:main"
+
+[tool.uv.sources]
+envoi = { workspace = true }
+envoi-code = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["envoi_cli*"]

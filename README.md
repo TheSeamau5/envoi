@@ -1,67 +1,57 @@
 # envoi
 
-Minimal Python project bootstrapped with `uv`.
+API-backed evaluation environments for AI coding agents.
 
-## Environment Metadata
+## Packages
 
-Environment metadata comes from `pyproject.toml`.
-
-Default resolution:
-1. `[tool.envoi.environment]` override values, if present
-2. `[project]` values (`name`, `version`, `description`)
-
-Example:
-
-```toml
-[project]
-name = "polish-notation"
-version = "0.1.0"
-description = "Evaluate polish notation expressions."
-
-[tool.envoi.environment]
-# optional overrides
-name = "polish-notation"
-```
-
-## Examples Layout
-
-Examples are grouped per environment:
-
-```text
-examples/<environment>/
-  author/      # environment code and metadata
-  client/      # client scripts and submissions
-```
+| Package | Install | Description |
+|---------|---------|-------------|
+| `packages/envoi/` | `pip install envoi` | SDK for authoring evaluation environments |
+| `packages/code/` | `pip install envoi-code` | Coding agent evaluation framework with trace capture |
+| `packages/cli/` | `pip install envoi-cli` | Unified `envoi` CLI |
 
 ## Quickstart
 
 ```bash
 uv sync
-source .venv/bin/activate
+cp .env.example .env  # fill in credentials
 uv run envoi --help
 ```
 
-## Local Runtime
-
-Run an environment directly:
+## Run an agent trajectory
 
 ```bash
-uv run python -m envoi.runtime --file examples/polish_notation/author/polish_notation.py --port 8000
+uv run envoi code run --example examples/c_compiler
 ```
 
-Run it in a local Docker sandbox:
+## Deploy an environment locally
 
 ```bash
-cd examples/polish_notation/author
-uv run envoi --port 8000
+uv run envoi deploy examples/c_compiler/environment
 ```
 
-## Common Commands
+## Examples
+
+Examples live in `examples/<name>/` with colocated `task/` and `environment/` directories:
+
+```
+examples/c_compiler/
+  task/en.md              # what to tell the agent
+  environment/
+    main.py               # envoi test harness
+    Dockerfile            # sandbox image
+    setup.sh              # fixture installation
+    tests/                # test suites
+```
+
+## Development
 
 ```bash
-# add a dependency
-uv add <package>
-
-# run a module
-uv run python -m envoi
+uv sync
+uv run ruff check .
+uv run python -c "import envoi; import envoi_code; from envoi_cli.main import main"
 ```
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
