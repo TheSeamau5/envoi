@@ -10,8 +10,12 @@ from envoi_code.sandbox.base import (
     SandboxConfig,
     SandboxImageRequirements,
 )
-from envoi_code.sandbox.e2b import E2BSandbox
 from envoi_code.sandbox.modal import ModalSandbox
+
+try:
+    from envoi_code.sandbox.e2b import E2BSandbox
+except ImportError:
+    E2BSandbox = None
 
 
 async def create_sandbox(
@@ -21,6 +25,11 @@ async def create_sandbox(
     if provider == "modal":
         return await ModalSandbox.create(config)
     if provider == "e2b":
+        if E2BSandbox is None:
+            raise RuntimeError(
+                "E2B backend requires optional dependency "
+                "e2b-code-interpreter"
+            )
         return await E2BSandbox.create(config)
     raise ValueError(f"Unknown sandbox provider: {provider}")
 

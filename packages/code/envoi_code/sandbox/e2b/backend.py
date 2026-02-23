@@ -8,13 +8,12 @@ Modal for environments that need a different cloud provider. Use with
 from __future__ import annotations
 
 import builtins
+import importlib
 import os
 import shlex
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
-
-from e2b_code_interpreter import AsyncSandbox
 
 from envoi_code.sandbox.base import CommandResult, SandboxConfig
 
@@ -43,6 +42,25 @@ class E2BSandbox:
         or ``"envoi-trace"``). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
+        try:
+            e2b_module = importlib.import_module(
+                "e2b_code_interpreter",
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                "E2B backend requires optional dependency "
+                "e2b-code-interpreter. "
+                "Install with: pip install envoi-code[e2b]"
+            ) from error
+        async_sandbox = getattr(
+            e2b_module, "AsyncSandbox", None,
+        )
+        if async_sandbox is None:
+            raise RuntimeError(
+                "e2b_code_interpreter does not export "
+                "AsyncSandbox"
+            )
+
         resolved_template = (
             config.template
             or os.environ.get("E2B_TEMPLATE", "envoi-trace")
@@ -55,7 +73,7 @@ class E2BSandbox:
         }
         if config.api_key:
             kwargs["api_key"] = config.api_key
-        inner = await AsyncSandbox.create(**kwargs)
+        inner = await async_sandbox.create(**kwargs)
         builtins.print(
             f"[e2b] sandbox created: "
             f"id={inner.sandbox_id} "
