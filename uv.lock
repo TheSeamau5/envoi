@@ -531,6 +531,7 @@ version = "0.1.0"
 source = { editable = "packages/cli" }
 dependencies = [
     { name = "envoi" },
+    { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
@@ -546,6 +547,7 @@ requires-dist = [
     { name = "envoi", editable = "packages/envoi" },
     { name = "envoi-code", marker = "extra == 'all'", editable = "packages/code" },
     { name = "envoi-code", marker = "extra == 'code'", editable = "packages/code" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
 ]
 
 [[package]]

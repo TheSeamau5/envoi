@@ -34,10 +34,10 @@ class ModalSandbox:
         return "modal"
 
     @staticmethod
-    def get_app() -> modal.App:
+    async def get_app() -> modal.App:
         """Return (or lazily create) the shared Modal App."""
         if ModalSandbox.app is None:
-            ModalSandbox.app = modal.App.lookup(
+            ModalSandbox.app = await modal.App.lookup.aio(
                 "envoi-trace", create_if_missing=True,
             )
         return ModalSandbox.app
@@ -67,7 +67,7 @@ class ModalSandbox:
             "sleep infinity",
             image=image,
             timeout=config.timeout,
-            app=ModalSandbox.get_app(),
+            app=await ModalSandbox.get_app(),
         )
         return ModalSandbox(inner)
 

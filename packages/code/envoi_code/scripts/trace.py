@@ -120,8 +120,8 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-parts", type=int, default=1000)
-    parser.add_argument("--task", required=True, help="Path to task directory.")
-    parser.add_argument("--env", required=True, help="Path to environment directory.")
+    parser.add_argument("--task", default=None, help="Path to task directory.")
+    parser.add_argument("--env", default=None, help="Path to environment directory.")
     parser.add_argument("--message-timeout-seconds", type=int, default=None)
     parser.add_argument(
         "--non-preemptible",

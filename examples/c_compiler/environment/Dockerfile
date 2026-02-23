@@ -1,5 +1,6 @@
 FROM ubuntu:24.04
 
+ARG CACHE_BUST=2
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --break-system-packages \
-    "envoi @ git+https://github.com/TheSeamau5/envoi.git" \
+    "envoi @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
     "httpx>=0.27.0" \
     "pydantic>=2.0.0" \
     "mcp>=1.0.0"

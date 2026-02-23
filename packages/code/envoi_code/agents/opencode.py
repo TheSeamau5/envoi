@@ -892,20 +892,20 @@ if __name__ == "__main__":
 try:
     import builtins
 
-    from agents.base import (
+    from envoi_code.agents.base import (
         AgentCredentials,
         AgentSetupContext,
         AgentTurnOutcome,
         SandboxImageRequirements,
     )
-    from agents.setup import run_task_setup, run_workspace_init
-    from sandbox.base import Sandbox
-    from utils.helpers import (
+    from envoi_code.agents.setup import run_task_setup, run_workspace_init
+    from envoi_code.sandbox.base import Sandbox
+    from envoi_code.utils.helpers import (
         compute_turn_timeout_seconds,
         run_sandbox_client,
         upload_files_parallel,
     )
-    from utils.parsing import agent_message_id, parse_trace_event_line
+    from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     OPENCODE_SCRIPT = "/sandbox/opencode_client.py"
     OPENCODE_LABEL = "opencode-sdk"
@@ -1168,7 +1168,7 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             )
 
             if ctx.env_files:
-                from utils.helpers import environment_upload_items
+                from envoi_code.utils.helpers import environment_upload_items
 
                 py, c, txt = ctx.env_files
                 await upload_files_parallel(

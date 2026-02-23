@@ -20,7 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 if TYPE_CHECKING:
-    from models import AgentTrace
+    from envoi_code.models import AgentTrace
 
 TRACE_SCHEMA = pa.schema([
     ("trajectory_id", pa.string()),

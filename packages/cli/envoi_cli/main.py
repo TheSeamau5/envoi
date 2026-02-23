@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    # Load .env from the repo root (walk up from cwd until we find one)
+    env_file = Path.cwd() / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+    else:
+        load_dotenv()  # fallback: python-dotenv's own search
     parser = argparse.ArgumentParser(prog="envoi")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -30,6 +39,7 @@ def main() -> None:
         code_parser = subparsers.add_parser("code", help="Run coding agent trajectories")
         code_subparsers = code_parser.add_subparsers(dest="code_command")
 
+        # "run" subcommand
         run_parser = code_subparsers.add_parser("run", help="Run an agent trajectory")
         run_parser.add_argument(
             "--example",
@@ -39,6 +49,15 @@ def main() -> None:
         from envoi_code.scripts.trace import add_run_args
 
         add_run_args(run_parser)
+
+        # Also add run args + --example directly on the code parser so
+        # `envoi code --example ...` works without the `run` subcommand.
+        code_parser.add_argument(
+            "--example",
+            default=None,
+            help="Path to example dir (resolves task/ and environment/ within it)",
+        )
+        add_run_args(code_parser)
 
         graph_parser = code_subparsers.add_parser("graph", help="Analyze a trajectory")
         graph_parser.add_argument("trajectory_id", help="Trajectory ID in S3")
@@ -68,17 +87,25 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        if args.code_command == "run":
-            if args.example:
-                from pathlib import Path
 
+        # Default to "run" when no subcommand given (e.g. `envoi code --example ...`)
+        code_command = args.code_command or "run"
+
+        if code_command == "run":
+            if args.example:
                 example = Path(args.example)
                 args.task = str(example / "task")
                 args.env = str(example / "environment")
+            if not args.task or not args.env:
+                print(
+                    "error: --task and --env are required (or use --example)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             from envoi_code.scripts.trace import run_command
 
             run_command(args)
-        elif args.code_command == "graph":
+        elif code_command == "graph":
             from envoi_code.scripts.trace import graph_command
 
             graph_command(args)

@@ -1403,22 +1403,22 @@ if __name__ == "__main__":
 try:
     import builtins
 
-    from agents.base import (
+    from envoi_code.agents.base import (
         AgentCredentials,
         AgentSetupContext,
         AgentTurnOutcome,
         SandboxImageRequirements,
     )
-    from agents.setup import run_task_setup, run_workspace_init
-    from sandbox.base import Sandbox
-    from utils.helpers import (
+    from envoi_code.agents.setup import run_task_setup, run_workspace_init
+    from envoi_code.sandbox.base import Sandbox
+    from envoi_code.utils.helpers import (
         decode_b64_to_text,
         load_local_codex_auth_json_b64,
         parse_codex_auth_json,
         run_sandbox_client,
         upload_files_parallel,
     )
-    from utils.parsing import agent_message_id, parse_trace_event_line
+    from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     CODEX_SCRIPT = "/sandbox/codex_client.py"
     CODEX_LABEL = "codex-cli"
@@ -1651,7 +1651,7 @@ echo "[setup] codex install complete"
             )
 
             if ctx.env_files:
-                from utils.helpers import environment_upload_items
+                from envoi_code.utils.helpers import environment_upload_items
 
                 py, c, txt = ctx.env_files
                 await upload_files_parallel(

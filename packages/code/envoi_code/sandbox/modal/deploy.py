@@ -18,26 +18,18 @@ from typing import Any
 import modal
 
 ROOT = Path(__file__).parent.parent.parent
+WORKSPACE_ROOT = ROOT.parent.parent.parent
 
 app = modal.App("envoi-trace")
 
 function_image = (
     modal.Image.debian_slim()
     .pip_install("boto3", "pydantic", "pyarrow")
-    .add_local_file(
-        ROOT / "orchestrator.py", remote_path="/root/orchestrator.py",
-    )
-    .add_local_file(
-        ROOT / "models.py", remote_path="/root/models.py",
+    .add_local_dir(
+        ROOT, remote_path="/root/envoi_code",
     )
     .add_local_dir(
-        ROOT / "utils", remote_path="/root/utils",
-    )
-    .add_local_dir(
-        ROOT / "agents", remote_path="/root/agents",
-    )
-    .add_local_dir(
-        ROOT / "sandbox", remote_path="/root/sandbox",
+        WORKSPACE_ROOT / "examples", remote_path="/root/examples",
     )
 )
 
