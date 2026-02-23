@@ -1,8 +1,9 @@
 """Concurrent commit evaluation against envoi.
 
 After a part changes files and creates a git checkpoint, this module evaluates
-the commit by running the environment's test suites via the envoi server. Uses
-bounded concurrency to evaluate multiple commits without overwhelming the sandbox.
+the commit by running the full environment test suite via the envoi server.
+Uses bounded concurrency to evaluate multiple commits without overwhelming
+the sandbox.
 """
 
 from __future__ import annotations
@@ -57,27 +58,11 @@ def extract_leaf_paths(schema: Any) -> list[str]:
     return sorted(leaves) if leaves else []
 
 
-def extract_suite_roots(schema: Any) -> list[str]:
-    """Extract top-level suite/test names from an envoi /schema response."""
-    if isinstance(schema, dict):
-        # Handle the flat envoi format: {"tests": ["basics", "wacct", ...]}
-        tests = schema.get("tests")
-        if isinstance(tests, list):
-            return sorted(t for t in tests if isinstance(t, str) and t)
-        # Fallback: nested children/suites dicts
-        children = schema.get("children") or schema.get("suites")
-        if isinstance(children, dict):
-            return sorted(children.keys())
-    return []
-
-
 def build_commit_evaluation_command(
     *,
     commit: str,
     eval_repo_dir: str,
-    suite_paths: list[str] | None = None,
 ) -> str:
-    suite_paths_json = json.dumps(suite_paths or [])
     repo_dir_json = json.dumps(eval_repo_dir)
     envoi_url_json = json.dumps(EVALUATION_ENVOI_URL)
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
@@ -97,7 +82,6 @@ def build_commit_evaluation_command(
         "import traceback\n"
         "import envoi\n"
         f"repo_dir = {repo_dir_json}\n"
-        f"suite_paths = {suite_paths_json}\n"
         f"envoi_url = {envoi_url_json}\n"
         f"marker = {marker_json}\n"
         "async def _main() -> None:\n"
@@ -117,47 +101,15 @@ def build_commit_evaluation_command(
         "            submission=docs,\n"
         "            session_timeout_seconds=7200,\n"
         "        ) as session:\n"
-        "            for suite_path in suite_paths:\n"
-        "                suite_payload = {\n"
-        "                    'ok': False,\n"
-        "                    'passed': 0,\n"
-        "                    'failed': 0,\n"
-        "                    'total': 0,\n"
-        "                    'error': None,\n"
-        "                    'result': None,\n"
-        "                }\n"
-        "                try:\n"
-        "                    result = await session.test(suite_path)\n"
-        "                    suite_payload['result'] = result\n"
-        "                    if isinstance(result, dict):\n"
-        "                        suite_payload['passed'] = "
-        "int(result.get('passed', 0) or 0)\n"
-        "                        suite_payload['failed'] = "
-        "int(result.get('failed', 0) or 0)\n"
-        "                        suite_payload['total'] = "
-        "int(result.get('total', 0) or 0)\n"
-        "                        suite_payload['ok'] = (\n"
-        "                            suite_payload['failed'] == 0"
-        " and suite_payload['total'] > 0\n"
-        "                        )\n"
-        "                    else:\n"
-        "                        suite_payload['error'] = (\n"
-        "                            f'Unexpected result type:"
-        " {type(result).__name__}'\n"
-        "                        )\n"
-        "                except Exception as suite_error:"
-        "  # noqa: BLE001\n"
-        "                    suite_payload['error'] = str(suite_error)\n"
-        "                    suite_payload['traceback'] = "
-        "traceback.format_exc()\n"
-        "                payload['suite_results'][suite_path]"
-        " = suite_payload\n"
-        "                payload['passed'] += "
-        "int(suite_payload.get('passed', 0) or 0)\n"
-        "                payload['failed'] += "
-        "int(suite_payload.get('failed', 0) or 0)\n"
-        "                payload['total'] += "
-        "int(suite_payload.get('total', 0) or 0)\n"
+        "            result = await session.test()\n"
+        "            if isinstance(result, dict):\n"
+        "                payload['passed'] = int(result.get('passed', 0) or 0)\n"
+        "                payload['failed'] = int(result.get('failed', 0) or 0)\n"
+        "                payload['total'] = int(result.get('total', 0) or 0)\n"
+        "            else:\n"
+        "                payload['error'] = (\n"
+        "                    f'Unexpected result type: {type(result).__name__}'\n"
+        "                )\n"
         "    except Exception as error:  # noqa: BLE001\n"
         "        payload['error'] = str(error)\n"
         "        payload['traceback'] = traceback.format_exc()\n"
@@ -195,7 +147,6 @@ async def run_commit_evaluation(
     *,
     sandbox: Sandbox,
     commit: str,
-    suite_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     eval_repo_dir = (
         f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
@@ -203,7 +154,6 @@ async def run_commit_evaluation(
     command = build_commit_evaluation_command(
         commit=commit,
         eval_repo_dir=eval_repo_dir,
-        suite_paths=suite_paths,
     )
     exit_code, stdout, stderr = (
         await sandbox.run(

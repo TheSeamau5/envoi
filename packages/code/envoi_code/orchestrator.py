@@ -50,7 +50,6 @@ from envoi_code.sandbox.base import Sandbox
 from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
-    extract_suite_roots,
     run_commit_evaluation,
 )
 from envoi_code.utils.git import get_git_commit
@@ -394,14 +393,12 @@ class EvaluationScheduler:
         trajectory_id: str,
         environment: str,
         task_params: dict[str, Any] | None,
-        suite_paths: list[str] | None,
     ) -> None:
         self.sandbox = sandbox
         self.agent_trace = agent_trace
         self.trajectory_id = trajectory_id
         self.environment = environment
         self.task_params = task_params
-        self.suite_paths = suite_paths
         self.tasks: set[asyncio.Task[None]] = set()
         self.seen_commits: set[str] = set(agent_trace.evaluations.keys())
         self.semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
@@ -558,7 +555,6 @@ class EvaluationScheduler:
                 run_payload = await run_commit_evaluation(
                     sandbox=self.sandbox,
                     commit=commit,
-                    suite_paths=self.suite_paths or None,
                 )
                 self.apply_result(evaluation, run_payload)
             except Exception as eval_error:
@@ -613,6 +609,7 @@ async def run_trajectory(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
+    max_turns: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
@@ -626,6 +623,8 @@ async def run_trajectory(
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
+    if max_turns is not None and max_turns <= 0:
+        max_turns = None
     agent_name = (agent or DEFAULT_AGENT).strip().lower()
 
     task_path = Path(task_dir)
@@ -666,7 +665,8 @@ async def run_trajectory(
     print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
     print(
         f"agent={agent_name} model={resolved_model} "
-        f"max_parts={max_parts} timeout={timeout_seconds}s "
+        f"max_parts={max_parts} max_turns={max_turns} "
+        f"timeout={timeout_seconds}s "
         f"message_timeout={message_timeout_seconds}s"
     )
     if existing_trace is not None:
@@ -763,7 +763,6 @@ async def run_trajectory(
 
         # --- Discover test paths from envoi /schema ---
         required_test_paths: list[str] = []
-        suite_paths: list[str] = []
         schema_result = await sandbox.run(
             "curl -sf http://localhost:8000/schema",
             quiet=True, timeout=30,
@@ -775,11 +774,9 @@ async def run_trajectory(
             try:
                 schema = json.loads(schema_result.stdout)
                 required_test_paths = extract_leaf_paths(schema)
-                suite_paths = extract_suite_roots(schema)
                 print(
                     f"[schema] discovered "
-                    f"{len(required_test_paths)} test paths, "
-                    f"{len(suite_paths)} suites"
+                    f"{len(required_test_paths)} test paths"
                 )
             except (json.JSONDecodeError, KeyError) as e:
                 print(f"[schema] parse error: {e}")
@@ -795,7 +792,6 @@ async def run_trajectory(
             trajectory_id=trajectory_id,
             environment=environment,
             task_params=task_params_loaded,
-            suite_paths=suite_paths or None,
         )
 
         # --- Main loop ---
@@ -814,6 +810,13 @@ async def run_trajectory(
         consecutive_turn_failures = 0
 
         while part_count < max_parts:
+            if max_turns is not None and turn_count >= max_turns:
+                print(
+                    "[progress] reached turn limit "
+                    f"({turn_count}/{max_turns})"
+                )
+                end_reason = "part_limit"
+                break
             elapsed = time.monotonic() - start_time
             if elapsed > timeout_seconds:
                 end_reason = "timeout"
@@ -1161,6 +1164,7 @@ if __name__ == "__main__":
     parser.add_argument("--agent", default=DEFAULT_AGENT)
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-parts", type=int, default=1000)
+    parser.add_argument("--max-turns", type=int, default=None)
     parser.add_argument("--sandbox-provider", default="modal")
     parser.add_argument("--trajectory-id", default=None)
     parser.add_argument(
@@ -1192,6 +1196,7 @@ if __name__ == "__main__":
             agent=args.agent,
             model=args.model,
             max_parts=args.max_parts,
+            max_turns=args.max_turns,
             message_timeout_seconds=args.message_timeout_seconds,
             trajectory_id=args.trajectory_id,
             codex_auth_json_b64=codex_auth_b64,

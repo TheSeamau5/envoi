@@ -52,6 +52,8 @@ def common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str
         "--environment-dir",
         str(args.env),
     ]
+    if args.max_turns is not None:
+        parts.extend(["--max-turns", str(args.max_turns)])
     if args.model:
         parts.extend(["--model", args.model])
     if args.message_timeout_seconds is not None:
@@ -123,6 +125,12 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-parts", type=int, default=1000)
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Optional turn budget. Stops after this many turns.",
+    )
     parser.add_argument("--task", default=None, help="Path to task directory.")
     parser.add_argument("--env", default=None, help="Path to environment directory.")
     parser.add_argument("--message-timeout-seconds", type=int, default=None)
@@ -190,6 +198,7 @@ def run_command(args: argparse.Namespace) -> None:
     print(f"BUNDLE_S3_URI: {bundle_uri}", flush=True)
     print(
         f"agent={args.agent} max_parts={args.max_parts} "
+        f"max_turns={args.max_turns} "
         f"detach={args.detach} non_preemptible={args.non_preemptible}",
         flush=True,
     )

@@ -156,21 +156,24 @@ For trajectory `<id>`:
 
 ## CLI
 
+Command style rule:
+- Never tell this user to run `uv run envoi ...`; always use the direct CLI form `envoi ...`.
+
 Run a trajectory:
 
 ```bash
-envoi code run --task examples/c_compiler/task --env examples/c_compiler/environment
-envoi code run --example examples/c_compiler
+envoi code --task examples/c_compiler/task --env examples/c_compiler/environment
+envoi code --example examples/c_compiler
 ```
 
 Common options:
 
 ```bash
-envoi code run --agent codex --max-parts 100 --task <path> --env <path>
-envoi code run --agent opencode --model opencode/gpt-5-nano --task <path> --env <path>
-envoi code run --sandbox e2b --task <path> --env <path>
-envoi code run --preemptible --task <path> --env <path>
-envoi code run --detach --task <path> --env <path>
+envoi code --agent codex --max-parts 100 --task <path> --env <path>
+envoi code --agent opencode --model opencode/gpt-5-nano --task <path> --env <path>
+envoi code --sandbox e2b --task <path> --env <path>
+envoi code --preemptible --task <path> --env <path>
+envoi code --detach --task <path> --env <path>
 ```
 
 Deploy an environment locally:
@@ -192,7 +195,7 @@ envoi code graph <trajectory_id> --part 42 --checkout-dest ./repo_at_42
 ```bash
 uv sync
 cp .env.example .env  # fill in credentials
-uv run envoi code run --example examples/c_compiler
+envoi code --example examples/c_compiler --max-turns 50
 ```
 
 ## Where To Edit What

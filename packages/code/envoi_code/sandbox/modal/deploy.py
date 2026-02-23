@@ -24,7 +24,7 @@ app = modal.App("envoi-trace")
 
 function_image = (
     modal.Image.debian_slim()
-    .pip_install("boto3", "pydantic", "pyarrow")
+    .pip_install("boto3", "pydantic", "pyarrow", "python-dotenv")
     .add_local_dir(
         ROOT, remote_path="/root/envoi_code",
     )
@@ -55,6 +55,7 @@ async def modal_run_trajectory(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
+    max_turns: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
@@ -68,6 +69,7 @@ async def modal_run_trajectory(
         agent=agent,
         model=model,
         max_parts=max_parts,
+        max_turns=max_turns,
         message_timeout_seconds=message_timeout_seconds,
         timeout_seconds=timeout_seconds,
         trajectory_id=trajectory_id,
@@ -90,6 +92,7 @@ async def modal_run_trajectory_non_preemptible(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
+    max_turns: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
@@ -103,6 +106,7 @@ async def modal_run_trajectory_non_preemptible(
         agent=agent,
         model=model,
         max_parts=max_parts,
+        max_turns=max_turns,
         message_timeout_seconds=message_timeout_seconds,
         timeout_seconds=timeout_seconds,
         trajectory_id=trajectory_id,
@@ -123,6 +127,7 @@ async def main(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
     max_parts: int = 1000,
+    max_turns: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     non_preemptible: bool = True,
     trajectory_id: str | None = None,
@@ -164,6 +169,7 @@ async def main(
             agent=normalized_agent,
             model=model,
             max_parts=max_parts,
+            max_turns=max_turns,
             message_timeout_seconds=message_timeout_seconds,
             trajectory_id=trajectory_id,
             codex_auth_json_b64=codex_auth_json_b64,
