@@ -1,0 +1,23 @@
+Build a REAL C compiler in Rust from scratch.
+This is EXTREMELY IMPORTANT: no cheating, no wrappers, no shortcuts.
+Do NOT call or wrap cc/gcc/clang/tcc.
+Do NOT use saltwater or ANY existing C compiler implementation.
+Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
+Target Linux x86_64 (x86-64). Do NOT generate AArch64/ARM64 assembly.
+
+Your submission must include:
+- Cargo.toml
+- build.sh (must produce ./cc binary when run)
+- src/ (your Rust source code)
+
+Interface: ./cc input.c -o output
+
+You have access to a run_tests tool. Use it to test your compiler frequently.
+
+Testing strategy:
+1. Run tests frequently after making changes
+2. When tests fail: read the error output carefully, fix the code, rerun
+3. After fixing, rerun previously passing suites to check for regressions
+4. Commit after each meaningful change
+
+Your goal is to pass ALL test suites. Work methodically.

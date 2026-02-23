@@ -1,0 +1,53 @@
+[project]
+name = "envoi-trace"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "envoi @ git+https://github.com/TheSeamau5/envoi.git",
+    "httpx>=0.27.0",
+    "aiohttp>=3.10.0",
+    "aiofiles>=24.0.0",
+    "pydantic>=2.0.0",
+    "mcp>=1.0.0",
+    "boto3>=1.34.0",
+    "modal>=0.60.0",
+    "python-dotenv>=1.0.0",
+    "opencode-ai>=0.1.0a36",
+    "matplotlib>=3.10.8",
+    "pyarrow>=17.0.0",
+]
+
+[project.optional-dependencies]
+e2b = [
+    "e2b-code-interpreter>=1.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+envoi-trace = "scripts.trace:main"
+graph_trace = "scripts.graph_trace:main"
+trace = "scripts.trace:main"
+replay = "scripts.offline_replay:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agents", "sandbox", "scripts", "utils"]
+py-modules = ["runner", "models"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
