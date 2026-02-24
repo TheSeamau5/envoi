@@ -5,14 +5,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
-import re
 import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import matplotlib
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 
 from envoi_code.scripts.offline_replay import (
     artifact_uri,
@@ -22,16 +27,7 @@ from envoi_code.scripts.offline_replay import (
 )
 from envoi_code.utils.trace_parquet import parquet_to_trace_dict
 
-try:
-    import matplotlib
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator
-
-    matplotlib.use("Agg")
-except Exception:
-    matplotlib = None
-    plt = None
-    MaxNLocator = None
+matplotlib.use("Agg")
 
 
 def parse_int(value: Any) -> int | None:
@@ -85,17 +81,440 @@ def summarize_leaf_results(node: Any) -> tuple[int, int]:
     return 0, 0
 
 
-def slugify(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+# ── Camera-ready chart palette & helpers ─────────────────────────────
+
+BG = "#FAFBFC"
+FG = "#1B1F23"
+GRID_CLR = "#E1E4E8"
+SPINE_CLR = "#D1D5DA"
+
+# Rotating color palette for dynamic suite assignment.
+COLOR_PALETTE = [
+    "#0366D6", "#2EA44F", "#D73A49", "#6F42C1", "#E36209",
+    "#0598BC", "#B08800", "#6A737D", "#22863A", "#005CC5",
+    "#8B5CF6", "#EC4899", "#14B8A6", "#F59E0B", "#6366F1",
+]
 
 
-def import_matplotlib() -> tuple[Any, Any]:
-    if plt is None or MaxNLocator is None:  # pragma: no cover - runtime dependency guard
-        raise RuntimeError(
-            "matplotlib is required to generate PNG charts. "
-            "Install with `uv add matplotlib`."
+def suite_short_name(suite: str) -> str:
+    """Derive a short display name from a suite path like 'all/wacct/run_wacct_all'."""
+    parts = suite.strip("/").split("/")
+    return parts[-1] if parts else suite
+
+
+def suite_group_key(suite: str) -> str:
+    """Derive the grouping key (second path segment, or the leaf if shallow).
+
+    'all/basics/smoke'              -> 'basics'
+    'all/wacct/run_wacct_all'       -> 'wacct'
+    'my_suite'                      -> 'my_suite'
+    """
+    parts = suite.strip("/").split("/")
+    if len(parts) >= 2:
+        return parts[1]
+    return parts[0]
+
+
+def assign_colors(suites: list[str]) -> dict[str, str]:
+    """Assign a color to each suite from the palette, cycling if needed."""
+    return {s: COLOR_PALETTE[i % len(COLOR_PALETTE)] for i, s in enumerate(suites)}
+
+
+def group_suites(suites: list[str]) -> list[tuple[str, list[str]]]:
+    """Group suites by their second path segment.
+
+    Returns a list of (group_name, [suite_paths]) in discovery order.
+    Groups with multiple members are aggregated; singletons stay as-is.
+    """
+    from collections import OrderedDict
+
+    groups: OrderedDict[str, list[str]] = OrderedDict()
+    for s in suites:
+        key = suite_group_key(s)
+        groups.setdefault(key, []).append(s)
+    return list(groups.items())
+
+
+def setup_ax(ax: Any) -> None:
+    """Apply standard axis styling."""
+    ax.set_facecolor(BG)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(SPINE_CLR)
+    ax.spines["left"].set_linewidth(0.7)
+    ax.spines["bottom"].set_color(SPINE_CLR)
+    ax.spines["bottom"].set_linewidth(0.7)
+    ax.tick_params(colors=FG, length=3, width=0.6, labelsize=9)
+    ax.grid(True, axis="y", color=GRID_CLR, linewidth=0.5, alpha=0.8)
+    ax.grid(False, axis="x")
+
+
+def force_x_ticks(ax: Any, x_max: float) -> None:
+    """Ensure x-axis ticks include 0 and x_max."""
+    base = ax.get_xticks()
+    forced = sorted(set([0, x_max] + [t for t in base if 0 <= t <= x_max]))
+    ax.set_xticks(forced)
+    ax.set_xticklabels([f"{t:.0f}" for t in forced])
+
+
+def add_right_pct_axis(
+    ax: Any, y_lim_pct: float = 108, fontsize: float = 10, labelsize: float = 9
+) -> Any:
+    """Add a right-side 0-100% axis."""
+    axr = ax.twinx()
+    axr.set_ylim(0, y_lim_pct)
+    axr.set_ylabel("% of Total", color="#888888", fontsize=fontsize)
+    axr.tick_params(colors="#888888", length=3, width=0.5, labelsize=labelsize)
+    axr.spines["top"].set_visible(False)
+    axr.spines["left"].set_visible(False)
+    axr.spines["right"].set_color("#CCCCCC")
+    axr.spines["right"].set_linewidth(0.5)
+    axr.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    axr.set_facecolor("none")
+    return axr
+
+
+def save_chart(fig: Any, output_path: Path) -> None:
+    """Save with standard settings."""
+    import warnings
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
+    fig.savefig(
+        output_path, dpi=300, bbox_inches="tight",
+        facecolor=BG, edgecolor="none", pad_inches=0.15,
+    )
+    plt.close(fig)
+
+
+def get_suite_series(
+    has_data: list[dict[str, Any]], suite_name: str
+) -> tuple[Any, Any, Any]:
+    """Extract (times, passed, total) arrays for a single suite."""
+    times, passed, total = [], [], []
+    for p in has_data:
+        s = p["suites"].get(suite_name, {})
+        sp = s.get("passed")
+        st = s.get("total")
+        if sp is not None:
+            times.append(p["elapsed_minutes"])
+            passed.append(sp)
+            total.append(st or 0)
+    return np.array(times), np.array(passed), np.array(total)
+
+
+def get_group_series(
+    has_data: list[dict[str, Any]], suite_names: list[str]
+) -> tuple[Any, Any, Any]:
+    """Aggregate one or more suites into a single (times, passed, total) series."""
+    times, passed_agg, total_agg = [], [], []
+    for p in has_data:
+        bp = sum(p["suites"].get(s, {}).get("passed", 0) or 0 for s in suite_names)
+        bt = sum(p["suites"].get(s, {}).get("total", 0) or 0 for s in suite_names)
+        times.append(p["elapsed_minutes"])
+        passed_agg.append(bp)
+        total_agg.append(bt)
+    return np.array(times), np.array(passed_agg), np.array(total_agg)
+
+
+# ── Chart: Small multiples — grid of suite groups ────────────────────
+
+def chart_small_multiples(
+    has_data: list[dict[str, Any]],
+    suites: list[str],
+    model: str,
+    output_path: Path,
+) -> None:
+    groups = group_suites(suites)
+    n = len(groups)
+    if n == 0:
+        return
+    ncols = min(n, 2)
+    nrows = (n + ncols - 1) // ncols
+
+    fig = plt.figure(figsize=(7 * ncols, 4.25 * nrows))
+    fig.patch.set_facecolor(BG)
+    gs = gridspec.GridSpec(nrows, ncols, hspace=0.35, wspace=0.3)
+
+    for idx, (group_name, suite_members) in enumerate(groups):
+        row, col = divmod(idx, ncols)
+        ax = fig.add_subplot(gs[row, col])
+        setup_ax(ax)
+
+        color = COLOR_PALETTE[idx % len(COLOR_PALETTE)]
+        t, passed, total = get_group_series(has_data, suite_members)
+
+        if len(t) == 0:
+            ax.set_title(group_name, fontsize=11, fontweight="600", color=FG, pad=8)
+            continue
+
+        max_total = int(total.max()) if len(total) > 0 else 0
+        x_max = t[-1] if len(t) > 0 else 1
+
+        plot_t = np.concatenate([[0.0], t])
+        plot_y = np.concatenate([[0.0], passed.astype(float)])
+
+        ax.fill_between(plot_t, 0, plot_y, alpha=0.15, color=color, linewidth=0)
+        ax.plot(plot_t, plot_y, color=color, linewidth=2.0)
+        ax.scatter(
+            t, passed, s=14, color=color, edgecolors="white",
+            linewidths=0.5, zorder=4,
         )
-    return plt, MaxNLocator
+
+        if max_total > 0:
+            ax.axhline(y=max_total, color=color, linewidth=0.7, linestyle="--", alpha=0.4)
+            pct = passed[-1] / max_total * 100
+            ax.set_ylim(0, max_total * 1.12)
+        else:
+            pct = 0
+            ax.set_ylim(bottom=0)
+
+        ax.set_title(group_name, fontsize=11, fontweight="600", color=FG, pad=8)
+        ax.set_xlabel("Elapsed Time (min)", fontsize=9, color="#6A737D")
+        ax.set_ylabel("Passed", fontsize=9, color="#6A737D")
+        ax.set_xlim(0, x_max)
+        force_x_ticks(ax, x_max)
+
+        if max_total > 0:
+            add_right_pct_axis(ax, y_lim_pct=112, fontsize=8, labelsize=7.5)
+
+        ax.annotate(
+            f"{int(passed[-1])}/{max_total} ({pct:.0f}%)",
+            xy=(t[-1], passed[-1]), xytext=(-8, 10),
+            textcoords="offset points", fontsize=9, fontweight="600",
+            color=color, ha="right",
+        )
+
+    fig.suptitle(
+        f"Suite Progression  |  {model}",
+        fontsize=14, fontweight="700", color=FG, y=0.98,
+    )
+    save_chart(fig, output_path)
+
+
+# ── Chart: Progress + velocity (the "hero" chart) ────────────────────
+
+def chart_velocity(
+    has_data: list[dict[str, Any]],
+    total_tests: int,
+    model: str,
+    output_path: Path,
+) -> None:
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(13, 7), height_ratios=[2, 1], sharex=True,
+    )
+    fig.patch.set_facecolor(BG)
+
+    times = np.array([p["elapsed_minutes"] for p in has_data])
+    passed = np.array([p["passed"] for p in has_data], dtype=float)
+
+    plot_t = np.concatenate([[0.0], times])
+    plot_y = np.concatenate([[0.0], passed])
+    x_max = times[-1]
+
+    # Top panel: passed tests
+    setup_ax(ax1)
+    ax1.fill_between(plot_t, 0, plot_y, alpha=0.12, color="#0366D6")
+    ax1.plot(plot_t, plot_y, color="#0366D6", linewidth=2.2)
+    ax1.scatter(
+        times, passed, s=16, color="#0366D6", edgecolors="white",
+        linewidths=0.5, zorder=4,
+    )
+
+    ax1.set_ylim(0, total_tests * 1.08)
+    ax1.set_xlim(0, x_max)
+    ax1.axhline(
+        y=total_tests, color="#0366D6", linewidth=0.7, linestyle="--", alpha=0.4,
+    )
+    ax1.set_ylabel("Passed Tests", fontsize=10.5, color=FG)
+    ax1.set_title(
+        f"Progress  |  {model}",
+        fontsize=13, fontweight="600", color=FG, pad=12,
+    )
+
+    add_right_pct_axis(ax1)
+
+    # Auto-detect regression (largest single-step drop > 15% of prior value)
+    reg_idx = None
+    max_drop = 0.0
+    for i in range(1, len(passed)):
+        drop = passed[i - 1] - passed[i]
+        if passed[i - 1] > 0 and drop / passed[i - 1] > 0.15 and drop > max_drop:
+            max_drop = drop
+            reg_idx = i
+    if reg_idx is not None:
+        ax1.annotate(
+            f"\u2212{int(max_drop)} regression",
+            xy=(times[reg_idx], passed[reg_idx]),
+            xytext=(times[reg_idx] + 6, passed[reg_idx] - 80),
+            fontsize=8.5, fontweight="500", color="#D73A49",
+            arrowprops=dict(
+                arrowstyle="-|>", color="#D73A49", lw=1.0,
+                connectionstyle="arc3,rad=-0.2",
+            ),
+            bbox=dict(
+                boxstyle="round,pad=0.3", facecolor="#FFF3E0",
+                edgecolor="#D73A49", alpha=0.9, linewidth=0.7,
+            ),
+            zorder=12,
+        )
+
+    # Best value annotation (max passed, with arrow to the point)
+    best_idx = int(np.argmax(passed))
+    best_val = int(passed[best_idx])
+    best_pct = best_val / total_tests * 100
+    ax1.annotate(
+        f"Best: {best_val} / {total_tests}  ({best_pct:.0f}%)",
+        xy=(times[best_idx], passed[best_idx]),
+        xytext=(-140, 20), textcoords="offset points",
+        fontsize=10, fontweight="600", color="#0366D6",
+        arrowprops=dict(
+            arrowstyle="-|>", color="#0366D6", lw=1.0,
+            connectionstyle="arc3,rad=0.2",
+        ),
+        zorder=12,
+    )
+
+    # Bottom panel: delta bars
+    setup_ax(ax2)
+    deltas = np.diff(passed)
+    delta_times = (times[:-1] + times[1:]) / 2
+    bar_colors = ["#2EA44F" if d >= 0 else "#D73A49" for d in deltas]
+    ax2.bar(
+        delta_times, deltas, width=1.8, color=bar_colors, alpha=0.75, edgecolor="none",
+    )
+    ax2.axhline(y=0, color=SPINE_CLR, linewidth=0.8)
+    ax2.set_ylabel("\u0394 Tests", fontsize=10.5, color=FG)
+    ax2.set_xlabel("Elapsed Time (minutes)", fontsize=10.5, color=FG)
+
+    force_x_ticks(ax2, x_max)
+    save_chart(fig, output_path)
+
+
+# ── Chart: Heatmap — suite completion % over time ────────────────────
+
+def chart_heatmap(
+    has_data: list[dict[str, Any]],
+    suites: list[str],
+    total_tests: int,
+    model: str,
+    output_path: Path,
+) -> None:
+    row_defs = group_suites(suites)
+    if not row_defs:
+        return
+
+    n_rows = len(row_defs)
+    n_times = len(has_data)
+    fig_height = max(3, 1.0 + n_rows * 0.9)
+    fig, ax = plt.subplots(figsize=(14, fig_height))
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+
+    times = [p["elapsed_minutes"] for p in has_data]
+
+    matrix = np.zeros((n_rows, n_times))
+    row_totals: list[int] = []
+    for ri, (_label, suite_list) in enumerate(row_defs):
+        max_total = 0
+        for ti, p in enumerate(has_data):
+            sp = sum(p["suites"].get(s, {}).get("passed", 0) or 0 for s in suite_list)
+            st = sum(p["suites"].get(s, {}).get("total", 1) or 1 for s in suite_list)
+            max_total = max(max_total, st)
+            matrix[ri, ti] = sp / st * 100 if st > 0 else 0
+        row_totals.append(max_total)
+
+    cmap = LinearSegmentedColormap.from_list(
+        "envoi", ["#FFFFFF", "#BBD6F7", "#6BAED6", "#2171B5", "#08306B"],
+    )
+
+    im = ax.imshow(
+        matrix, aspect="auto", cmap=cmap, vmin=0, vmax=100,
+        interpolation="nearest",
+    )
+
+    tick_step = max(1, n_times // 10)
+    ax.set_xticks(range(0, n_times, tick_step))
+    ax.set_xticklabels(
+        [f"{times[i]:.0f}" for i in range(0, n_times, tick_step)], fontsize=8.5,
+    )
+    ax.set_xlabel("Elapsed Time (minutes)", fontsize=10.5, color=FG)
+
+    ylabels = [f"{row_defs[i][0]}  ({row_totals[i]})" for i in range(n_rows)]
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(ylabels, fontsize=10)
+
+    if n_times <= 45:
+        for ri in range(n_rows):
+            for ti in range(n_times):
+                val = matrix[ri, ti]
+                color = "white" if val > 55 else FG
+                ax.text(
+                    ti, ri, f"{val:.0f}", ha="center", va="center",
+                    fontsize=6.5, color=color, fontweight="400",
+                )
+
+    ax.set_title(
+        f"Suite Completion Heatmap (%)  |  {model}",
+        fontsize=13, fontweight="600", color=FG, pad=12,
+    )
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, aspect=20)
+    cbar.set_label("% Passed", fontsize=9, color="#6A737D")
+    cbar.ax.tick_params(labelsize=8, colors="#6A737D")
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(SPINE_CLR)
+    ax.spines["bottom"].set_color(SPINE_CLR)
+
+    save_chart(fig, output_path)
+
+
+# ── Chart entry point ────────────────────────────────────────────────
+
+def generate_charts(report: dict[str, Any], output_dir: Path) -> dict[str, str]:
+    """Generate all camera-ready charts from a trace report.
+
+    Returns dict mapping chart name to file path.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    points = report.get("points", [])
+    suites = report.get("suites", [])
+    model = report.get("agent_model", "unknown")
+
+    has_data = [p for p in points if p.get("passed") is not None]
+    if not has_data:
+        print("[charts] No evaluation data found, skipping chart generation.")
+        return {}
+
+    total_tests = max(
+        (p["total"] for p in has_data if isinstance(p.get("total"), int) and p["total"] > 0),
+        default=0,
+    )
+    if total_tests == 0:
+        print("[charts] Could not determine total test count, skipping.")
+        return {}
+
+    charts: dict[str, str] = {}
+
+    p = output_dir / "small_multiples.png"
+    chart_small_multiples(has_data, suites, model, p)
+    charts["small_multiples"] = str(p)
+
+    p = output_dir / "progress.png"
+    chart_velocity(has_data, total_tests, model, p)
+    charts["progress"] = str(p)
+
+    p = output_dir / "heatmap.png"
+    chart_heatmap(has_data, suites, total_tests, model, p)
+    charts["heatmap"] = str(p)
+
+    return charts
 
 
 def collect_part_timestamps(trace: dict[str, Any]) -> dict[int, str]:
@@ -367,28 +786,6 @@ def top_cluster_keys(
     return [key for key, _ in ranked[: max(1, limit)]]
 
 
-def cluster_series(
-    points: list[dict[str, Any]],
-    cluster_key: str,
-) -> list[int | None]:
-    values: list[int | None] = []
-    for point in points:
-        clusters = point.get("diagnostic_clusters")
-        if not isinstance(clusters, list):
-            values.append(None)
-            continue
-        matched: int | None = None
-        for cluster in clusters:
-            if not isinstance(cluster, dict):
-                continue
-            key = cluster.get("key")
-            if key != cluster_key:
-                continue
-            matched = parse_int(cluster.get("count"))
-            break
-        values.append(matched if isinstance(matched, int) else 0)
-    return values
-
 
 def build_report_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
     points = annotate_elapsed_minutes(build_commit_points(trace))
@@ -413,77 +810,6 @@ def build_report_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def render_chart(
-    *,
-    points: list[dict[str, Any]],
-    output_path: Path,
-    title: str,
-    x_mode: str,
-    y_values: list[int | None],
-    y_label: str = "Passed Tests",
-    y_max: int | None = None,
-) -> None:
-    plt, MaxNLocator = import_matplotlib()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    x_values: list[Any] = []
-    plot_y: list[float] = []
-    for point, y in zip(points, y_values, strict=False):
-        if x_mode == "part":
-            x = parse_int(point.get("part"))
-            if x is None:
-                continue
-            x_values.append(x)
-            if isinstance(y, int):
-                plot_y.append(float(max(0, y)))
-            else:
-                plot_y.append(math.nan)
-            continue
-
-        if x_mode == "elapsed_minutes":
-            elapsed = point.get("elapsed_minutes")
-            if not isinstance(elapsed, int | float):
-                continue
-            x_values.append(float(elapsed))
-            if isinstance(y, int):
-                plot_y.append(float(max(0, y)))
-            else:
-                plot_y.append(math.nan)
-            continue
-
-        ts = parse_iso_datetime(point.get("timestamp"))
-        if ts is None:
-            continue
-        x_values.append(ts)
-        if isinstance(y, int):
-            plot_y.append(float(max(0, y)))
-        else:
-            plot_y.append(math.nan)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    if x_values and plot_y:
-        ax.plot(x_values, plot_y, marker="o", linewidth=2.0, markersize=4.5)
-    else:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", fontsize=14)
-
-    ax.set_title(title)
-    ax.set_ylabel(y_label)
-    if x_mode == "part":
-        ax.set_xlabel("Parts")
-    elif x_mode == "elapsed_minutes":
-        ax.set_xlabel("Elapsed Time (minutes)")
-    else:
-        ax.set_xlabel("Time")
-    if isinstance(y_max, int) and y_max > 0:
-        ax.set_ylim(0, y_max)
-    else:
-        ax.set_ylim(bottom=0)
-    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.grid(True, linestyle="--", alpha=0.4)
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
 
 
 def resolve_output_dir(output_arg: str | None, trajectory_id: str) -> Path:
@@ -499,132 +825,11 @@ def write_graph_artifacts(report: dict[str, Any], output_dir: Path) -> dict[str,
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    points = report.get("points")
-    point_list = points if isinstance(points, list) else []
-    suites = report.get("suites")
-    suite_list = suites if isinstance(suites, list) else []
-    top_clusters_obj = report.get("diagnostic_top_clusters")
-    top_clusters = (
-        [item for item in top_clusters_obj if isinstance(item, str) and item]
-        if isinstance(top_clusters_obj, list)
-        else []
-    )
 
     json_path = output_dir / "graph_data.json"
     json_path.write_text(json.dumps(report, indent=2))
 
-    overall_total_candidates = [
-        parse_int(point.get("total"))
-        for point in point_list
-        if isinstance(point, dict)
-    ]
-    overall_total = max(
-        (value for value in overall_total_candidates if isinstance(value, int) and value > 0),
-        default=None,
-    )
-
-    charts: dict[str, str] = {}
-    overall_parts = output_dir / "overall_by_parts.png"
-    render_chart(
-        points=point_list,
-        output_path=overall_parts,
-        title="Overall Passed Tests by Parts",
-        x_mode="part",
-        y_values=[parse_int(p.get("passed")) if isinstance(p, dict) else None for p in point_list],
-        y_max=overall_total,
-    )
-    charts["overall_by_parts"] = str(overall_parts)
-
-    overall_time = output_dir / "overall_by_time.png"
-    render_chart(
-        points=point_list,
-        output_path=overall_time,
-        title="Overall Passed Tests by Elapsed Time",
-        x_mode="elapsed_minutes",
-        y_values=[parse_int(p.get("passed")) if isinstance(p, dict) else None for p in point_list],
-        y_max=overall_total,
-    )
-    charts["overall_by_time"] = str(overall_time)
-
-    suites_dir = output_dir / "suites"
-    for suite in suite_list:
-        if not isinstance(suite, str) or not suite:
-            continue
-        key = slugify(suite)
-        suite_values: list[int | None] = []
-        for point in point_list:
-            if not isinstance(point, dict):
-                suite_values.append(None)
-                continue
-            suites_payload = point.get("suites")
-            suites_obj = suites_payload if isinstance(suites_payload, dict) else {}
-            suite_payload = suites_obj.get(suite)
-            suite_obj = suite_payload if isinstance(suite_payload, dict) else {}
-            suite_values.append(parse_int(suite_obj.get("passed")))
-        suite_total_candidates = [
-            parse_int(
-                point.get("suites", {}).get(suite, {}).get("total")
-                if isinstance(point, dict)
-                and isinstance(point.get("suites"), dict)
-                and isinstance(point.get("suites", {}).get(suite), dict)
-                else None
-            )
-            for point in point_list
-        ]
-        suite_total = max(
-            (value for value in suite_total_candidates if isinstance(value, int) and value > 0),
-            default=None,
-        )
-
-        suite_parts = suites_dir / f"{key}_by_parts.png"
-        render_chart(
-            points=point_list,
-            output_path=suite_parts,
-            title=f"{suite} Passed Tests by Parts",
-            x_mode="part",
-            y_values=suite_values,
-            y_max=suite_total,
-        )
-        charts[f"{suite}:by_parts"] = str(suite_parts)
-
-        suite_time = suites_dir / f"{key}_by_time.png"
-        render_chart(
-            points=point_list,
-            output_path=suite_time,
-            title=f"{suite} Passed Tests by Elapsed Time",
-            x_mode="elapsed_minutes",
-            y_values=suite_values,
-            y_max=suite_total,
-        )
-        charts[f"{suite}:by_time"] = str(suite_time)
-
-    clusters_dir = output_dir / "diagnostics"
-    for cluster_key in top_clusters:
-        key = slugify(cluster_key)[:120]
-        values = cluster_series(point_list, cluster_key)
-        cluster_parts = clusters_dir / f"{key}_by_parts.png"
-        render_chart(
-            points=point_list,
-            output_path=cluster_parts,
-            title=f"Diagnostic Cluster by Parts: {cluster_key}",
-            x_mode="part",
-            y_values=values,
-            y_label="Cluster Count",
-            y_max=None,
-        )
-        charts[f"cluster:{cluster_key}:by_parts"] = str(cluster_parts)
-
-        cluster_time = clusters_dir / f"{key}_by_time.png"
-        render_chart(
-            points=point_list,
-            output_path=cluster_time,
-            title=f"Diagnostic Cluster by Elapsed Time: {cluster_key}",
-            x_mode="elapsed_minutes",
-            y_values=values,
-            y_label="Cluster Count",
-            y_max=None,
-        )
-        charts[f"cluster:{cluster_key}:by_time"] = str(cluster_time)
+    charts = generate_charts(report, output_dir)
     charts["graph_data"] = str(json_path)
     return charts
 

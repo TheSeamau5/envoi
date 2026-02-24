@@ -131,6 +131,11 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 - Persist `logs.parquet` with structured logs for orchestrator/runtime/worker.
 - Flush logs periodically during run (`LOGS_FLUSH_INTERVAL_SECONDS`, `LOGS_FLUSH_BATCH_SIZE`) and force-flush on shutdown.
 
+## Code Style
+
+- Never use `# noqa` comments. Fix the underlying issue instead.
+- No leading-underscore function names. All functions are plain public names.
+
 ## Schema Policy
 
 - No deprecated fields, aliases, compatibility shims, or dual schemas.
