@@ -24,6 +24,8 @@ fi
 
 echo "[setup] starting envoi runtime on :8000"
 cd /environment
+ENVOI_LOG_PATH="/tmp/envoi_runtime.jsonl" \
+ENVOI_LOG_COMPONENT="runtime" \
 python3 -m envoi.runtime --file main.py --port 8000 > /tmp/envoi.log 2>&1 &
 ENVOI_PID=$!
 echo "$ENVOI_PID" > /tmp/envoi.pid

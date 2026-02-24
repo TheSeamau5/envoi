@@ -263,22 +263,24 @@ async def parse_trace_event_line(
     on_stream_part: (
         Callable[[dict[str, Any]], Awaitable[None]] | None
     ),
-) -> None:
+) -> bool:
     """Parse a TRACE_EVENT from a stderr line and forward to callback."""
     if on_stream_part is None:
-        return
+        return False
     stripped = line.strip()
     if not stripped.startswith(TRACE_EVENT_PREFIX):
-        return
+        return False
     payload = stripped[len(TRACE_EVENT_PREFIX) :].strip()
     if not payload:
-        return
+        return False
     try:
         event_obj = json.loads(payload)
     except json.JSONDecodeError:
-        return
+        return False
     if isinstance(event_obj, dict):
         await on_stream_part(event_obj)
+        return True
+    return False
 
 
 def agent_message_id(message: dict[str, Any]) -> str | None:

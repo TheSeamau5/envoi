@@ -1447,6 +1447,8 @@ try:
         load_local_codex_auth_json_b64,
         parse_codex_auth_json,
         run_sandbox_client,
+        tprint,
+        truncate_text,
         upload_files_parallel,
     )
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
@@ -1775,9 +1777,17 @@ echo "[setup] codex install complete"
                 )
 
             async def handle_stderr_line(line: str) -> None:
-                await parse_trace_event_line(
+                handled = await parse_trace_event_line(
                     line, on_stream_part,
                 )
+                if handled:
+                    return
+                stripped = line.strip()
+                if stripped:
+                    tprint(
+                        "[codex][stderr] "
+                        + truncate_text(stripped, limit=500)
+                    )
 
             response = await self.run_client(
                 args,

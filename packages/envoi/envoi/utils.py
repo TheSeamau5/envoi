@@ -5,6 +5,7 @@ import io
 import json
 import tarfile
 import tempfile
+import time
 import tomllib
 from collections.abc import Iterable
 from contextvars import ContextVar
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+from .logging import log_event
 
 
 class Documents:
@@ -95,6 +98,14 @@ async def run(
     cwd: str | None = None,
     timeout_seconds: int = 30,
 ) -> RunResult:
+    started = time.monotonic()
+    log_event(
+        component="environment",
+        event="command.start",
+        message=command,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+    )
     effective_cwd = cwd
     if effective_cwd is None:
         try:
@@ -118,6 +129,15 @@ async def run(
         if process is not None:
             process.kill()
             await process.wait()
+        log_event(
+            component="environment",
+            event="command.timeout",
+            level="error",
+            message=command,
+            cwd=effective_cwd,
+            timeout_seconds=timeout_seconds,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
         return RunResult(
             stdout="",
             stderr="timeout",
@@ -125,9 +145,23 @@ async def run(
             stdout_bytes=b"",
         )
 
+    duration_ms = int((time.monotonic() - started) * 1000)
+    stderr_text = stderr_bytes.decode(errors="replace").strip()
+    stdout_text = stdout_bytes.decode(errors="replace").strip()
+    log_event(
+        component="environment",
+        event="command.complete",
+        level="error" if (process.returncode or 0) != 0 else "info",
+        message=command,
+        cwd=effective_cwd,
+        exit_code=process.returncode or 0,
+        duration_ms=duration_ms,
+        stdout_tail=stdout_text[-800:] if stdout_text else None,
+        stderr_tail=stderr_text[-800:] if stderr_text else None,
+    )
     return RunResult(
-        stdout=stdout_bytes.decode(errors="replace").strip(),
-        stderr=stderr_bytes.decode(errors="replace").strip(),
+        stdout=stdout_text,
+        stderr=stderr_text,
         exit_code=process.returncode or 0,
         stdout_bytes=stdout_bytes,
     )

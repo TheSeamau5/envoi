@@ -3,7 +3,8 @@ envoi-trace CLI -- the main entrypoint for running and analyzing trajectories.
 
 Run mode (default, no subcommand): launches runner.py via Modal to execute an
 agent trajectory. Handles auto-resume on retryable failures (agent_error,
-timeout, envoi_error) and prints trajectory ID + S3 URIs at startup.
+timeout, envoi_error) and prints trajectory ID + S3 URIs (trace/bundle/logs)
+at startup.
 
 Graph mode (subcommand): downloads trace + bundle from S3 and generates
 suite-level analysis graphs.
@@ -238,12 +239,14 @@ def run_command(args: argparse.Namespace) -> None:
         raise SystemExit("AWS_S3_BUCKET environment variable is required")
     trace_uri = artifact_uri(bucket, trajectory_id, "trace.parquet")
     bundle_uri = artifact_uri(bucket, trajectory_id, "repo.bundle")
+    logs_uri = artifact_uri(bucket, trajectory_id, "logs.parquet")
 
     banner = "=" * 72
     print(banner, flush=True)
     print(f"TRAJECTORY_ID: {trajectory_id}", flush=True)
     print(f"TRACE_S3_URI: {trace_uri}", flush=True)
     print(f"BUNDLE_S3_URI: {bundle_uri}", flush=True)
+    print(f"LOGS_S3_URI: {logs_uri}", flush=True)
     part_limit_label = (
         str(args.max_parts)
         if isinstance(args.max_parts, int) and args.max_parts > 0

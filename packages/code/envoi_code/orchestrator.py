@@ -4,7 +4,8 @@ Main orchestrator for envoi-trace.
 Creates a sandbox, provisions an agent (Codex or OpenCode), and runs a turn
 loop. After every part, it persists trace.parquet
 to S3. After every file change, it creates a git checkpoint. At end-of-run,
-it uploads a repo.bundle for the final export commit.
+it uploads a repo.bundle for the final export commit and logs.parquet for
+structured orchestrator/runtime diagnostics.
 
 The two core abstractions are Agent (how to talk to an agent) and
 Sandbox (where the agent runs). This file wires them together and
@@ -36,6 +37,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
+from envoi.logging import (
+    bind_log_context,
+    reset_log_callback,
+    reset_log_context,
+    set_log_callback,
+    update_log_context,
+)
 
 from envoi_code.agents.base import Agent, AgentSetupContext
 from envoi_code.agents.codex import CodexAgent
@@ -82,6 +90,7 @@ from envoi_code.utils.storage import (
     get_bucket,
     get_s3_client,
     load_trace_snapshot,
+    save_logs_parquet,
     save_trace_parquet,
     upload_file,
 )
@@ -523,6 +532,95 @@ def load_optional_mcp_server(
     return "", None
 
 
+def parse_jsonl_log_records(
+    raw_text: str,
+    *,
+    source: str,
+    log_path: str,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line_no, line in enumerate(raw_text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            records.append(
+                {
+                    "ts": datetime.now(UTC).isoformat(),
+                    "component": source,
+                    "event": "log.parse_error",
+                    "level": "error",
+                    "message": "Invalid JSON log line",
+                    "source": source,
+                    "log_path": log_path,
+                    "line_no": line_no,
+                    "raw": truncate_text(stripped, 500),
+                }
+            )
+            continue
+        if isinstance(parsed, dict):
+            parsed.setdefault("source", source)
+            parsed.setdefault("log_path", log_path)
+            parsed.setdefault("line_no", line_no)
+            records.append(parsed)
+    return records
+
+
+async def collect_sandbox_structured_logs(
+    sandbox: Sandbox,
+) -> list[dict[str, Any]]:
+    """Collect structured runtime/worker logs emitted inside sandbox /tmp."""
+    listing = await sandbox.run(
+        "ls -1 /tmp/envoi_*.jsonl 2>/dev/null || true",
+        quiet=True,
+        timeout=30,
+    )
+    if listing.exit_code != 0 or not listing.stdout.strip():
+        return []
+
+    records: list[dict[str, Any]] = []
+    for path in sorted(
+        line.strip()
+        for line in listing.stdout.splitlines()
+        if line.strip()
+    ):
+        content_result = await sandbox.run(
+            f"cat {shlex.quote(path)}",
+            quiet=True,
+            timeout=60,
+        )
+        if content_result.exit_code != 0:
+            records.append(
+                {
+                    "ts": datetime.now(UTC).isoformat(),
+                    "component": "sandbox",
+                    "event": "log.read_error",
+                    "level": "error",
+                    "message": "Failed reading sandbox log file",
+                    "source": "sandbox",
+                    "log_path": path,
+                    "stderr": truncate_text(
+                        content_result.stderr or "",
+                        600,
+                    ),
+                }
+            )
+            continue
+        source_name = (
+            "runtime" if "runtime" in Path(path).name else "session_worker"
+        )
+        records.extend(
+            parse_jsonl_log_records(
+                content_result.stdout,
+                source=source_name,
+                log_path=path,
+            )
+        )
+    return records
+
+
 async def restore_workspace_from_bundle(
     *,
     sandbox: Sandbox,
@@ -603,6 +701,7 @@ async def end_session(
     *,
     environment: str = "",
     task_params: dict[str, Any] | None = None,
+    logs_parquet_uri: str | None = None,
 ) -> None:
     print(f"[end] reason={reason} parts={part_count}")
 
@@ -675,6 +774,7 @@ async def end_session(
     agent_trace.artifacts = {
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": bundle_s3_uri,
+        "logs_parquet": logs_parquet_uri,
     }
     if environment:
         save_trace_parquet(
@@ -1674,6 +1774,17 @@ async def run_trajectory(
     global CURRENT_SUITE_FEEDBACK_PRIORITY
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
+    structured_logs: list[dict[str, Any]] = []
+    log_callback_token: Any = None
+    log_context_token: Any = None
+
+    def capture_structured_log(record: dict[str, Any]) -> None:
+        if not isinstance(record, dict):
+            return
+        normalized = dict(record)
+        normalized.setdefault("trajectory_id", trajectory_id)
+        normalized.setdefault("source", "orchestrator")
+        structured_logs.append(normalized)
     max_parts = normalize_positive_limit(max_parts)
     max_turns = normalize_positive_limit(max_turns)
     if timeout_seconds <= 0:
@@ -1734,11 +1845,19 @@ async def run_trajectory(
         existing_trace = None
     trace_s3_uri = artifact_uri(trajectory_id, "trace.parquet")
     bundle_s3_uri = artifact_uri(trajectory_id, "repo.bundle")
+    logs_s3_uri = artifact_uri(trajectory_id, "logs.parquet")
+    log_callback_token = set_log_callback(capture_structured_log)
+    log_context_token = bind_log_context(
+        component="orchestrator",
+        trajectory_id=trajectory_id,
+        source="orchestrator",
+    )
     banner = "=" * 72
     print(banner)
     print(f"TRAJECTORY_ID: {trajectory_id}")
     print(f"TRACE_S3_URI: {trace_s3_uri}")
     print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
+    print(f"LOGS_S3_URI: {logs_s3_uri}")
     part_limit_label = str(max_parts) if max_parts is not None else "none"
     turn_limit_label = str(max_turns) if max_turns is not None else "none"
     print(
@@ -1837,6 +1956,7 @@ async def run_trajectory(
             raise RuntimeError(
                 f"Failed to create session for agent={agent_name}",
             )
+        update_log_context(session_id=session_id)
 
         if existing_trace is not None:
             agent_trace = existing_trace
@@ -2035,6 +2155,7 @@ async def run_trajectory(
         consecutive_turn_failures = 0
 
         while True:
+            update_log_context(turn=turn_count + 1, part=part_count)
             if await stop_for_winner(
                 detection_point="before turn start",
             ):
@@ -2153,6 +2274,7 @@ async def run_trajectory(
             )
             part_count = stream_part_counter[0]
             git_commit = stream_git_commit_ref[0]
+            update_log_context(part=part_count, git_commit=git_commit)
 
             if turn_outcome is None:
                 if await stop_for_winner(
@@ -2200,6 +2322,7 @@ async def run_trajectory(
             session_id = turn_outcome.session_id
             if agent_trace.session_id != session_id:
                 agent_trace.session_id = session_id
+            update_log_context(session_id=session_id)
 
             info = response.get("info", {})
             parts = response.get("parts", [])
@@ -2436,6 +2559,7 @@ async def run_trajectory(
                 f"streamed_parts={streamed_parts} "
                 f"started={turn_started_at}"
             )
+            save_logs_parquet(trajectory_id, structured_logs)
 
             if (
                 isinstance(turn_end_passed, int)
@@ -2524,6 +2648,7 @@ async def run_trajectory(
                 await evaluator.wait()
             except Exception:
                 pass
+        logs_parquet_uri = artifact_uri(trajectory_id, "logs.parquet")
         if sandbox is not None and agent_trace is not None:
             try:
                 winner = first_winning_commit(agent_trace.evaluations)
@@ -2554,6 +2679,14 @@ async def run_trajectory(
                             f"score={winner_eval.passed}/{winner_eval.total}"
                         )
                         end_reason = "solved"
+                try:
+                    sandbox_logs = await collect_sandbox_structured_logs(sandbox)
+                    if sandbox_logs:
+                        structured_logs.extend(sandbox_logs)
+                except Exception as log_error:
+                    print(f"[logs] failed collecting sandbox logs: {log_error}")
+                if structured_logs:
+                    save_logs_parquet(trajectory_id, structured_logs)
                 await end_session(
                     sandbox,
                     agent_trace,
@@ -2562,6 +2695,7 @@ async def run_trajectory(
                     end_reason,
                     environment=environment,
                     task_params=task_params_loaded,
+                    logs_parquet_uri=logs_parquet_uri,
                 )
             except Exception as end_err:
                 print(
@@ -2573,6 +2707,18 @@ async def run_trajectory(
                 await sandbox.terminate()
             except Exception:
                 pass
+        if (
+            (sandbox is None or agent_trace is None)
+            and structured_logs
+        ):
+            try:
+                save_logs_parquet(trajectory_id, structured_logs)
+            except Exception as log_save_error:
+                print(f"[logs] failed saving logs.parquet: {log_save_error}")
+        if log_callback_token is not None:
+            reset_log_callback(log_callback_token)
+        if log_context_token is not None:
+            reset_log_context(log_context_token)
 
     return trajectory_id
 

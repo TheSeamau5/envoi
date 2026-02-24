@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,8 +23,29 @@ from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
 
 from . import environment
+from .logging import bind_log_context, log_event
 from .runtime import load_environment
 from .utils import Documents, parse_params, serialize_object, working_dir
+
+
+def _worker_component() -> str:
+    return os.environ.get("ENVOI_LOG_COMPONENT", "").strip() or "session_worker"
+
+
+def _log(
+    event: str,
+    *,
+    message: str = "",
+    level: str = "info",
+    **fields: Any,
+) -> None:
+    log_event(
+        component=_worker_component(),
+        event=event,
+        message=message,
+        level=level,
+        **fields,
+    )
 
 
 def coerce_path_value(value: str) -> Any:
@@ -79,12 +102,24 @@ def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, An
 
 
 def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
+    bind_log_context(
+        component=_worker_component(),
+        session_id=os.environ.get("ENVOI_LOG_SESSION_ID"),
+    )
+    _log(
+        "worker.app.start",
+        module_file=module_file,
+        session_dir=session_dir,
+    )
     load_environment(module_file)
     app = FastAPI(title="envoi session worker")
 
     @app.post("/setup")
     async def setup(params: str = Form(default="{}")) -> Any:
+        started = time.monotonic()
+        _log("worker.setup.start")
         if environment.setup_fn is None:
+            _log("worker.setup.skip", message="no setup fn")
             return {"ok": True}
 
         token = working_dir.set(session_dir)
@@ -96,13 +131,24 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 parse_params(params),
             )
             await environment.setup_fn(**kwargs)
+            _log(
+                "worker.setup.complete",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             return {"ok": True}
         except Exception as error:
+            _log(
+                "worker.setup.failed",
+                level="error",
+                error=str(error),
+            )
             return JSONResponse(status_code=500, content={"error": str(error)})
         finally:
             working_dir.reset(token)
 
     async def run_tests(path: str, params: str) -> Any:
+        started = time.monotonic()
+        _log("worker.test.start", path=path or "/")
         matched = matched_tests(path)
         if not matched:
             return JSONResponse(status_code=404, content={"error": f"No tests match: {path}"})
@@ -131,6 +177,12 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 for test_path, (function, path_params) in matched.items()
             ]
         )
+        _log(
+            "worker.test.complete",
+            path=path or "/",
+            matched=len(matched),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
 
         if len(results) == 1 and (results[0][0] == path or "{" in results[0][0]):
             return results[0][1]
@@ -146,6 +198,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
 
     @app.delete("/teardown")
     async def teardown() -> Any:
+        _log("worker.teardown.start")
         if environment.teardown_fn is not None:
             token = working_dir.set(session_dir)
             try:
@@ -153,6 +206,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
             finally:
                 working_dir.reset(token)
 
+        _log("worker.teardown.complete")
         asyncio.get_event_loop().call_later(0.1, sys.exit, 0)
         return {"ok": True}
 
@@ -166,6 +220,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
 
+    _log(
+        "worker.start",
+        file=args.file,
+        session_dir=args.session_dir,
+        port=args.port,
+    )
     app = build_worker_app(args.file, args.session_dir)
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="error")
 

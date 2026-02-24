@@ -28,6 +28,7 @@ Default run behavior:
 - No max part cap unless `--max-parts` is set.
 - No max turn cap unless `--max-turns` is set.
 - Total run timeout defaults to `7200` seconds.
+- Each run writes `trace.parquet`, `repo.bundle`, and `logs.parquet` to S3.
 
 Set explicit run caps/timeouts:
 
@@ -59,6 +60,7 @@ envoi code --example examples/c_compiler --test-timeout-seconds 10800
 - Turn-end feedback includes the top 50 failed tests (priority: `basics -> c_testsuite -> wacct -> torture`) with full test source and failure message.
 - If environment params enable advisor model settings, turn-end feedback also includes an external assessment based on the task prompt, top failed tests, and current commit code snapshot.
 - Runs stop at the first winning commit (`passed == total`), and artifacts are projected to that winning commit.
+- Runtime/worker/orchestrator logs are captured as structured records in `logs.parquet`.
 
 Environment-level advisor config:
 - Create `environment/params.py` with `params()` returning:
@@ -84,6 +86,23 @@ examples/c_compiler/
     Dockerfile            # sandbox image
     params.py             # optional environment-level run params
     tests/                # test suites
+```
+
+## Structured logs
+
+Per trajectory, S3 now includes:
+- `trajectories/<id>/trace.parquet`
+- `trajectories/<id>/repo.bundle`
+- `trajectories/<id>/logs.parquet`
+
+`logs.parquet` stores structured runtime records (`ts`, `component`, `event`, `level`, `message`, `turn`, `part`, `git_commit`, `session_id`, `fields`).
+
+Quick DuckDB query example:
+
+```sql
+SELECT ts, component, event, level, message
+FROM read_parquet('s3://<bucket>/trajectories/<id>/logs.parquet')
+ORDER BY ts;
 ```
 
 ## Development

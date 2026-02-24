@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import builtins
 import shlex
 import time
 from collections.abc import Awaitable, Callable
@@ -19,6 +18,7 @@ from typing import Any
 import modal
 
 from envoi_code.sandbox.base import CommandResult, SandboxConfig
+from envoi_code.utils.helpers import tprint
 
 
 class ModalSandbox:
@@ -85,7 +85,7 @@ class ModalSandbox:
     ) -> CommandResult:
         """Execute a command inside the Modal sandbox."""
         if not quiet:
-            builtins.print(f"[run] {cmd[:200]}")
+            tprint(f"[run] {cmd[:200]}")
 
         # Build shell prefix for cwd/env.
         prefix = ""
@@ -113,7 +113,7 @@ class ModalSandbox:
             async for chunk in stream:
                 sink.append(chunk)
                 if live and chunk:
-                    builtins.print(chunk, end="", flush=True)
+                    tprint(chunk, end="")
                 if line_callback is None:
                     continue
                 line_buffer += chunk
@@ -143,11 +143,11 @@ class ModalSandbox:
         stderr = "".join(stderr_chunks)
         exit_code = proc.returncode or 0
         if exit_code in {124, -1}:
-            builtins.print(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
+            tprint(f"[run] TIMEOUT after {timeout}s: {cmd[:100]}")
         if exit_code != 0:
-            builtins.print(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
+            tprint(f"[run] FAILED exit={exit_code} cmd={cmd[:100]}")
             if stderr:
-                builtins.print(f"[run] stderr: {stderr[:500]}")
+                tprint(f"[run] stderr: {stderr[:500]}")
         return CommandResult(
             exit_code=exit_code, stdout=stdout, stderr=stderr, duration_ms=duration_ms,
         )
@@ -162,7 +162,7 @@ class ModalSandbox:
     ) -> None:
         """Write a text file inside the Modal sandbox."""
         if log_upload:
-            builtins.print(f"[setup][upload] {path}")
+            tprint(f"[setup][upload] {path}")
         if ensure_dir:
             await self.run(f"mkdir -p '{PurePosixPath(path).parent}'", quiet=True)
         async with await self._inner.open.aio(path, "w") as f:

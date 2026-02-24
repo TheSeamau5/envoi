@@ -910,6 +910,8 @@ try:
         compute_turn_timeout_seconds,
         environment_upload_items,
         run_sandbox_client,
+        tprint,
+        truncate_text,
         upload_files_parallel,
     )
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
@@ -1458,9 +1460,17 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             async def handle_stderr_line(
                 line: str,
             ) -> None:
-                await parse_trace_event_line(
+                handled = await parse_trace_event_line(
                     line, on_stream_part,
                 )
+                if handled:
+                    return
+                stripped = line.strip()
+                if stripped:
+                    tprint(
+                        "[opencode][stderr] "
+                        + truncate_text(stripped, limit=500)
+                    )
 
             response = await self.run_client(
                 [

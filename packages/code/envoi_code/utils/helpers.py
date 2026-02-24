@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from envoi.logging import log_event
+
 from envoi_code.sandbox.base import Sandbox
 
 SETUP_UPLOAD_CONCURRENCY = max(
@@ -44,6 +46,20 @@ def ts() -> str:
 def tprint(*args: Any, **kwargs: Any) -> None:
     if "flush" not in kwargs:
         kwargs["flush"] = True
+    separator = kwargs.get("sep", " ")
+    try:
+        message = separator.join(str(arg) for arg in args)
+    except Exception:
+        message = " ".join(str(arg) for arg in args)
+    try:
+        log_event(
+            component=os.environ.get("ENVOI_LOG_COMPONENT", "").strip()
+            or "orchestrator",
+            event="console.print",
+            message=message,
+        )
+    except Exception:
+        pass
     builtins.print(f"[{ts()}]", *args, **kwargs)
 
 
@@ -312,7 +328,7 @@ async def run_sandbox_client(
     ).unpack()
     if exit_code != 0:
         if stderr:
-            builtins.print(
+            print(
                 f"[{label}] command failed: {stderr[:500]}",
                 flush=True,
             )
@@ -326,7 +342,7 @@ async def run_sandbox_client(
             if len(stdout) > 500
             else stdout
         )
-        builtins.print(
+        print(
             f"[{label}] invalid JSON response: {stdout_preview}",
             flush=True,
         )

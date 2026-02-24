@@ -84,6 +84,7 @@ envoi CLI (packages/cli/envoi_cli/main.py)
 - `environment.py` — `@envoi.suite()`, `@envoi.test()`, `@envoi.setup()` decorators
 - `client.py` — `envoi.Client`, `envoi.connect()`, async session API
 - `runtime.py` — FastAPI server that hosts an environment
+- `logging.py` — shared structured logging context/callback/file sink
 - `deploy.py` — Docker-based local deployment
 - `constants.py` — Shared constants (ports, timeouts, image names)
 
@@ -94,6 +95,7 @@ envoi CLI (packages/cli/envoi_cli/main.py)
 - `sandbox/base.py` — `Sandbox` Protocol + `CommandResult`. Every sandbox implements this.
 - `scripts/trace.py` — CLI entrypoint. Launches orchestrator via Modal, handles auto-resume.
 - `utils/trace_parquet.py` — Parquet serialization: `agent_trace_to_rows()`, `parquet_to_trace_dict()`.
+- `utils/logs_parquet.py` — Structured logs parquet serialization.
 - `utils/storage.py` — S3 upload/download for trace and bundle artifacts.
 - `utils/git.py` — Git checkpoint operations inside the sandbox.
 - `utils/evaluation.py` — Concurrent commit evaluation against envoi.
@@ -126,6 +128,7 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 
 - Persist `trace.parquet` after every recorded part.
 - Create a git checkpoint immediately for any part that changed files.
+- Persist `logs.parquet` with structured logs for orchestrator/runtime/worker.
 
 ## Schema Policy
 
@@ -151,6 +154,7 @@ Each row records:
 For trajectory `<id>`:
 - `trajectories/<id>/trace.parquet` — Canonical trace (written after every part)
 - `trajectories/<id>/repo.bundle` — Full git history (uploaded at end-of-run)
+- `trajectories/<id>/logs.parquet` — Structured orchestrator/runtime/worker logs
 
 `repo.bundle` is the canonical source for repository reconstruction. `trace.parquet` maps each part to its commit via `git_commit` / `repo_checkpoint`.
 
@@ -229,6 +233,8 @@ envoi code --example examples/c_compiler
 - Fixture installation/provisioning: `examples/<name>/environment/Dockerfile`
 - Trace schema/capture: `packages/code/envoi_code/orchestrator.py` (main loop, `PartRecord`, `TurnRecord`)
 - Trace parquet serialization: `packages/code/envoi_code/utils/trace_parquet.py`
+- Logs parquet serialization: `packages/code/envoi_code/utils/logs_parquet.py`
+- Structured logging helpers: `packages/envoi/envoi/logging.py`
 - Agent integration: `packages/code/envoi_code/agents/codex.py`, `packages/code/envoi_code/agents/opencode.py`
 - Sandbox runtime: `packages/code/envoi_code/sandbox/modal/`, `packages/code/envoi_code/sandbox/mcp_server.py`
 - CLI launcher: `packages/code/envoi_code/scripts/trace.py`

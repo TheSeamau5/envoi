@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import os
 import re
 import shutil
 import socket
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from . import environment
 from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
+from .logging import bind_log_context, log_event
 from .utils import Documents, parse_params, serialize_object, working_dir
 
 sessions: dict[str, dict[str, Any]] = {}
@@ -28,7 +31,28 @@ sessions: dict[str, dict[str, Any]] = {}
 _OPTIONAL_FILE = File(default=None)
 
 
+def _runtime_component() -> str:
+    return os.environ.get("ENVOI_LOG_COMPONENT", "").strip() or "runtime"
+
+
+def _log(
+    event: str,
+    *,
+    message: str = "",
+    level: str = "info",
+    **fields: Any,
+) -> None:
+    log_event(
+        component=_runtime_component(),
+        event=event,
+        message=message,
+        level=level,
+        **fields,
+    )
+
+
 def load_environment(module_file: str) -> None:
+    _log("environment.load.start", module_file=module_file)
     environment.clear_environment()
 
     module_path = Path(module_file).resolve()
@@ -58,6 +82,12 @@ def load_environment(module_file: str) -> None:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    _log(
+        "environment.load.complete",
+        module_file=str(module_path),
+        has_setup=environment.setup_fn is not None,
+        test_count=len(environment._test_registry),
+    )
 
 
 async def extract_upload(upload: UploadFile, destination: Path) -> None:
@@ -138,7 +168,19 @@ async def spawn_worker(
     module_file: str,
     session_dir: str,
     port: int,
+    session_id: str,
 ) -> asyncio.subprocess.Process:
+    worker_log_path = f"/tmp/envoi_worker_{session_id[:8]}_{port}.jsonl"
+    worker_env = dict(os.environ)
+    worker_env["ENVOI_LOG_PATH"] = worker_log_path
+    worker_env["ENVOI_LOG_COMPONENT"] = "session_worker"
+    worker_env["ENVOI_LOG_SESSION_ID"] = session_id
+    _log(
+        "worker.spawn.start",
+        session_id=session_id,
+        port=port,
+        log_path=worker_log_path,
+    )
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
@@ -149,6 +191,7 @@ async def spawn_worker(
         session_dir,
         "--port",
         str(port),
+        env=worker_env,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -161,6 +204,14 @@ async def spawn_worker(
                 stderr_text = (await process.stderr.read()).decode(
                     errors="replace"
                 ).strip()
+            _log(
+                "worker.spawn.failed",
+                level="error",
+                session_id=session_id,
+                port=port,
+                return_code=process.returncode,
+                stderr=stderr_text,
+            )
             raise RuntimeError(
                 "Session worker exited before startup: "
                 f"{stderr_text or f'exit code {process.returncode}'}"
@@ -169,6 +220,14 @@ async def spawn_worker(
         try:
             async with httpx.AsyncClient() as client:
                 await client.get(f"{worker_url}/docs", timeout=1.0)
+            _log(
+                "worker.spawn.ready",
+                session_id=session_id,
+                port=port,
+                url=worker_url,
+                pid=process.pid,
+                log_path=worker_log_path,
+            )
             return process
         except Exception:
             await asyncio.sleep(0.1)
@@ -179,6 +238,12 @@ async def spawn_worker(
     except Exception:
         pass
 
+    _log(
+        "worker.spawn.timeout",
+        level="error",
+        session_id=session_id,
+        port=port,
+    )
     raise RuntimeError("Timed out waiting for session worker startup")
 
 
@@ -206,6 +271,11 @@ def try_parse_json(response: httpx.Response) -> Any | None:
 async def session_timeout(session_id: str, timeout_seconds: int) -> None:
     await asyncio.sleep(timeout_seconds)
     if session_id in sessions:
+        _log(
+            "session.timeout",
+            session_id=session_id,
+            timeout_seconds=timeout_seconds,
+        )
         await cleanup_session(session_id)
 
 
@@ -227,6 +297,11 @@ async def cleanup_session(session_id: str) -> None:
     session_state = sessions.pop(session_id, None)
     if session_state is None:
         return
+    _log(
+        "session.cleanup.start",
+        session_id=session_id,
+        worker_url=session_state.get("url"),
+    )
 
     timeout_task: asyncio.Task[None] = session_state["timeout_task"]
     timeout_task.cancel()
@@ -246,10 +321,15 @@ async def cleanup_session(session_id: str) -> None:
             pass
 
     shutil.rmtree(session_state["dir"], ignore_errors=True)
+    _log("session.cleanup.complete", session_id=session_id)
 
 
 def build_app(module_file: str) -> FastAPI:
     module_path = str(Path(module_file).resolve())
+    bind_log_context(
+        component=_runtime_component(),
+        module_file=module_path,
+    )
     load_environment(module_path)
 
     app = FastAPI(title="envoi runtime")
@@ -263,6 +343,8 @@ def build_app(module_file: str) -> FastAPI:
         file: UploadFile | None,
         params: str,
     ) -> Any:
+        started = time.monotonic()
+        _log("test.local.start", path=path or "/")
         if environment.setup_fn is not None:
             return JSONResponse(
                 status_code=400,
@@ -303,11 +385,23 @@ def build_app(module_file: str) -> FastAPI:
                     for test_path, (function, path_params) in matched.items()
                 ]
             )
+            _log(
+                "test.local.complete",
+                path=path or "/",
+                matched=len(matched),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
 
             if len(results) == 1 and (results[0][0] == path or "{" in results[0][0]):
                 return results[0][1]
             return dict(results)
         except Exception as error:
+            _log(
+                "test.local.failed",
+                level="error",
+                path=path or "/",
+                error=str(error),
+            )
             return JSONResponse(status_code=500, content={"error": str(error)})
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -338,18 +432,30 @@ def build_app(module_file: str) -> FastAPI:
         process: asyncio.subprocess.Process | None = None
 
         try:
+            _log(
+                "session.create.start",
+                session_id=session_id,
+                timeout_seconds=timeout,
+            )
             if file is not None and file.filename:
                 await extract_upload(file, session_dir)
 
             port = find_free_port()
-            process = await spawn_worker(module_path, str(session_dir), port)
+            process = await spawn_worker(
+                module_path,
+                str(session_dir),
+                port,
+                session_id,
+            )
             worker_url = f"http://127.0.0.1:{port}"
+            setup_timeout = max(300.0, float(timeout) + 30.0)
+            started = time.monotonic()
 
             async with httpx.AsyncClient() as client:
                 setup_response = await client.post(
                     f"{worker_url}/setup",
                     data={"params": params},
-                    timeout=300.0,
+                    timeout=setup_timeout,
                 )
             setup_payload = try_parse_json(setup_response)
             if setup_response.is_error or (
@@ -365,8 +471,22 @@ def build_app(module_file: str) -> FastAPI:
                 "timeout_seconds": timeout,
                 "timeout_task": timeout_task,
             }
+            _log(
+                "session.create.complete",
+                session_id=session_id,
+                timeout_seconds=timeout,
+                setup_duration_ms=int((time.monotonic() - started) * 1000),
+                worker_url=worker_url,
+                worker_pid=process.pid if process is not None else None,
+            )
             return {"session_id": session_id, "timeout": timeout}
         except Exception as error:
+            _log(
+                "session.create.failed",
+                level="error",
+                session_id=session_id,
+                error=str(error),
+            )
             if process is not None:
                 try:
                     process.terminate()
@@ -386,21 +506,49 @@ def build_app(module_file: str) -> FastAPI:
         request_url = (
             f"{session_state['url']}/test" if not path else f"{session_state['url']}/test/{path}"
         )
+        request_timeout = max(
+            30.0,
+            float(session_state.get("timeout_seconds") or DEFAULT_SESSION_TIMEOUT_SECONDS)
+            + 30.0,
+        )
+        started = time.monotonic()
+        _log(
+            "session.test.start",
+            session_id=session_id,
+            path=path or "/",
+            timeout_seconds=request_timeout,
+            request_url=request_url,
+        )
 
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     request_url,
                     data={"params": params},
-                    timeout=300.0,
+                    timeout=request_timeout,
                 )
         except Exception as error:
+            _log(
+                "session.test.unavailable",
+                level="error",
+                session_id=session_id,
+                path=path or "/",
+                error=str(error),
+            )
             return JSONResponse(
                 status_code=502,
                 content={"error": f"Session worker unavailable: {error}"},
             )
 
         payload = try_parse_json(response)
+        _log(
+            "session.test.response",
+            session_id=session_id,
+            path=path or "/",
+            status_code=response.status_code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            has_payload=isinstance(payload, dict | list),
+        )
         if response.is_error:
             if isinstance(payload, dict):
                 return JSONResponse(status_code=response.status_code, content=payload)
@@ -446,6 +594,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
+    _log(
+        "runtime.start",
+        file=args.file,
+        host=args.host,
+        port=args.port,
+    )
     app = build_app(args.file)
     uvicorn.run(app, host=args.host, port=args.port)
 

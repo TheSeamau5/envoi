@@ -1,12 +1,14 @@
 """S3 persistence for trace artifacts.
 
-Handles saving trace.parquet after every part (save_trace_parquet), loading a
-prior trace for resume (load_trace_snapshot), uploading raw files like
-repo.bundle (upload_file), and constructing S3 URIs (artifact_uri).
+Handles saving trace.parquet after every part (save_trace_parquet), saving
+structured logs.parquet snapshots (save_logs_parquet), loading a prior trace
+for resume (load_trace_snapshot), uploading raw files like repo.bundle
+(upload_file), and constructing S3 URIs (artifact_uri).
 """
 
 from __future__ import annotations
 
+import builtins
 import io
 import os
 from typing import Any
@@ -14,7 +16,11 @@ from typing import Any
 import boto3
 
 from envoi_code.models import AgentTrace
-from envoi_code.utils.helpers import tprint
+from envoi_code.utils.helpers import tprint, ts
+from envoi_code.utils.logs_parquet import (
+    log_records_to_rows,
+    write_logs_parquet,
+)
 from envoi_code.utils.trace_parquet import (
     agent_trace_to_rows,
     parquet_to_trace_dict,
@@ -25,6 +31,7 @@ print = tprint
 
 _s3_client = None
 _last_saved_trace_log_key: dict[str, tuple[int, int, str]] = {}
+_last_saved_logs_count: dict[str, int] = {}
 
 
 def get_s3_client():
@@ -90,6 +97,29 @@ def save_trace_parquet(
     if previous_log_key != log_key:
         print(f"[s3] saved trace.parquet (parts={part_count})")
         _last_saved_trace_log_key[trajectory_id] = log_key
+
+
+def save_logs_parquet(
+    trajectory_id: str,
+    records: list[dict[str, Any]],
+) -> None:
+    """Serialize structured logs to parquet and upload to S3."""
+    if not records:
+        return
+
+    rows = log_records_to_rows(trajectory_id, records)
+    if not rows:
+        return
+
+    buf = io.BytesIO()
+    write_logs_parquet(rows, buf)
+    upload_file(trajectory_id, "logs.parquet", buf.getvalue())
+
+    count = len(rows)
+    previous_count = _last_saved_logs_count.get(trajectory_id)
+    if previous_count != count:
+        builtins.print(f"[{ts()}] [s3] saved logs.parquet (rows={count})", flush=True)
+        _last_saved_logs_count[trajectory_id] = count
 
 
 def upload_file(trajectory_id: str, filename: str, data: bytes) -> str:
