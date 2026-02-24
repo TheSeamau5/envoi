@@ -36,6 +36,10 @@ function_image = (
         ROOT, remote_path="/root/envoi_code",
     )
     .add_local_dir(
+        WORKSPACE_ROOT / "packages" / "envoi" / "envoi",
+        remote_path="/root/envoi",
+    )
+    .add_local_dir(
         WORKSPACE_ROOT / "examples", remote_path="/root/examples",
     )
 )
