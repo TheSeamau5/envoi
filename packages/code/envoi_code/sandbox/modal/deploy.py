@@ -30,7 +30,7 @@ function_image = (
         "pydantic",
         "pyarrow",
         "python-dotenv",
-        "anthropic",
+        "anthropic[aiohttp]",
     )
     .add_local_dir(
         ROOT, remote_path="/root/envoi_code",
