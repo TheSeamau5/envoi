@@ -116,6 +116,12 @@ FAILED_TEST_FEEDBACK_LIMIT = max(
 ADVISOR_TIMEOUT_SECONDS = max(
     30, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "180"))
 )
+LOGS_FLUSH_INTERVAL_SECONDS = max(
+    1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SECONDS", "5"))
+)
+LOGS_FLUSH_BATCH_SIZE = max(
+    1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50"))
+)
 
 
 print = tprint
@@ -1777,6 +1783,45 @@ async def run_trajectory(
     structured_logs: list[dict[str, Any]] = []
     log_callback_token: Any = None
     log_context_token: Any = None
+    logs_flush_task: asyncio.Task[None] | None = None
+    logs_flush_wakeup: asyncio.Event | None = None
+    logs_flush_stop: asyncio.Event | None = None
+    logs_flush_lock = asyncio.Lock()
+    last_logs_flush_count = 0
+    last_logs_flush_mono = time.monotonic()
+
+    async def flush_logs(
+        *,
+        force: bool = False,
+    ) -> None:
+        nonlocal last_logs_flush_count, last_logs_flush_mono
+        if not structured_logs:
+            return
+        async with logs_flush_lock:
+            total_count = len(structured_logs)
+            if total_count == 0:
+                return
+            new_records = total_count - last_logs_flush_count
+            elapsed = time.monotonic() - last_logs_flush_mono
+            if (
+                not force
+                and (
+                    new_records <= 0
+                    or (
+                        new_records < LOGS_FLUSH_BATCH_SIZE
+                        and elapsed < LOGS_FLUSH_INTERVAL_SECONDS
+                    )
+                )
+            ):
+                return
+            snapshot = list(structured_logs)
+            await asyncio.to_thread(
+                save_logs_parquet,
+                trajectory_id,
+                snapshot,
+            )
+            last_logs_flush_count = len(snapshot)
+            last_logs_flush_mono = time.monotonic()
 
     def capture_structured_log(record: dict[str, Any]) -> None:
         if not isinstance(record, dict):
@@ -1785,6 +1830,17 @@ async def run_trajectory(
         normalized.setdefault("trajectory_id", trajectory_id)
         normalized.setdefault("source", "orchestrator")
         structured_logs.append(normalized)
+        if logs_flush_wakeup is None:
+            return
+        level_value = normalized.get("level")
+        level = (
+            level_value.lower()
+            if isinstance(level_value, str)
+            else ""
+        )
+        new_records = len(structured_logs) - last_logs_flush_count
+        if level in {"error", "warning"} or new_records >= LOGS_FLUSH_BATCH_SIZE:
+            logs_flush_wakeup.set()
     max_parts = normalize_positive_limit(max_parts)
     max_turns = normalize_positive_limit(max_turns)
     if timeout_seconds <= 0:
@@ -1852,6 +1908,44 @@ async def run_trajectory(
         trajectory_id=trajectory_id,
         source="orchestrator",
     )
+
+    logs_flush_wakeup = asyncio.Event()
+    logs_flush_stop = asyncio.Event()
+
+    async def periodic_logs_flush_loop() -> None:
+        assert logs_flush_wakeup is not None
+        assert logs_flush_stop is not None
+        while not logs_flush_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    logs_flush_wakeup.wait(),
+                    timeout=LOGS_FLUSH_INTERVAL_SECONDS,
+                )
+            except TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                break
+            finally:
+                logs_flush_wakeup.clear()
+            try:
+                await flush_logs(force=False)
+            except Exception as log_flush_error:
+                print(
+                    "[logs] periodic flush failed: "
+                    f"{log_flush_error}"
+                )
+        try:
+            await flush_logs(force=True)
+        except Exception as log_flush_error:
+            print(
+                "[logs] final periodic flush failed: "
+                f"{log_flush_error}"
+            )
+
+    logs_flush_task = asyncio.create_task(
+        periodic_logs_flush_loop(),
+    )
+
     banner = "=" * 72
     print(banner)
     print(f"TRAJECTORY_ID: {trajectory_id}")
@@ -2561,7 +2655,7 @@ async def run_trajectory(
                 f"streamed_parts={streamed_parts} "
                 f"started={turn_started_at}"
             )
-            save_logs_parquet(trajectory_id, structured_logs)
+            await flush_logs(force=True)
 
             if (
                 isinstance(turn_end_passed, int)
@@ -2645,6 +2739,15 @@ async def run_trajectory(
             print("[error] could not save crash messages")
 
     finally:
+        if logs_flush_stop is not None:
+            logs_flush_stop.set()
+        if logs_flush_wakeup is not None:
+            logs_flush_wakeup.set()
+        if logs_flush_task is not None:
+            try:
+                await logs_flush_task
+            except Exception:
+                pass
         if evaluator is not None:
             try:
                 await evaluator.wait()
@@ -2687,8 +2790,7 @@ async def run_trajectory(
                         structured_logs.extend(sandbox_logs)
                 except Exception as log_error:
                     print(f"[logs] failed collecting sandbox logs: {log_error}")
-                if structured_logs:
-                    save_logs_parquet(trajectory_id, structured_logs)
+                await flush_logs(force=True)
                 await end_session(
                     sandbox,
                     agent_trace,
@@ -2714,9 +2816,13 @@ async def run_trajectory(
             and structured_logs
         ):
             try:
-                save_logs_parquet(trajectory_id, structured_logs)
+                await flush_logs(force=True)
             except Exception as log_save_error:
                 print(f"[logs] failed saving logs.parquet: {log_save_error}")
+        try:
+            await flush_logs(force=True)
+        except Exception as log_save_error:
+            print(f"[logs] final flush failed: {log_save_error}")
         if log_callback_token is not None:
             reset_log_callback(log_callback_token)
         if log_context_token is not None:

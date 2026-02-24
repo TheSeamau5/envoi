@@ -129,6 +129,7 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 - Persist `trace.parquet` after every recorded part.
 - Create a git checkpoint immediately for any part that changed files.
 - Persist `logs.parquet` with structured logs for orchestrator/runtime/worker.
+- Flush logs periodically during run (`LOGS_FLUSH_INTERVAL_SECONDS`, `LOGS_FLUSH_BATCH_SIZE`) and force-flush on shutdown.
 
 ## Schema Policy
 

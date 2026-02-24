@@ -11,11 +11,6 @@ from envoi_code.utils.helpers import tprint
 print = tprint
 
 ADVISOR_THINKING_LEVELS = {"low", "medium", "high"}
-THINKING_BUDGET_BY_LEVEL = {
-    "low": 2048,
-    "medium": 8192,
-    "high": 16384,
-}
 
 
 def normalize_advisor_model(model_spec: str) -> str:
@@ -114,18 +109,15 @@ async def request_anthropic_advisor(
         ) from error
 
     normalized_model = normalize_advisor_model(model_spec)
-    normalized_thinking = normalize_thinking_level(thinking_level)
-    thinking_payload = {
-        "type": "enabled",
-        "budget_tokens": THINKING_BUDGET_BY_LEVEL[normalized_thinking],
-    }
+    normalized_effort = normalize_thinking_level(thinking_level)
 
     request_payload: dict[str, Any] = {
         "model": normalized_model,
         "max_tokens": max_output_tokens,
         "system": system_prompt,
         "messages": [{"role": "user", "content": user_prompt}],
-        "thinking": thinking_payload,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": normalized_effort},
     }
 
     async with AsyncAnthropic(
@@ -137,12 +129,18 @@ async def request_anthropic_advisor(
                 response = await client.messages.create(**request_payload)
         except Exception as error:  # noqa: BLE001
             error_text = str(error).strip().lower()
-            if "thinking" not in error_text:
+            if "output_config" in error_text:
+                request_payload.pop("output_config", None)
+                async with asyncio.timeout(timeout_seconds):
+                    response = await client.messages.create(**request_payload)
+            elif "thinking" in error_text:
+                # Fallback for SDK/API variants that do not accept `thinking`.
+                request_payload.pop("thinking", None)
+                request_payload.pop("output_config", None)
+                async with asyncio.timeout(timeout_seconds):
+                    response = await client.messages.create(**request_payload)
+            else:
                 raise
-            # Fallback for SDK/API variants that do not accept `thinking`.
-            request_payload.pop("thinking", None)
-            async with asyncio.timeout(timeout_seconds):
-                response = await client.messages.create(**request_payload)
 
     text = extract_anthropic_message_text(response)
     if not text:

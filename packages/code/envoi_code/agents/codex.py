@@ -665,8 +665,15 @@ def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread 
     return reader
 
 
-def progress_timestamp() -> str:
-    return time.strftime("%H:%M:%S", time.localtime())
+def format_elapsed(total_seconds: int) -> str:
+    seconds = max(0, int(total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours} h {minutes} m {secs} s"
+    if minutes > 0:
+        return f"{minutes} m {secs} s"
+    return f"{secs} s"
 
 
 def clean_progress_content(value: Any, *, truncate_content: bool = True, limit: int = 240) -> str:
@@ -687,6 +694,7 @@ def log_progress(
     part_total: int = 0,
     turn_number: int = 0,
     turn_total: int = 0,
+    elapsed_seconds: int | None = None,
     description: str,
     content: str | None = None,
     truncate_content: bool = True,
@@ -709,8 +717,13 @@ def log_progress(
         if turn_label
         else parts_label
     )
+    elapsed_label = (
+        f"[{format_elapsed(elapsed_seconds)}] "
+        if isinstance(elapsed_seconds, int)
+        else ""
+    )
     print(
-        f"[{progress_timestamp()}] [{counters_label}] {description}",
+        f"{elapsed_label}[{counters_label}] {description}",
         file=sys.stderr,
         flush=True,
     )
@@ -735,6 +748,9 @@ def start_progress_heartbeat(
 ) -> threading.Thread:
     def _heartbeat() -> None:
         while not stop_event.wait(interval_sec):
+            elapsed_seconds = int(
+                time.monotonic() - float(stats["started_at"])
+            )
             log_progress(
                 parts_seen=int(stats["meaningful_parts"]),
                 max_parts=max_parts,
@@ -742,6 +758,7 @@ def start_progress_heartbeat(
                 part_total=part_total,
                 turn_number=turn_number,
                 turn_total=turn_total,
+                elapsed_seconds=elapsed_seconds,
                 description="heartbeat",
             )
 
@@ -974,6 +991,7 @@ def run_codex_turn(
     turn_number: int = 0,
     turn_total: int = 0,
 ) -> CodexTurnResult:
+    turn_started_at = time.monotonic()
     log_progress(
         parts_seen=0,
         max_parts=max_parts,
@@ -981,6 +999,7 @@ def run_codex_turn(
         part_total=part_total,
         turn_number=turn_number,
         turn_total=turn_total,
+        elapsed_seconds=0,
         description="launching codex app-server",
     )
 
@@ -994,7 +1013,7 @@ def run_codex_turn(
     aborted_for_part_limit = False
 
     progress_stats: dict[str, int | float] = {
-        "started_at": time.monotonic(),
+        "started_at": turn_started_at,
         "events": 0,
         "meaningful_parts": 0,
     }
@@ -1051,6 +1070,9 @@ def run_codex_turn(
                 part_total=part_total,
                 turn_number=turn_number,
                 turn_total=turn_total,
+                elapsed_seconds=int(
+                    time.monotonic() - turn_started_at
+                ),
                 description=description,
                 content=content,
                 truncate_content="mcp_tool_call" not in description,
@@ -1167,6 +1189,9 @@ def run_codex_turn(
                 part_total=part_total,
                 turn_number=turn_number,
                 turn_total=turn_total,
+                elapsed_seconds=int(
+                    time.monotonic() - turn_started_at
+                ),
                 description="part limit reached",
                 content="sending turn/interrupt",
             )
@@ -1187,6 +1212,9 @@ def run_codex_turn(
                     part_total=part_total,
                     turn_number=turn_number,
                     turn_total=turn_total,
+                    elapsed_seconds=int(
+                        time.monotonic() - turn_started_at
+                    ),
                     description="turn/interrupt warning",
                     content=str(error),
                 )
@@ -1389,6 +1417,7 @@ def run_codex_turn(
             part_total=part_total,
             turn_number=turn_number,
             turn_total=turn_total,
+            elapsed_seconds=elapsed,
             description="completed",
             content=(
                 f"status={turn_status} elapsed={elapsed}s events={len(events)} "

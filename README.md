@@ -97,6 +97,15 @@ Per trajectory, S3 now includes:
 
 `logs.parquet` stores structured runtime records (`ts`, `component`, `event`, `level`, `message`, `turn`, `part`, `git_commit`, `session_id`, `fields`).
 
+Flush policy:
+- Periodic during run (default every `5s` or `50` new records, whichever triggers first).
+- Immediate wake-up on warning/error logs.
+- Forced flush on turn boundaries and shutdown.
+
+Tuning:
+- `LOGS_FLUSH_INTERVAL_SECONDS` (default `5`)
+- `LOGS_FLUSH_BATCH_SIZE` (default `50`)
+
 Quick DuckDB query example:
 
 ```sql
