@@ -12,12 +12,14 @@ Your submission must include:
 
 Interface: ./cc input.c -o output
 
-You have access to a run_tests tool. Use it to test your compiler frequently.
+Do not rely on external testing tools.
+Create and run your own local tests in the workspace (small focused C programs and shell scripts).
 
 Testing strategy:
-1. Run tests frequently after making changes
-2. When tests fail: read the error output carefully, fix the code, rerun
-3. After fixing, rerun previously passing suites to check for regressions
-4. Commit after each meaningful change
+1. Write small local tests for each feature before/while implementing it
+2. Run local tests frequently after each change
+3. When tests fail: read the error output carefully, fix the code, rerun
+4. After fixing, rerun previously passing local tests to check for regressions
+5. Commit after each meaningful change
 
 Your goal is to pass ALL test suites. Work methodically.

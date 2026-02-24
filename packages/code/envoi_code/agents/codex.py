@@ -1456,10 +1456,12 @@ try:
     CODEX_HOME_DIR = "/tmp/codex-home"
     DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 
-    CODEX_CONFIG_TOML = """\
+    CODEX_CONFIG_TOML_BASE = """\
 model = "MODEL_PLACEHOLDER"
 model_reasoning_effort = "high"
+"""
 
+    CODEX_CONFIG_TOML_MCP = """\
 [mcp_servers.tests]
 command = "python3"
 args = ["/sandbox/mcp_server.py"]
@@ -1654,12 +1656,18 @@ echo "[setup] codex install complete"
                 f"[setup] agent=codex model={ctx.model}",
                 flush=True,
             )
-            codex_config = CODEX_CONFIG_TOML.replace(
+            codex_config = CODEX_CONFIG_TOML_BASE.replace(
                 "MODEL_PLACEHOLDER", ctx.model,
             )
+            if ctx.mcp_enabled and ctx.mcp_server_content.strip():
+                codex_config = (
+                    codex_config.rstrip()
+                    + "\n\n"
+                    + CODEX_CONFIG_TOML_MCP.strip()
+                    + "\n"
+                )
             setup_uploads: list[tuple[str, str]] = [
                 ("/tmp/upload/task_setup.sh", ctx.setup_script),
-                ("/sandbox/mcp_server.py", ctx.mcp_server_content),
                 ("/sandbox/codex_client.py", CODEX_CLIENT_CONTENT),
                 (
                     f"{CODEX_HOME_DIR}/config.toml",
@@ -1667,6 +1675,10 @@ echo "[setup] codex install complete"
                 ),
                 ("/workspace/.gitignore", ctx.workspace_gitignore),
             ]
+            if ctx.mcp_enabled and ctx.mcp_server_content.strip():
+                setup_uploads.append(
+                    ("/sandbox/mcp_server.py", ctx.mcp_server_content),
+                )
             if self.api_key:
                 setup_uploads.append(
                     ("/tmp/upload/codex_api_key.txt", self.api_key),

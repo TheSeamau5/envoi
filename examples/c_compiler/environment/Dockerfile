@@ -11,8 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --break-system-packages \
     "envoi @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
     "httpx>=0.27.0" \
-    "pydantic>=2.0.0" \
-    "mcp>=1.0.0"
+    "pydantic>=2.0.0"
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"

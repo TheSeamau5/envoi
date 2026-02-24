@@ -4,7 +4,7 @@ Main orchestrator for envoi-trace.
 Creates a sandbox, provisions an agent (Codex or OpenCode), and runs a turn
 loop with a bounded part budget. After every part, it persists trace.parquet
 to S3. After every file change, it creates a git checkpoint. At end-of-run,
-it uploads a repo.bundle with full git history.
+it uploads a repo.bundle for the final export commit.
 
 The two core abstractions are Agent (how to talk to an agent) and
 Sandbox (where the agent runs). This file wires them together and
@@ -95,12 +95,6 @@ AGENT_BACKENDS: dict[str, type] = {
     "opencode": OpenCodeAgent,
     "codex": CodexAgent,
 }
-
-# ---------------------------------------------------------------------------
-# Load files at import time
-# ---------------------------------------------------------------------------
-
-MCP_SERVER = (Path(__file__).parent / "sandbox" / "mcp_server.py").read_text()
 
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
@@ -243,6 +237,77 @@ def build_unsolved_status_lines(tracker: SolveTracker) -> list[str]:
     return details
 
 
+def is_winning_evaluation(evaluation: EvaluationRecord) -> bool:
+    return (
+        evaluation.status == "completed"
+        and evaluation.total > 0
+        and evaluation.passed == evaluation.total
+        and not (
+            isinstance(evaluation.error, str)
+            and evaluation.error.strip()
+        )
+    )
+
+
+def first_winning_commit(
+    evaluations: dict[str, EvaluationRecord],
+) -> tuple[str, EvaluationRecord] | None:
+    winner: tuple[str, EvaluationRecord] | None = None
+    for commit, evaluation in evaluations.items():
+        if not is_winning_evaluation(evaluation):
+            continue
+        if winner is None:
+            winner = (commit, evaluation)
+            continue
+        _, best = winner
+        best_part = best.part if isinstance(best.part, int) else 10**9
+        candidate_part = (
+            evaluation.part if isinstance(evaluation.part, int) else 10**9
+        )
+        if candidate_part < best_part:
+            winner = (commit, evaluation)
+    return winner
+
+
+async def checkout_workspace_commit(
+    sandbox: Sandbox,
+    commit: str,
+) -> bool:
+    result = await sandbox.run(
+        f"cd /workspace && git checkout -q -f {shlex.quote(commit)}",
+        quiet=True,
+        timeout=60,
+    )
+    if result.exit_code != 0:
+        print(
+            "[git] failed to checkout winning commit "
+            f"{commit[:10]}: {truncate_text(result.stderr, 400)}"
+        )
+        return False
+    print(f"[git] checked out winning commit {commit[:10]}")
+    return True
+
+
+def load_optional_mcp_server(
+    task_dir: Path,
+    environment_dir: Path,
+) -> tuple[str, str | None]:
+    """Load an opt-in MCP server script from task/environment folders.
+
+    Convention:
+    - task_dir/mcp_server.py
+    - environment_dir/mcp_server.py
+    """
+    candidates = [
+        task_dir / "mcp_server.py",
+        environment_dir / "mcp_server.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(), str(candidate)
+    return "", None
+
+
 async def restore_workspace_from_bundle(
     *,
     sandbox: Sandbox,
@@ -331,6 +396,17 @@ async def end_session(
         return
 
     final_commit = await get_git_commit(sandbox)
+    winner = first_winning_commit(agent_trace.evaluations)
+    bundle_export_commit = final_commit
+    if winner is not None:
+        winner_commit, winner_eval = winner
+        bundle_export_commit = winner_commit
+        print(
+            "[bundle] exporting first winning commit "
+            f"{winner_commit[:10]} "
+            f"(part={winner_eval.part}, "
+            f"score={winner_eval.passed}/{winner_eval.total})"
+        )
     bundle_s3_uri: str | None = None
 
     agent_trace.session_end = SessionEnd(
@@ -342,8 +418,26 @@ async def end_session(
 
     # Upload git bundle
     try:
+        bundle_target = (
+            bundle_export_commit.strip()
+            if isinstance(bundle_export_commit, str)
+            and bundle_export_commit.strip()
+            else "HEAD"
+        )
+        bundle_ref = "__envoi_bundle_export__"
+        bundle_cmd = (
+            "set -euo pipefail\n"
+            f"git branch -f {bundle_ref} "
+            f"{shlex.quote(bundle_target)}\n"
+            "cleanup() {\n"
+            f"  git branch -D {bundle_ref} >/dev/null 2>&1 || true\n"
+            "}\n"
+            "trap cleanup EXIT\n"
+            f"git bundle create /tmp/repo.bundle "
+            f"refs/heads/{bundle_ref}\n"
+        )
         exit_code, _, _ = (await sandbox.run(
-            "git bundle create /tmp/repo.bundle --all",
+            bundle_cmd,
             quiet=True,
             cwd="/workspace",
         )).unpack()
@@ -599,6 +693,7 @@ def build_followup_prompt(
     tracker: SolveTracker,
     evaluation_feedback: str | None = None,
     continue_prompt: str = "Continue.",
+    include_mcp_status: bool = False,
 ) -> str:
     """Build the re-injection prompt with current test status."""
     sections: list[str] = [continue_prompt]
@@ -607,11 +702,12 @@ def build_followup_prompt(
             "End-of-turn evaluation feedback:\n"
             + evaluation_feedback
         )
-    status = build_unsolved_status_lines(tracker)
-    if status:
-        sections.append(
-            "Current test status:\n" + "\n".join(status)
-        )
+    if include_mcp_status:
+        status = build_unsolved_status_lines(tracker)
+        if status:
+            sections.append(
+                "Current test status:\n" + "\n".join(status)
+            )
     return "\n\n".join(section for section in sections if section)
 
 
@@ -751,12 +847,22 @@ async def run_trajectory(
         # --- Agent setup (one call, no branching) ---
         agent_backend = agent_cls()
         assert agent_backend is not None
+        mcp_server_content, mcp_source = load_optional_mcp_server(
+            task_path,
+            env_path,
+        )
+        mcp_enabled = bool(mcp_server_content.strip())
+        if mcp_enabled:
+            print(f"[mcp] enabled from {mcp_source}")
+        else:
+            print("[mcp] disabled (no mcp_server.py in task/env)")
         ctx = AgentSetupContext(
             model=resolved_model,
             credentials=credentials,
             setup_script=setup_script,
             env_files=env_files,
-            mcp_server_content=MCP_SERVER,
+            mcp_server_content=mcp_server_content,
+            mcp_enabled=mcp_enabled,
             workspace_gitignore=WORKSPACE_GITIGNORE,
         )
         await agent_backend.setup(sandbox, ctx)
@@ -846,13 +952,9 @@ async def run_trajectory(
         )
 
         # --- Main loop ---
-        required = set(required_test_paths)
-        passing: set[str] = set()
         tracker = SolveTracker(required_test_paths)
         for part_record in agent_trace.parts:
             tracker.update(list(part_record.envoi_calls))
-        for path in tracker.solved:
-            passing.add(path)
 
         prompt_text = (
             prompt if part_count == 0
@@ -861,6 +963,21 @@ async def run_trajectory(
         consecutive_turn_failures = 0
 
         while part_count < max_parts:
+            winner = first_winning_commit(agent_trace.evaluations)
+            if winner is not None:
+                winner_commit, winner_eval = winner
+                await checkout_workspace_commit(
+                    sandbox,
+                    winner_commit,
+                )
+                print(
+                    "[eval] winner detected before turn start "
+                    f"commit={winner_commit[:10]} "
+                    f"part={winner_eval.part} "
+                    f"score={winner_eval.passed}/{winner_eval.total}"
+                )
+                end_reason = "solved"
+                break
             if max_turns is not None and turn_count >= max_turns:
                 print(
                     "[progress] reached turn limit "
@@ -1027,13 +1144,6 @@ async def run_trajectory(
                     )
 
             tracker.update(new_envoi_calls)
-            for call in new_envoi_calls:
-                if (
-                    call.result
-                    and call.result.total > 0
-                    and call.result.passed == call.result.total
-                ):
-                    passing.add(call.path)
 
             stream_meta = (
                 response.get("_stream", {})
@@ -1087,7 +1197,25 @@ async def run_trajectory(
                 environment=environment,
                 task_params=task_params_loaded,
             )
+            winner = first_winning_commit(agent_trace.evaluations)
+            if winner is not None:
+                winner_commit, winner_eval = winner
+                await checkout_workspace_commit(
+                    sandbox,
+                    winner_commit,
+                )
+                print(
+                    "[eval] winner detected after turn "
+                    f"commit={winner_commit[:10]} "
+                    f"part={winner_eval.part} "
+                    f"score={winner_eval.passed}/{winner_eval.total}"
+                )
+                end_reason = "solved"
+                break
             turn_end_eval_feedback = ""
+            turn_end_passed: int | None = None
+            turn_end_total: int | None = None
+            turn_end_has_error = True
             try:
                 turn_end_eval = await run_workspace_evaluation(
                     sandbox=sandbox,
@@ -1099,26 +1227,42 @@ async def run_trajectory(
                 )
                 payload = turn_end_eval.get("payload")
                 if isinstance(payload, dict):
+                    turn_end_passed = int(
+                        payload.get("passed", 0) or 0,
+                    )
+                    turn_end_total = int(
+                        payload.get("total", 0) or 0,
+                    )
+                    turn_end_error = payload.get("error")
+                    turn_end_has_error = bool(
+                        isinstance(turn_end_error, str)
+                        and turn_end_error.strip()
+                    )
                     print(
                         "[eval] turn_end "
-                        f"passed={int(payload.get('passed', 0) or 0)}/"
-                        f"{int(payload.get('total', 0) or 0)} "
-                        f"status_error={bool(payload.get('error'))}"
+                        f"passed={turn_end_passed}/{turn_end_total} "
+                        f"status_error={turn_end_has_error}"
                     )
                 else:
+                    turn_end_has_error = True
                     print("[eval] turn_end payload missing")
             except Exception as turn_end_eval_error:
                 turn_end_eval_feedback = (
                     "Turn-end full evaluation failed:\n"
                     + str(turn_end_eval_error)
                 )
+                turn_end_has_error = True
                 print(
                     "[eval] turn_end failed: "
                     f"{turn_end_eval_error}"
                 )
 
-            solved_count = len(passing)
-            total_count = len(required)
+            eval_label = (
+                f"{turn_end_passed}/{turn_end_total}"
+                if isinstance(turn_end_passed, int)
+                and isinstance(turn_end_total, int)
+                else "unknown"
+            )
             print(
                 f"[progress] turn={turn_count} "
                 f"commit={git_commit} "
@@ -1127,11 +1271,17 @@ async def run_trajectory(
                 f"(observed_parts={observed_parts} "
                 f"streamed_parts={streamed_parts}) "
                 f"envoi_calls={len(new_envoi_calls)} "
-                f"solved={solved_count}/{total_count} "
+                f"turn_end_eval={eval_label} "
                 f"started={turn_started_at}"
             )
 
-            if required and passing >= required:
+            if (
+                isinstance(turn_end_passed, int)
+                and isinstance(turn_end_total, int)
+                and turn_end_total > 0
+                and turn_end_passed == turn_end_total
+                and not turn_end_has_error
+            ):
                 end_reason = "solved"
                 break
 
@@ -1205,6 +1355,21 @@ async def run_trajectory(
                 pass
         if sandbox is not None and agent_trace is not None:
             try:
+                winner = first_winning_commit(agent_trace.evaluations)
+                if winner is not None:
+                    winner_commit, winner_eval = winner
+                    checked_out = await checkout_workspace_commit(
+                        sandbox,
+                        winner_commit,
+                    )
+                    if checked_out:
+                        print(
+                            "[eval] final winner "
+                            f"commit={winner_commit[:10]} "
+                            f"part={winner_eval.part} "
+                            f"score={winner_eval.passed}/{winner_eval.total}"
+                        )
+                        end_reason = "solved"
                 await end_session(
                     sandbox,
                     agent_trace,

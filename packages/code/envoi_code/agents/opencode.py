@@ -8,9 +8,9 @@ This module has two roles:
 2. As the OpenCodeAgent class implementing Agent: uploads itself into the
    sandbox, manages the OpenCode config, and translates turn results for runner.py.
 
-Also exports OPENCODE_CONFIG_TEMPLATE, the JSON config that gets written to
-.opencode.jsonc in the sandbox workspace. This config sets up the model, MCP
-server, and tool permissions.
+Also builds the OpenCode JSON config written to .opencode.jsonc in the
+sandbox workspace. This sets model/provider and tool permissions, with MCP
+tools added only when explicitly enabled by the task/environment.
 """
 
 from __future__ import annotations
@@ -53,39 +53,45 @@ MEANINGFUL_PART_TYPES: set[str] = {
 }
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
-OPENCODE_CONFIG_TEMPLATE = """{
-  "$schema": "https://opencode.ai/config.json",
-  "model": "MODEL_PLACEHOLDER",
-  "small_model": "MODEL_PLACEHOLDER",
-  "provider": {
-    "opencode": {
-      "options": {
-        "apiKey": "{env:OPENCODE_API_KEY}"
-      }
+def build_opencode_config(
+    *,
+    model: str,
+    mcp_enabled: bool,
+) -> str:
+    config: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": model,
+        "small_model": model,
+        "provider": {
+            "opencode": {
+                "options": {
+                    "apiKey": "{env:OPENCODE_API_KEY}",
+                },
+            },
+        },
+        "server": {
+            "port": 4096,
+            "hostname": "0.0.0.0",
+        },
+        "permission": {
+            "edit": "allow",
+            "bash": "allow",
+        },
+        "tools": {
+            "write": True,
+            "bash": True,
+            "edit": True,
+        },
     }
-  },
-  "server": {
-    "port": 4096,
-    "hostname": "0.0.0.0"
-  },
-  "mcp": {
-    "tests": {
-      "type": "local",
-      "command": ["python3", "/sandbox/mcp_server.py"],
-      "enabled": true
-    }
-  },
-  "permission": {
-    "edit": "allow",
-    "bash": "allow"
-  },
-  "tools": {
-    "write": true,
-    "bash": true,
-    "edit": true
-  }
-}
-"""
+    if mcp_enabled:
+        config["mcp"] = {
+            "tests": {
+                "type": "local",
+                "command": ["python3", "/sandbox/mcp_server.py"],
+                "enabled": True,
+            },
+        }
+    return json.dumps(config, indent=2, ensure_ascii=False)
 
 
 def to_jsonable(value: Any) -> Any:
@@ -1143,12 +1149,14 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                 f"[setup] agent=opencode model={ctx.model}",
                 flush=True,
             )
-            config = OPENCODE_CONFIG_TEMPLATE.replace(
-                "MODEL_PLACEHOLDER", ctx.model,
+            config = build_opencode_config(
+                model=ctx.model,
+                mcp_enabled=(
+                    ctx.mcp_enabled and bool(ctx.mcp_server_content.strip())
+                ),
             )
             setup_uploads: list[tuple[str, str]] = [
                 ("/tmp/upload/task_setup.sh", ctx.setup_script),
-                ("/sandbox/mcp_server.py", ctx.mcp_server_content),
                 (
                     "/sandbox/opencode_client.py",
                     OPENCODE_CLIENT_CONTENT,
@@ -1163,6 +1171,10 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                     ctx.workspace_gitignore,
                 ),
             ]
+            if ctx.mcp_enabled and ctx.mcp_server_content.strip():
+                setup_uploads.append(
+                    ("/sandbox/mcp_server.py", ctx.mcp_server_content),
+                )
 
             await upload_files_parallel(
                 sandbox, setup_uploads, log_upload=True,

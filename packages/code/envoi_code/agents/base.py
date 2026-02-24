@@ -40,6 +40,7 @@ class AgentSetupContext(BaseModel):
         tuple[dict[str, str], dict[str, str], dict[str, str]] | None
     ) = None
     mcp_server_content: str = ""
+    mcp_enabled: bool = False
     workspace_gitignore: str = ""
 
     model_config = {"arbitrary_types_allowed": True}
