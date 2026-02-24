@@ -1199,12 +1199,7 @@ def build_followup_prompt(
     return "\n\n".join(section for section in sections if section)
 
 
-SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
-    "basics",
-    "c_testsuite",
-    "wacct",
-    "torture",
-)
+SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = ()
 CURRENT_SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
     SUITE_FEEDBACK_PRIORITY
 )
@@ -1265,6 +1260,12 @@ def _suite_rank(suite_path: str) -> tuple[int, int, str]:
     )
 
 
+def format_suite_feedback_priority(priority: tuple[str, ...]) -> str:
+    if not priority:
+        return "none"
+    return " -> ".join(priority)
+
+
 def _test_sort_key(test: dict[str, Any]) -> tuple[int, int, str, str]:
     suite = _normalize_suite_path(_string_or_none(test.get("suite")))
     test_id = _string_or_none(test.get("test_id")) or ""
@@ -1297,22 +1298,22 @@ def select_failed_tests_for_feedback(
 
     selected: list[dict[str, Any]] = []
     seen_family_keys: set[tuple[str, str]] = set()
-    seen_test_ids: set[str] = set()
+    seen_suite_test_keys: set[tuple[str, str]] = set()
     for test in failed_tests:
         suite = _normalize_suite_path(_string_or_none(test.get("suite")))
         family = _suite_family(suite)
         test_id = _string_or_none(test.get("test_id")) or "unknown_test"
 
         if family is not None:
-            key = (family, test_id)
-            if key in seen_family_keys:
+            family_key = (family, test_id)
+            if family_key in seen_family_keys:
                 continue
-            seen_family_keys.add(key)
-            seen_test_ids.add(test_id)
+            seen_family_keys.add(family_key)
         else:
-            if test_id in seen_test_ids:
+            suite_test_key = (suite, test_id)
+            if suite_test_key in seen_suite_test_keys:
                 continue
-            seen_test_ids.add(test_id)
+            seen_suite_test_keys.add(suite_test_key)
 
         selected.append(test)
         if len(selected) >= max(1, limit):
@@ -1381,11 +1382,8 @@ def build_cluster_summary_section(
         key = _string_or_none(cluster.get("key")) or "unknown"
         kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
         code = _string_or_none(cluster.get("code"))
-        count = (
-            int(cluster.get("count"))
-            if isinstance(cluster.get("count"), int)
-            else 0
-        )
+        count_value = cluster.get("count")
+        count = count_value if isinstance(count_value, int) else 0
         suffix = f" code={code}" if code else ""
         lines.append(
             f"- {kind}{suffix}: count={count} key={key}"
@@ -1412,7 +1410,7 @@ def build_failed_tests_feedback_section(
 
     lines = [
         "Top failed tests with source "
-        f"(prioritized: {' -> '.join(CURRENT_SUITE_FEEDBACK_PRIORITY)}):",
+        f"(prioritized: {format_suite_feedback_priority(CURRENT_SUITE_FEEDBACK_PRIORITY)}):",
         f"count: {len(selected)} (limit={max(1, limit)})",
     ]
     for idx, test in enumerate(selected, start=1):
@@ -1554,11 +1552,8 @@ def build_advisor_user_prompt(
             key = _string_or_none(cluster.get("key")) or "unknown"
             kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
             code = _string_or_none(cluster.get("code"))
-            count = (
-                int(cluster.get("count"))
-                if isinstance(cluster.get("count"), int)
-                else 0
-            )
+            count_value = cluster.get("count")
+            count = count_value if isinstance(count_value, int) else 0
             code_suffix = f" code={code}" if code else ""
             lines.append(f"- {kind}{code_suffix}: count={count} key={key}")
     else:
@@ -2181,7 +2176,7 @@ async def run_trajectory(
         f"advisor_model={normalized_advisor_model or 'none'} "
         f"advisor_thinking={normalized_advisor_thinking_level} "
         "suite_priority="
-        f"{'->'.join(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
+        f"{format_suite_feedback_priority(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
         f"failed_tests_limit={failed_tests_feedback_limit}"
     )
     if existing_trace is not None:
