@@ -46,8 +46,6 @@ def common_runner_args(
     parts: list[str] = [
         "--agent",
         args.agent,
-        "--max-parts",
-        str(args.max_parts),
         "--trajectory-id",
         trajectory_id,
         "--task-dir",
@@ -55,6 +53,8 @@ def common_runner_args(
         "--environment-dir",
         str(args.env),
     ]
+    if args.max_parts is not None:
+        parts.extend(["--max-parts", str(args.max_parts)])
     if args.max_turns is not None:
         parts.extend(["--max-turns", str(args.max_turns)])
     if modal_mode:
@@ -70,6 +70,8 @@ def common_runner_args(
             parts.extend(["--test", test_path])
     if args.test_timeout_seconds is not None:
         parts.extend(["--test-timeout-seconds", str(args.test_timeout_seconds)])
+    if args.timeout_seconds is not None:
+        parts.extend(["--timeout-seconds", str(args.timeout_seconds)])
     if args.model:
         parts.extend(["--model", args.model])
     if args.message_timeout_seconds is not None:
@@ -140,7 +142,12 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(non_preemptible=True)
     parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
     parser.add_argument("--model", default=None)
-    parser.add_argument("--max-parts", type=int, default=1000)
+    parser.add_argument(
+        "--max-parts",
+        type=int,
+        default=None,
+        help="Optional part budget. If omitted, parts are unbounded.",
+    )
     parser.add_argument(
         "--max-turns",
         type=int,
@@ -169,6 +176,12 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Path to task directory.")
     parser.add_argument("--env", default=None, help="Path to environment directory.")
     parser.add_argument("--message-timeout-seconds", type=int, default=None)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=7200,
+        help="Total run timeout in seconds (default: 7200).",
+    )
     parser.add_argument(
         "--non-preemptible",
         dest="non_preemptible",
@@ -231,14 +244,25 @@ def run_command(args: argparse.Namespace) -> None:
     print(f"TRAJECTORY_ID: {trajectory_id}", flush=True)
     print(f"TRACE_S3_URI: {trace_uri}", flush=True)
     print(f"BUNDLE_S3_URI: {bundle_uri}", flush=True)
+    part_limit_label = (
+        str(args.max_parts)
+        if isinstance(args.max_parts, int) and args.max_parts > 0
+        else "none"
+    )
+    turn_limit_label = (
+        str(args.max_turns)
+        if isinstance(args.max_turns, int) and args.max_turns > 0
+        else "none"
+    )
     test_timeout_label = (
         f"{args.test_timeout_seconds}s"
         if args.test_timeout_seconds is not None
         else "default"
     )
     print(
-        f"agent={args.agent} max_parts={args.max_parts} "
-        f"max_turns={args.max_turns} "
+        f"agent={args.agent} part_limit={part_limit_label} "
+        f"turn_limit={turn_limit_label} "
+        f"timeout={args.timeout_seconds}s "
         f"tests={(','.join(args.test) if args.test else 'all')} "
         f"test_timeout={test_timeout_label} "
         f"detach={args.detach} non_preemptible={args.non_preemptible}",
@@ -273,9 +297,14 @@ def run_command(args: argparse.Namespace) -> None:
             retry_reason = f"modal_exit={result.returncode}"
         elif args.auto_resume and not args.detach:
             reason, total_parts = load_trace_session_end(bucket, trajectory_id)
+            under_part_cap = (
+                args.max_parts is None
+                or total_parts is None
+                or total_parts < args.max_parts
+            )
             if (
                 reason in RETRYABLE_SESSION_END_REASONS
-                and (total_parts is None or total_parts < args.max_parts)
+                and under_part_cap
             ):
                 should_retry = True
                 retry_reason = f"session_end={reason} parts={total_parts}"

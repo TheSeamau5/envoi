@@ -1475,7 +1475,7 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                     str(remaining_parts_budget),
                 ],
                 timeout=timeout,
-                stream_output=True,
+                stream_output=False,
                 on_stderr_line=handle_stderr_line,
             )
             if response is None:

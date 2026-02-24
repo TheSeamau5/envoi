@@ -44,7 +44,7 @@ def make_stream_part_callback(
     task_params: dict[str, Any] | None,
     agent_name: str,
     resolved_model: str,
-    effective_max_parts: int,
+    effective_max_parts: int | None,
     part_counter: list[int],
     git_commit_ref: list[str | None],
     last_part_timestamp_ms_ref: list[int | None],
@@ -62,7 +62,11 @@ def make_stream_part_callback(
             return
         if stream_event.get("event") != "part.completed":
             return
-        if part_counter[0] >= effective_max_parts:
+        if (
+            isinstance(effective_max_parts, int)
+            and effective_max_parts > 0
+            and part_counter[0] >= effective_max_parts
+        ):
             return
         if (
             isinstance(stop_at_part_ref, list)
@@ -319,6 +323,24 @@ def make_stream_part_callback(
                     commit_for_async_eval,
                     absolute_part,
                     turn_record.turn,
+                )
+            if item_type in {
+                "agent_message",
+                "command_execution",
+                "file_change",
+            }:
+                summary_preview = (
+                    summary.strip()
+                    if isinstance(summary, str)
+                    else ""
+                )
+                if len(summary_preview) > 120:
+                    summary_preview = summary_preview[:120] + "..."
+                print(
+                    f"[progress] part={absolute_part} "
+                    f"turn={turn_record.turn} "
+                    f"item={item_type} "
+                    f"{summary_preview}".rstrip()
                 )
             save_trace_parquet(
                 trajectory_id, agent_trace,

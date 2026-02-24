@@ -1784,7 +1784,7 @@ echo "[setup] codex install complete"
             response = await self.run_client(
                 args,
                 timeout=timeout,
-                stream_output=True,
+                stream_output=False,
                 on_stderr_line=handle_stderr_line,
             )
             if response is None:

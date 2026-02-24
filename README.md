@@ -24,6 +24,18 @@ envoi --help
 envoi code --example examples/c_compiler
 ```
 
+Default run behavior:
+- No max part cap unless `--max-parts` is set.
+- No max turn cap unless `--max-turns` is set.
+- Total run timeout defaults to `7200` seconds.
+
+Set explicit run caps/timeouts:
+
+```bash
+envoi code --example examples/c_compiler --max-parts 500 --max-turns 20
+envoi code --example examples/c_compiler --timeout-seconds 14400
+```
+
 Run selected test paths instead of all tests:
 
 ```bash

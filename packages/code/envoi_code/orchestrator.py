@@ -2,7 +2,7 @@
 Main orchestrator for envoi-trace.
 
 Creates a sandbox, provisions an agent (Codex or OpenCode), and runs a turn
-loop with a bounded part budget. After every part, it persists trace.parquet
+loop. After every part, it persists trace.parquet
 to S3. After every file change, it creates a git checkpoint. At end-of-run,
 it uploads a repo.bundle for the final export commit.
 
@@ -68,7 +68,6 @@ from envoi_code.utils.parsing import (
     count_meaningful_parts,
     extract_envoi_calls,
     extract_turn_token_usage,
-    log_message_parts,
 )
 from envoi_code.utils.solve import SolveTracker
 from envoi_code.utils.storage import (
@@ -216,6 +215,23 @@ def get_trace_last_turn(trace: AgentTrace) -> int:
     if turn_values:
         return max(turn_values)
     return len(trace.turns)
+
+
+def normalize_positive_limit(value: int | None) -> int | None:
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def format_progress_counter(
+    *,
+    name: str,
+    current: int,
+    limit: int | None,
+) -> str:
+    if isinstance(limit, int) and limit > 0:
+        return f"{name}={current}/{limit}"
+    return f"{name}={current}"
 
 
 def get_trace_latest_commit(trace: AgentTrace) -> str | None:
@@ -1137,12 +1153,12 @@ def build_turn_end_eval_event(
 async def run_trajectory(
     agent: str = DEFAULT_AGENT,
     model: str | None = None,
-    max_parts: int = 1000,
+    max_parts: int | None = None,
     max_turns: int | None = None,
     test: list[str] | None = None,
     test_timeout_seconds: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
-    timeout_seconds: int = 14400,
+    timeout_seconds: int = 7200,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
     resume: bool = RESUME_FROM_S3,
@@ -1154,8 +1170,10 @@ async def run_trajectory(
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
-    if max_turns is not None and max_turns <= 0:
-        max_turns = None
+    max_parts = normalize_positive_limit(max_parts)
+    max_turns = normalize_positive_limit(max_turns)
+    if timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be > 0")
     if test_timeout_seconds is not None and test_timeout_seconds <= 0:
         raise ValueError("--test-timeout-seconds must be > 0")
     selected_test_paths = normalize_test_paths(test)
@@ -1199,16 +1217,23 @@ async def run_trajectory(
     print(f"TRAJECTORY_ID: {trajectory_id}")
     print(f"TRACE_S3_URI: {trace_s3_uri}")
     print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
+    part_limit_label = str(max_parts) if max_parts is not None else "none"
+    turn_limit_label = str(max_turns) if max_turns is not None else "none"
     print(
         f"agent={agent_name} model={resolved_model} "
-        f"max_parts={max_parts} max_turns={max_turns} "
+        f"part_limit={part_limit_label} turn_limit={turn_limit_label} "
         f"timeout={timeout_seconds}s "
         f"message_timeout={message_timeout_seconds}s"
     )
     test_selector = ",".join(selected_test_paths) if selected_test_paths else "all"
+    test_timeout_label = (
+        f"{test_timeout_seconds}s"
+        if isinstance(test_timeout_seconds, int)
+        else "default"
+    )
     print(
         f"tests={test_selector} "
-        f"test_timeout={test_timeout_seconds or 'default'}s "
+        f"test_timeout={test_timeout_label} "
         f"eval_concurrency={EVALUATION_CONCURRENCY}"
     )
     if existing_trace is not None:
@@ -1483,10 +1508,17 @@ async def run_trajectory(
         next_turn_feedback_eval_id: str | None = None
         consecutive_turn_failures = 0
 
-        while part_count < max_parts:
+        while True:
             if await stop_for_winner(
                 detection_point="before turn start",
             ):
+                break
+            if (
+                isinstance(max_parts, int)
+                and max_parts > 0
+                and part_count >= max_parts
+            ):
+                end_reason = "part_limit"
                 break
             if max_turns is not None and turn_count >= max_turns:
                 print(
@@ -1500,21 +1532,41 @@ async def run_trajectory(
                 end_reason = "timeout"
                 break
             remaining_run_seconds = timeout_seconds - elapsed
-            remaining_parts = max(1, max_parts - part_count)
+            remaining_parts_budget = (
+                max(1, max_parts - part_count)
+                if isinstance(max_parts, int)
+                and max_parts > 0
+                else 0
+            )
+            remaining_parts_for_timeout = (
+                remaining_parts_budget
+                if remaining_parts_budget > 0
+                else max(1, int(remaining_run_seconds // 60))
+            )
 
             # Agent decides its own timeout (no branching)
             turn_timeout_seconds = agent_backend.compute_turn_timeout(
-                remaining_parts=remaining_parts,
+                remaining_parts=remaining_parts_for_timeout,
                 remaining_run_seconds=remaining_run_seconds,
                 message_timeout_seconds=message_timeout_seconds,
             )
 
             turn_banner = "=" * 60
+            part_counter_label = format_progress_counter(
+                name="part",
+                current=part_count,
+                limit=max_parts,
+            )
+            turn_counter_label = format_progress_counter(
+                name="turn",
+                current=turn_count + 1,
+                limit=max_turns,
+            )
             builtins.print(f"\n{turn_banner}", flush=True)
             builtins.print(
                 f" TURN {turn_count + 1}  "
-                f"(part_count {part_count}/{max_parts}, "
-                f"timeout {turn_timeout_seconds}s)",
+                f"({part_counter_label} {turn_counter_label} "
+                f"timeout={turn_timeout_seconds}s)",
                 flush=True,
             )
             builtins.print(turn_banner, flush=True)
@@ -1568,9 +1620,9 @@ async def run_trajectory(
             turn_outcome = await agent_backend.run_turn(
                 prompt_text=prompt_text,
                 timeout=turn_timeout_seconds,
-                remaining_parts_budget=remaining_parts,
+                remaining_parts_budget=remaining_parts_budget,
                 global_part_count=part_count,
-                global_max_parts=max_parts,
+                global_max_parts=max_parts or 0,
                 on_stream_part=stream_part_cb,
             )
             part_count = stream_part_counter[0]
@@ -1631,16 +1683,11 @@ async def run_trajectory(
                 f"id={response_message_id} "
                 f"parts={len(parts)}"
             )
-            log_message_parts(response)
 
             session_ids = turn_outcome.session_ids
             session_objects = turn_outcome.session_objects
             new_messages = turn_outcome.new_messages
-            print(
-                f"[progress] new_messages="
-                f"{len(new_messages)} "
-                f"sessions={len(session_ids)}"
-            )
+            print(f"[progress] new_messages={len(new_messages)}")
             if turn_record is not None:
                 turn_record.session_ids = session_ids
                 turn_record.session_objects = session_objects
@@ -1803,15 +1850,25 @@ async def run_trajectory(
                 and isinstance(turn_end_total, int)
                 else "unknown"
             )
+            part_counter_label = format_progress_counter(
+                name="part",
+                current=part_count,
+                limit=max_parts,
+            )
+            turn_counter_label = format_progress_counter(
+                name="turn",
+                current=turn_count,
+                limit=max_turns,
+            )
             print(
-                f"[progress] turn={turn_count} "
+                f"[progress] {part_counter_label} "
+                f"{turn_counter_label} "
                 f"commit={git_commit} "
-                f"parts=+{new_parts} "
-                f"total={part_count}/{max_parts} "
-                f"(observed_parts={observed_parts} "
-                f"streamed_parts={streamed_parts}) "
-                f"envoi_calls={len(new_envoi_calls)} "
+                f"parts_delta=+{new_parts} "
                 f"turn_end_eval={eval_label} "
+                f"envoi_calls={len(new_envoi_calls)} "
+                f"observed_parts={observed_parts} "
+                f"streamed_parts={streamed_parts} "
                 f"started={turn_started_at}"
             )
 
@@ -1825,7 +1882,11 @@ async def run_trajectory(
                 end_reason = "solved"
                 break
 
-            if part_count >= max_parts:
+            if (
+                isinstance(max_parts, int)
+                and max_parts > 0
+                and part_count >= max_parts
+            ):
                 end_reason = "part_limit"
                 break
 
@@ -1964,8 +2025,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--agent", default=DEFAULT_AGENT)
     parser.add_argument("--model", default=None)
-    parser.add_argument("--max-parts", type=int, default=1000)
+    parser.add_argument("--max-parts", type=int, default=None)
     parser.add_argument("--max-turns", type=int, default=None)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=7200,
+    )
     parser.add_argument(
         "--test",
         action="append",
@@ -2020,6 +2086,7 @@ if __name__ == "__main__":
             test=args.test,
             test_timeout_seconds=args.test_timeout_seconds,
             message_timeout_seconds=args.message_timeout_seconds,
+            timeout_seconds=args.timeout_seconds,
             trajectory_id=args.trajectory_id,
             codex_auth_json_b64=codex_auth_b64,
             sandbox_provider=args.sandbox_provider,

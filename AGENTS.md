@@ -174,10 +174,16 @@ envoi code --agent opencode --model opencode/gpt-5-nano --task <path> --env <pat
 envoi code --sandbox e2b --task <path> --env <path>
 envoi code --preemptible --task <path> --env <path>
 envoi code --detach --task <path> --env <path>
+envoi code --timeout-seconds 10800 --task <path> --env <path>
 envoi code --test basics --task <path> --env <path>
 envoi code --test basics --test wacct/chapter_1 --task <path> --env <path>
 envoi code --test-timeout-seconds 10800 --task <path> --env <path>
 ```
+
+Run defaults:
+- `--max-parts` omitted => no part cap.
+- `--max-turns` omitted => no turn cap.
+- `--timeout-seconds` default is 7200.
 
 Evaluation defaults and selectors:
 - If `--test` is omitted, evaluation runs all tests (`session.test()`).
@@ -209,7 +215,7 @@ envoi code graph <trajectory_id> --part 42 --checkout-dest ./repo_at_42
 ```bash
 uv sync
 cp .env.example .env  # fill in credentials
-envoi code --example examples/c_compiler --max-parts 1000
+envoi code --example examples/c_compiler
 ```
 
 ## Where To Edit What

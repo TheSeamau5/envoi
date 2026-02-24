@@ -24,6 +24,7 @@ from envoi_code.utils.trace_parquet import (
 print = tprint
 
 _s3_client = None
+_last_saved_trace_log_key: dict[str, tuple[int, int, str]] = {}
 
 
 def get_s3_client():
@@ -78,7 +79,17 @@ def save_trace_parquet(
     buf = io.BytesIO()
     write_trace_parquet(rows, buf)
     upload_file(trajectory_id, "trace.parquet", buf.getvalue())
-    print(f"[s3] saved trace.parquet (parts={part_count})")
+    session_reason = (
+        trace.session_end.reason
+        if trace.session_end is not None
+        and isinstance(trace.session_end.reason, str)
+        else ""
+    )
+    log_key = (part_count, turn_count, session_reason)
+    previous_log_key = _last_saved_trace_log_key.get(trajectory_id)
+    if previous_log_key != log_key:
+        print(f"[s3] saved trace.parquet (parts={part_count})")
+        _last_saved_trace_log_key[trajectory_id] = log_key
 
 
 def upload_file(trajectory_id: str, filename: str, data: bytes) -> str:
