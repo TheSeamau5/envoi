@@ -195,6 +195,7 @@ Evaluation defaults and selectors:
 - If `--test` is omitted, evaluation runs all tests (`session.test()`).
 - Repeat `--test` to evaluate multiple test paths.
 - `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
+- Turn-end feedback includes regression summary vs previous turn-end (`newly_broken`, `newly_fixed`, `passed_delta`).
 - Turn-end feedback includes up to 50 prioritized failed tests with full source.
 - Environment params can enable external advisor analysis in turn-end feedback.
 

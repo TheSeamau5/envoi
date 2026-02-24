@@ -524,6 +524,23 @@ def append_eval_event_delta(
     target.eval_events_delta.append(event)
 
 
+def find_latest_completed_turn_end_tests(
+    trace: AgentTrace,
+) -> list[EvalTestResult] | None:
+    for part_record in reversed(trace.parts):
+        if not part_record.eval_events_delta:
+            continue
+        for event in reversed(part_record.eval_events_delta):
+            if event.kind != "turn_end_blocking":
+                continue
+            if event.status != "completed":
+                continue
+            if not event.tests:
+                continue
+            return list(event.tests)
+    return None
+
+
 def load_optional_mcp_server(
     task_dir: Path,
     environment_dir: Path,
@@ -1630,11 +1647,138 @@ async def build_advisor_assessment(
     )
 
 
+def _eval_result_key(test: EvalTestResult) -> tuple[str, str]:
+    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
+    test_id = _string_or_none(test.test_id) or "unknown_test"
+    return suite, test_id
+
+
+def _eval_result_sort_key(test: EvalTestResult) -> tuple[int, int, str, str]:
+    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
+    test_id = _string_or_none(test.test_id) or ""
+    family_rank, run_all_rank, suite_rank = _suite_rank(suite)
+    return (family_rank, run_all_rank, suite_rank, test_id)
+
+
+def _eval_result_is_passed(test: EvalTestResult) -> bool:
+    return (test.status or "").strip().lower() == "passed"
+
+
+def _eval_result_ref(test: EvalTestResult) -> str:
+    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
+    test_id = _string_or_none(test.test_id) or "unknown_test"
+    if suite:
+        return f"{suite}/{test_id}"
+    return test_id
+
+
+def _eval_result_message(test: EvalTestResult) -> str | None:
+    return (
+        _string_or_none(test.message)
+        or _string_or_none(test.stderr_tail)
+        or _string_or_none(test.stdout_tail)
+    )
+
+
+def build_turn_regression_feedback_section(
+    *,
+    current_tests: list[EvalTestResult],
+    previous_tests: list[EvalTestResult] | None,
+    limit: int = 10,
+) -> str:
+    if previous_tests is None:
+        return (
+            "regressions_vs_previous_turn_end: unavailable "
+            "(no previous turn-end snapshot)"
+        )
+    if not current_tests:
+        return (
+            "regressions_vs_previous_turn_end: unavailable "
+            "(current turn-end test details missing)"
+        )
+
+    prev_by_key: dict[tuple[str, str], EvalTestResult] = {
+        _eval_result_key(test): test for test in previous_tests
+    }
+    cur_by_key: dict[tuple[str, str], EvalTestResult] = {
+        _eval_result_key(test): test for test in current_tests
+    }
+
+    prev_passed = sum(
+        1 for test in prev_by_key.values()
+        if _eval_result_is_passed(test)
+    )
+    cur_passed = sum(
+        1 for test in cur_by_key.values()
+        if _eval_result_is_passed(test)
+    )
+
+    newly_broken = [
+        cur_by_key[key]
+        for key, prev in prev_by_key.items()
+        if key in cur_by_key
+        and _eval_result_is_passed(prev)
+        and not _eval_result_is_passed(cur_by_key[key])
+    ]
+    newly_fixed = [
+        cur_by_key[key]
+        for key, prev in prev_by_key.items()
+        if key in cur_by_key
+        and not _eval_result_is_passed(prev)
+        and _eval_result_is_passed(cur_by_key[key])
+    ]
+    still_failing = sum(
+        1 for test in cur_by_key.values()
+        if not _eval_result_is_passed(test)
+    )
+    total_delta = cur_passed - prev_passed
+
+    lines = [
+        "regressions_vs_previous_turn_end:",
+        f"- baseline_tests: {len(prev_by_key)}",
+        f"- current_tests: {len(cur_by_key)}",
+        f"- passed_delta: {total_delta} ({prev_passed}->{cur_passed})",
+        f"- newly_broken: {len(newly_broken)}",
+        f"- newly_fixed: {len(newly_fixed)}",
+        f"- currently_failing: {still_failing}",
+    ]
+
+    if newly_broken:
+        lines.append("- newly_broken_top:")
+        sorted_broken = sorted(
+            newly_broken,
+            key=_eval_result_sort_key,
+        )
+        for index, test in enumerate(
+            sorted_broken[: max(1, limit)],
+            start=1,
+        ):
+            failure_type = _string_or_none(test.failure_type)
+            status_suffix = (
+                f"/{failure_type}" if failure_type else ""
+            )
+            lines.append(
+                f"  {index}. {_eval_result_ref(test)}: "
+                f"passed -> {test.status}{status_suffix}"
+            )
+            message = _eval_result_message(test)
+            if message is not None:
+                lines.append(
+                    "     error: "
+                    + truncate_text(
+                        message,
+                        limit=MAX_INLINE_TEST_MESSAGE_CHARS,
+                    )
+                )
+    return "\n".join(lines)
+
+
 def format_turn_end_evaluation_feedback(
     run_payload: dict[str, Any],
     *,
     failed_tests_limit: int = FAILED_TEST_FEEDBACK_LIMIT,
     advisor_assessment: str | None = None,
+    previous_turn_end_tests: list[EvalTestResult] | None = None,
 ) -> str:
     """Render compact, actionable turn-end evaluation feedback."""
     payload = run_payload.get("payload")
@@ -1661,6 +1805,7 @@ def format_turn_end_evaluation_feedback(
         failed = int(payload.get("failed", 0) or 0)
         total = int(payload.get("total", 0) or 0)
         duration_ms = int(payload.get("duration_ms", 0) or 0)
+        current_tests = normalize_eval_tests(payload)
         lines.append(
             "summary: "
             f"passed={passed} failed={failed} total={total} "
@@ -1678,6 +1823,12 @@ def format_turn_end_evaluation_feedback(
                 lines.append(
                     f"- {suite_name}: {suite_passed}/{suite_total}"
                 )
+        lines.append(
+            build_turn_regression_feedback_section(
+                current_tests=current_tests,
+                previous_tests=previous_turn_end_tests,
+            )
+        )
 
         cluster_payload = (
             feedback_payload
@@ -2191,6 +2342,9 @@ async def run_trajectory(
         tracker = SolveTracker(required_test_paths)
         for part_record in agent_trace.parts:
             tracker.update(list(part_record.envoi_calls))
+        previous_turn_end_tests = (
+            find_latest_completed_turn_end_tests(agent_trace)
+        )
 
         winner_stop_part_ref: list[int | None] = [None]
 
@@ -2652,6 +2806,7 @@ async def run_trajectory(
                         turn_end_eval_payload,
                         failed_tests_limit=failed_tests_feedback_limit,
                         advisor_assessment=advisor_assessment,
+                        previous_turn_end_tests=previous_turn_end_tests,
                     )
                 )
             except Exception as turn_end_eval_error:
@@ -2695,6 +2850,8 @@ async def run_trajectory(
                     environment=environment,
                     task_params=task_params_loaded,
                 )
+                if turn_end_event.status == "completed" and turn_end_event.tests:
+                    previous_turn_end_tests = list(turn_end_event.tests)
 
             eval_label = (
                 f"{turn_end_passed}/{turn_end_total}"

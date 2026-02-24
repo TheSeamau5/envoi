@@ -59,6 +59,7 @@ envoi code --example examples/c_compiler --test-timeout-seconds 10800
 - If `--test-timeout-seconds` is omitted, the default is `EVALUATION_TIMEOUT_SECONDS` (default `7200` seconds).
 - Commit evals run asynchronously on each git checkpoint; turn-end eval runs synchronously before the next turn prompt.
 - On shutdown, async commit eval drain is bounded (`EVALUATOR_DRAIN_TIMEOUT_SECONDS`, default `30`); remaining evals are cancelled.
+- Turn-end feedback includes a regression summary vs the previous turn-end snapshot (`newly_broken`, `newly_fixed`, `passed_delta`).
 - Turn-end feedback includes the top 50 failed tests (priority: `basics -> c_testsuite -> wacct -> torture`) with full test source and failure message.
 - If environment params enable advisor model settings, turn-end feedback also includes an external assessment based on the task prompt, top failed tests, and current commit code snapshot.
 - Runs stop at the first winning commit (`passed == total`), and artifacts are projected to that winning commit.
