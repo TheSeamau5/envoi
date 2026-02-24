@@ -51,6 +51,11 @@ from envoi_code.models import (
 )
 from envoi_code.sandbox import SandboxConfig, create_sandbox
 from envoi_code.sandbox.base import Sandbox
+from envoi_code.utils.advisor import (
+    normalize_advisor_model,
+    normalize_thinking_level,
+    request_anthropic_advisor,
+)
 from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
@@ -91,11 +96,14 @@ RESUME_FROM_S3 = (
 TURN_RECOVERY_RETRIES = max(
     0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3"))
 )
-MAX_INLINE_FAILED_TESTS = max(
-    1, int(os.environ.get("MAX_INLINE_FAILED_TESTS", "40"))
-)
 MAX_INLINE_TEST_MESSAGE_CHARS = max(
     80, int(os.environ.get("MAX_INLINE_TEST_MESSAGE_CHARS", "220"))
+)
+FAILED_TEST_FEEDBACK_LIMIT = max(
+    1, int(os.environ.get("FAILED_TEST_FEEDBACK_LIMIT", "50"))
+)
+ADVISOR_TIMEOUT_SECONDS = max(
+    30, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "180"))
 )
 
 
@@ -162,6 +170,42 @@ async def load_task(
     return prompt, params
 
 
+async def load_environment_params(
+    environment_dir: Path,
+) -> dict[str, Any]:
+    """Load optional environment params from environment/params.py."""
+    params_file = environment_dir / "params.py"
+    if not params_file.exists():
+        return {}
+
+    spec = importlib.util.spec_from_file_location(
+        "_env_params",
+        params_file,
+    )
+    if spec is None or spec.loader is None:
+        return {}
+
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    params_fn = getattr(mod, "params", None)
+    if params_fn is not None:
+        value = (
+            await params_fn()
+            if inspect.iscoroutinefunction(params_fn)
+            else params_fn()
+        )
+        if isinstance(value, dict):
+            return value
+        raise TypeError("environment params() must return a dict")
+
+    params_const = getattr(mod, "PARAMS", None)
+    if isinstance(params_const, dict):
+        return params_const
+
+    return {}
+
+
 WORKSPACE_GITIGNORE = """\
 target/
 cc
@@ -221,6 +265,18 @@ def normalize_positive_limit(value: int | None) -> int | None:
     if isinstance(value, int) and value > 0:
         return value
     return None
+
+
+def resolve_failed_tests_feedback_limit(value: Any) -> int:
+    if isinstance(value, bool):
+        return FAILED_TEST_FEEDBACK_LIMIT
+    if isinstance(value, int):
+        return max(1, value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return max(1, int(raw))
+    return FAILED_TEST_FEEDBACK_LIMIT
 
 
 def format_progress_counter(
@@ -939,24 +995,378 @@ def build_followup_prompt(
     return "\n\n".join(section for section in sections if section)
 
 
+SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
+    "basics",
+    "c_testsuite",
+    "wacct",
+    "torture",
+)
+
+
+def _string_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _normalize_suite_path(value: str | None) -> str:
+    if not value:
+        return ""
+    parts = [part for part in value.split("/") if part]
+    if not parts:
+        return ""
+    normalized = [parts[0]]
+    for part in parts[1:]:
+        if part == normalized[-1]:
+            continue
+        normalized.append(part)
+    return "/".join(normalized)
+
+
+def _suite_family(suite_path: str) -> str | None:
+    normalized = _normalize_suite_path(suite_path)
+    for family in SUITE_FEEDBACK_PRIORITY:
+        if normalized == family:
+            return family
+        if normalized.startswith(f"{family}/"):
+            return family
+        if f"/{family}/" in f"/{normalized}/":
+            return family
+    return None
+
+
+def _suite_rank(suite_path: str) -> tuple[int, int, str]:
+    normalized = _normalize_suite_path(suite_path)
+    family = _suite_family(normalized)
+    if family in SUITE_FEEDBACK_PRIORITY:
+        return (
+            SUITE_FEEDBACK_PRIORITY.index(family),
+            0,
+            normalized,
+        )
+    if normalized.endswith("/run_all") or normalized == "all/run_all":
+        return (len(SUITE_FEEDBACK_PRIORITY), 1, normalized)
+    return (len(SUITE_FEEDBACK_PRIORITY), 0, normalized)
+
+
+def _test_sort_key(test: dict[str, Any]) -> tuple[int, int, str, str]:
+    suite = _normalize_suite_path(_string_or_none(test.get("suite")))
+    test_id = _string_or_none(test.get("test_id")) or ""
+    family_rank, run_all_rank, suite_rank = _suite_rank(suite)
+    return (family_rank, run_all_rank, suite_rank, test_id)
+
+
+def select_failed_tests_for_feedback(
+    payload: dict[str, Any],
+    *,
+    limit: int = FAILED_TEST_FEEDBACK_LIMIT,
+) -> list[dict[str, Any]]:
+    raw_tests = payload.get("tests")
+    if not isinstance(raw_tests, list) or not raw_tests:
+        return []
+
+    failed_tests: list[dict[str, Any]] = []
+    for item in raw_tests:
+        if not isinstance(item, dict):
+            continue
+        status = _string_or_none(item.get("status")) or "failed"
+        if status.lower() == "passed":
+            continue
+        failed_tests.append(item)
+
+    if not failed_tests:
+        return []
+
+    failed_tests.sort(key=_test_sort_key)
+
+    selected: list[dict[str, Any]] = []
+    seen_family_keys: set[tuple[str, str]] = set()
+    seen_test_ids: set[str] = set()
+    for test in failed_tests:
+        suite = _normalize_suite_path(_string_or_none(test.get("suite")))
+        family = _suite_family(suite)
+        test_id = _string_or_none(test.get("test_id")) or "unknown_test"
+
+        if family is not None:
+            key = (family, test_id)
+            if key in seen_family_keys:
+                continue
+            seen_family_keys.add(key)
+            seen_test_ids.add(test_id)
+        else:
+            if test_id in seen_test_ids:
+                continue
+            seen_test_ids.add(test_id)
+
+        selected.append(test)
+        if len(selected) >= max(1, limit):
+            break
+    return selected
+
+
+def _format_single_failed_test(
+    index: int,
+    test: dict[str, Any],
+) -> str:
+    suite = _normalize_suite_path(_string_or_none(test.get("suite"))) or "unknown_suite"
+    test_id = _string_or_none(test.get("test_id")) or "unknown_test"
+    status = (_string_or_none(test.get("status")) or "failed").lower()
+    failure_type = _string_or_none(test.get("failure_type"))
+    label = f"{status}/{failure_type}" if failure_type else status
+    message = _string_or_none(test.get("message"))
+    if message is None:
+        message = _string_or_none(test.get("stderr_tail"))
+    if message is None:
+        message = _string_or_none(test.get("stdout_tail"))
+    source = _string_or_none(test.get("source"))
+
+    lines = [
+        f"{index}. {suite}/{test_id}",
+        f"status: {label}",
+    ]
+    if message is not None:
+        lines.append("error:")
+        lines.append(message)
+    if source is not None:
+        lines.extend([
+            "source:",
+            "```c",
+            source,
+            "```",
+        ])
+    else:
+        lines.append("source: (missing)")
+    return "\n".join(lines)
+
+
+def build_failed_tests_feedback_section(
+    payload: dict[str, Any],
+    *,
+    limit: int = FAILED_TEST_FEEDBACK_LIMIT,
+) -> tuple[str, list[dict[str, Any]]]:
+    selected = select_failed_tests_for_feedback(payload, limit=limit)
+    if not selected:
+        return "top_failed_tests_with_source: 0", []
+
+    lines = [
+        "Top failed tests with source "
+        f"(prioritized: {' -> '.join(SUITE_FEEDBACK_PRIORITY)}):",
+        f"count: {len(selected)} (limit={max(1, limit)})",
+    ]
+    for idx, test in enumerate(selected, start=1):
+        lines.append("")
+        lines.append(_format_single_failed_test(idx, test))
+    return "\n".join(lines), selected
+
+
+async def collect_commit_code_snapshot(
+    sandbox: Sandbox,
+    *,
+    commit: str | None,
+    max_files: int = 80,
+    max_total_chars: int = 220_000,
+    max_file_chars: int = 24_000,
+) -> dict[str, Any]:
+    commit_json = json.dumps(commit or "")
+    script = (
+        "import json\n"
+        "import subprocess\n"
+        "from pathlib import Path\n"
+        f"commit = {commit_json}\n"
+        f"max_files = {int(max_files)}\n"
+        f"max_total_chars = {int(max_total_chars)}\n"
+        f"max_file_chars = {int(max_file_chars)}\n"
+        "allow_suffixes = {\n"
+        "    '.rs', '.py', '.c', '.h', '.cpp', '.hpp', '.toml', '.json',\n"
+        "    '.yaml', '.yml', '.sh', '.md', '.txt', '.mk'\n"
+        "}\n"
+        "allow_names = {\n"
+        "    'Cargo.toml', 'Cargo.lock', 'Makefile', 'Dockerfile',\n"
+        "    'build.sh', 'README.md'\n"
+        "}\n"
+        "exclude_prefixes = (\n"
+        "    '.git/', 'target/', 'debug_artifacts/', '.codex/', '.opencode/'\n"
+        ")\n"
+        "result = {\n"
+        "    'commit': commit or None,\n"
+        "    'files': [],\n"
+        "    'truncated': False,\n"
+        "    'total_chars': 0,\n"
+        "}\n"
+        "cmd = ['git', 'ls-tree', '-r', '--name-only', commit] if commit else ['git', 'ls-files']\n"
+        "proc = subprocess.run(cmd, check=False, capture_output=True, text=True)\n"
+        "if proc.returncode != 0:\n"
+        "    print(json.dumps(result, ensure_ascii=False))\n"
+        "    raise SystemExit(0)\n"
+        "paths = [line.strip() for line in proc.stdout.splitlines() if line.strip()]\n"
+        "for path in paths:\n"
+        "    if path.startswith(exclude_prefixes):\n"
+        "        continue\n"
+        "    p = Path(path)\n"
+        "    if p.name not in allow_names and p.suffix.lower() not in allow_suffixes:\n"
+        "        continue\n"
+        "    source = None\n"
+        "    if commit:\n"
+        "        show = subprocess.run(\n"
+        "            ['git', 'show', f'{commit}:{path}'],\n"
+        "            check=False,\n"
+        "            capture_output=True,\n"
+        "            text=False,\n"
+        "        )\n"
+        "        if show.returncode != 0:\n"
+        "            continue\n"
+        "        raw = show.stdout\n"
+        "    else:\n"
+        "        try:\n"
+        "            raw = p.read_bytes()\n"
+        "        except OSError:\n"
+        "            continue\n"
+        "    if b'\\x00' in raw:\n"
+        "        continue\n"
+        "    source = raw.decode('utf-8', errors='replace')\n"
+        "    if len(source) > max_file_chars:\n"
+        "        source = source[:max_file_chars]\n"
+        "        result['truncated'] = True\n"
+        "    if result['total_chars'] + len(source) > max_total_chars:\n"
+        "        remaining = max_total_chars - result['total_chars']\n"
+        "        if remaining <= 0:\n"
+        "            result['truncated'] = True\n"
+        "            break\n"
+        "        source = source[:remaining]\n"
+        "        result['truncated'] = True\n"
+        "    result['files'].append({'path': path, 'source': source})\n"
+        "    result['total_chars'] += len(source)\n"
+        "    if len(result['files']) >= max_files:\n"
+        "        result['truncated'] = True\n"
+        "        break\n"
+        "print(json.dumps(result, ensure_ascii=False))\n"
+    )
+    cmd = "python3 - <<'PY'\n" + script + "PY\n"
+    output = await sandbox.run(cmd, timeout=40, quiet=True)
+    if output.exit_code != 0:
+        return {
+            "commit": commit,
+            "files": [],
+            "truncated": False,
+            "total_chars": 0,
+        }
+    try:
+        parsed = json.loads(output.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return {
+            "commit": commit,
+            "files": [],
+            "truncated": False,
+            "total_chars": 0,
+        }
+    files = parsed.get("files")
+    if not isinstance(files, list):
+        parsed["files"] = []
+    return parsed
+
+
+def build_advisor_user_prompt(
+    *,
+    task_prompt: str,
+    commit: str | None,
+    selected_failed_tests: list[dict[str, Any]],
+    code_snapshot: dict[str, Any],
+) -> str:
+    lines: list[str] = [
+        "You are reviewing a Rust C-compiler implementation after an evaluation run.",
+        "",
+        "Goal task prompt:",
+        task_prompt,
+        "",
+        f"Evaluated commit: {commit or 'unknown'}",
+        "",
+        "Selected failing tests (with full source):",
+    ]
+    for idx, test in enumerate(selected_failed_tests, start=1):
+        lines.append("")
+        lines.append(_format_single_failed_test(idx, test))
+
+    files = code_snapshot.get("files")
+    if isinstance(files, list) and files:
+        lines.extend(["", "Relevant commit code snapshot:"])
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                continue
+            path = _string_or_none(file_info.get("path")) or "unknown"
+            source = _string_or_none(file_info.get("source")) or ""
+            lines.extend([
+                "",
+                f"file: {path}",
+                "```",
+                source,
+                "```",
+            ])
+    return "\n".join(lines).strip()
+
+
+async def build_advisor_assessment(
+    *,
+    sandbox: Sandbox,
+    task_prompt: str,
+    commit: str | None,
+    payload: dict[str, Any],
+    advisor_model: str,
+    advisor_model_thinking_level: str,
+    failed_tests_limit: int,
+) -> str:
+    selected_failed_tests = select_failed_tests_for_feedback(
+        payload,
+        limit=failed_tests_limit,
+    )
+    if not selected_failed_tests:
+        return "Advisor assessment: no failing tests available."
+
+    code_snapshot = await collect_commit_code_snapshot(
+        sandbox,
+        commit=commit,
+    )
+    user_prompt = build_advisor_user_prompt(
+        task_prompt=task_prompt,
+        commit=commit,
+        selected_failed_tests=selected_failed_tests,
+        code_snapshot=code_snapshot,
+    )
+    system_prompt = (
+        "You are a strict compiler engineering reviewer. "
+        "Given failed tests and current Rust code, identify the most likely "
+        "root causes, cluster recurring error patterns, and propose a "
+        "prioritized fix plan with concrete file-level changes."
+    )
+    assessment = await request_anthropic_advisor(
+        model_spec=advisor_model,
+        thinking_level=advisor_model_thinking_level,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        timeout_seconds=ADVISOR_TIMEOUT_SECONDS,
+    )
+    return (
+        "External assessment "
+        f"({advisor_model}, thinking={advisor_model_thinking_level}):\n"
+        + assessment.strip()
+    )
+
+
 def format_turn_end_evaluation_feedback(
     run_payload: dict[str, Any],
+    *,
+    failed_tests_limit: int = FAILED_TEST_FEEDBACK_LIMIT,
+    advisor_assessment: str | None = None,
 ) -> str:
     """Render compact, actionable turn-end evaluation feedback."""
     payload = run_payload.get("payload")
     exit_code = run_payload.get("exit_code")
 
-    lines: list[str] = [
-        "Turn-end full evaluation result:",
-    ]
+    lines: list[str] = ["Turn-end full evaluation result:"]
     if isinstance(exit_code, int):
         lines.append(f"exit_code: {exit_code}")
-
-    def _text(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        stripped = value.strip()
-        return stripped if stripped else None
 
     def _truncate(value: str | None, limit: int) -> str | None:
         if value is None:
@@ -982,75 +1392,37 @@ def format_turn_end_evaluation_feedback(
                 suite_payload = suite_results.get(suite_name)
                 if not isinstance(suite_payload, dict):
                     continue
-                suite_passed = int(
-                    suite_payload.get("passed", 0) or 0
-                )
-                suite_total = int(
-                    suite_payload.get("total", 0) or 0
-                )
+                suite_passed = int(suite_payload.get("passed", 0) or 0)
+                suite_total = int(suite_payload.get("total", 0) or 0)
                 lines.append(
                     f"- {suite_name}: {suite_passed}/{suite_total}"
                 )
 
-        tests = payload.get("tests")
-        failed_tests: list[dict[str, Any]] = []
-        if isinstance(tests, list):
-            for item in tests:
-                if not isinstance(item, dict):
-                    continue
-                status = item.get("status")
-                status_text = (
-                    status.strip().lower()
-                    if isinstance(status, str)
-                    else ""
-                )
-                if status_text and status_text != "passed":
-                    failed_tests.append(item)
-        if failed_tests:
-            lines.append(
-                "failed_tests: "
-                f"{len(failed_tests)} "
-                f"(showing up to {MAX_INLINE_FAILED_TESTS})"
+        failed_section, selected_failed_tests = (
+            build_failed_tests_feedback_section(
+                payload,
+                limit=failed_tests_limit,
             )
-            for test in failed_tests[:MAX_INLINE_FAILED_TESTS]:
-                suite = _text(test.get("suite")) or "unknown_suite"
-                test_id = _text(test.get("test_id")) or "unknown_test"
-                status = _text(test.get("status")) or "failed"
-                failure_type = _text(test.get("failure_type"))
-                detail = _text(test.get("message"))
-                if detail is None:
-                    detail = _text(test.get("stderr_tail"))
-                if detail is None:
-                    detail = _text(test.get("stdout_tail"))
-                detail = _truncate(detail, MAX_INLINE_TEST_MESSAGE_CHARS)
-                status_label = (
-                    f"{status}/{failure_type}"
-                    if failure_type is not None
-                    else status
-                )
-                if detail is not None:
-                    lines.append(
-                        f"- {suite}/{test_id}: {status_label}: {detail}"
-                    )
-                else:
-                    lines.append(
-                        f"- {suite}/{test_id}: {status_label}"
-                    )
-            remaining = len(failed_tests) - MAX_INLINE_FAILED_TESTS
-            if remaining > 0:
-                lines.append(
-                    f"... and {remaining} more failing tests."
-                )
-        else:
-            lines.append("failed_tests: 0")
+        )
+        lines.append(failed_section)
+        lines.append(
+            "failed_tests_selected: "
+            f"{len(selected_failed_tests)}"
+        )
 
-        payload_error = _text(payload.get("error"))
+        payload_error = _string_or_none(payload.get("error"))
         if payload_error is not None:
             lines.append(f"error: {payload_error}")
+
+        if advisor_assessment:
+            lines.extend([
+                "",
+                advisor_assessment.strip(),
+            ])
     else:
         lines.append("payload: null")
-        stdout = _text(run_payload.get("stdout"))
-        stderr = _text(run_payload.get("stderr"))
+        stdout = _string_or_none(run_payload.get("stdout"))
+        stderr = _string_or_none(run_payload.get("stderr"))
         if stdout is not None:
             lines.append(
                 "stdout: "
@@ -1061,6 +1433,11 @@ def format_turn_end_evaluation_feedback(
                 "stderr: "
                 + (_truncate(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
             )
+        if advisor_assessment:
+            lines.extend([
+                "",
+                advisor_assessment.strip(),
+            ])
 
     return "\n".join(lines).strip()
 
@@ -1183,10 +1560,29 @@ async def run_trajectory(
     env_path = Path(environment_dir)
     environment = env_path.name
     prompt, task_params_loaded = await load_task(task_path, lang=task_lang)
+    environment_params = await load_environment_params(env_path)
+    advisor_model_from_env = _string_or_none(
+        environment_params.get("advisor_model"),
+    )
+    normalized_advisor_model: str | None = None
+    if advisor_model_from_env is not None:
+        normalized_advisor_model = normalize_advisor_model(
+            advisor_model_from_env,
+        )
+    normalized_advisor_thinking_level = normalize_thinking_level(
+        _string_or_none(
+            environment_params.get("advisor_model_thinking_level"),
+        )
+        or "high",
+    )
+    failed_tests_feedback_limit = resolve_failed_tests_feedback_limit(
+        environment_params.get("failed_tests_feedback_limit"),
+    )
     if task_params:
         task_params_loaded.update(task_params)
     task_params_loaded["_eval_test_paths"] = selected_test_paths
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
+    task_params_loaded["_environment_params"] = environment_params
     env_files = load_environment_files(env_path)
     setup_script_file = env_path / "setup.sh"
     setup_script = (
@@ -1234,7 +1630,9 @@ async def run_trajectory(
     print(
         f"tests={test_selector} "
         f"test_timeout={test_timeout_label} "
-        f"eval_concurrency={EVALUATION_CONCURRENCY}"
+        f"eval_concurrency={EVALUATION_CONCURRENCY} "
+        f"advisor_model={normalized_advisor_model or 'none'} "
+        f"advisor_thinking={normalized_advisor_thinking_level}"
     )
     if existing_trace is not None:
         print(
@@ -1769,6 +2167,8 @@ async def run_trajectory(
             turn_end_total: int | None = None
             turn_end_has_error = True
             turn_end_eval_payload: dict[str, Any] | None = None
+            turn_end_eval_payload_body: dict[str, Any] | None = None
+            advisor_assessment: str | None = None
             turn_end_event: EvalEvent | None = None
             try:
                 turn_end_eval_payload = await run_workspace_evaluation(
@@ -1776,13 +2176,9 @@ async def run_trajectory(
                     test_paths=selected_test_paths,
                     timeout_seconds=test_timeout_seconds,
                 )
-                turn_end_eval_feedback = (
-                    format_turn_end_evaluation_feedback(
-                        turn_end_eval_payload,
-                    )
-                )
                 payload = turn_end_eval_payload.get("payload")
                 if isinstance(payload, dict):
+                    turn_end_eval_payload_body = payload
                     turn_end_passed = int(
                         payload.get("passed", 0) or 0,
                     )
@@ -1802,6 +2198,47 @@ async def run_trajectory(
                 else:
                     turn_end_has_error = True
                     print("[eval] turn_end payload missing")
+
+                if (
+                    normalized_advisor_model is not None
+                    and isinstance(turn_end_eval_payload_body, dict)
+                    and not (
+                        isinstance(turn_end_passed, int)
+                        and isinstance(turn_end_total, int)
+                        and turn_end_total > 0
+                        and turn_end_passed == turn_end_total
+                        and not turn_end_has_error
+                    )
+                ):
+                    try:
+                        advisor_assessment = await build_advisor_assessment(
+                            sandbox=sandbox,
+                            task_prompt=prompt,
+                            commit=git_commit,
+                            payload=turn_end_eval_payload_body,
+                            advisor_model=normalized_advisor_model,
+                            advisor_model_thinking_level=(
+                                normalized_advisor_thinking_level
+                            ),
+                            failed_tests_limit=failed_tests_feedback_limit,
+                        )
+                    except Exception as advisor_error:
+                        advisor_assessment = (
+                            "External assessment unavailable: "
+                            + str(advisor_error).strip()
+                        )
+                        print(
+                            "[advisor] failed: "
+                            f"{advisor_error}"
+                        )
+
+                turn_end_eval_feedback = (
+                    format_turn_end_evaluation_feedback(
+                        turn_end_eval_payload,
+                        failed_tests_limit=failed_tests_feedback_limit,
+                        advisor_assessment=advisor_assessment,
+                    )
+                )
             except Exception as turn_end_eval_error:
                 turn_end_eval_feedback = (
                     "Turn-end full evaluation failed:\n"

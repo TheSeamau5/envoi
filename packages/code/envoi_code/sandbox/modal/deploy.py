@@ -25,7 +25,13 @@ app = modal.App("envoi-trace")
 
 function_image = (
     modal.Image.debian_slim()
-    .pip_install("boto3", "pydantic", "pyarrow", "python-dotenv")
+    .pip_install(
+        "boto3",
+        "pydantic",
+        "pyarrow",
+        "python-dotenv",
+        "anthropic",
+    )
     .add_local_dir(
         ROOT, remote_path="/root/envoi_code",
     )

@@ -75,6 +75,7 @@ class EvalTestResult(BaseModel):
     duration_ms: int | None = None
     failure_type: str | None = None
     message: str | None = None
+    source: str | None = None
     stdout_tail: str | None = None
     stderr_tail: str | None = None
     truncated: bool = False

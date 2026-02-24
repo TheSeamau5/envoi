@@ -189,6 +189,8 @@ Evaluation defaults and selectors:
 - If `--test` is omitted, evaluation runs all tests (`session.test()`).
 - Repeat `--test` to evaluate multiple test paths.
 - `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
+- Turn-end feedback includes up to 50 prioritized failed tests with full source.
+- Environment params can enable external advisor analysis in turn-end feedback.
 
 Evaluation lifecycle:
 - On each file-changing part/commit, commit eval is queued asynchronously.
@@ -222,6 +224,7 @@ envoi code --example examples/c_compiler
 
 - Task prompt: `examples/<name>/task/en.md` (or `prompt.md`)
 - Environment harness: `examples/<name>/environment/main.py`
+- Environment runner params (optional): `examples/<name>/environment/params.py`
 - Test suites: `examples/<name>/environment/tests/*.py`
 - Fixture installation: `examples/<name>/environment/setup.sh`
 - Trace schema/capture: `packages/code/envoi_code/orchestrator.py` (main loop, `PartRecord`, `TurnRecord`)
