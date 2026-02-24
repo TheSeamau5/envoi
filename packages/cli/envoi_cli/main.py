@@ -19,6 +19,29 @@ except ImportError:
     run_command = None
 
 
+def normalize_code_argv(argv: list[str]) -> list[str]:
+    """Normalize shorthand `envoi code` forms before argparse parsing."""
+    if not argv or argv[0] != "code":
+        return argv
+
+    if len(argv) == 1:
+        return argv
+
+    code_head = argv[1]
+    if code_head in {"graph", "-h", "--help"}:
+        return argv
+
+    if code_head == "run":
+        if len(argv) > 2 and not argv[2].startswith("-"):
+            return ["code", "run", "--example", argv[2], *argv[3:]]
+        return argv
+
+    if code_head.startswith("-"):
+        return argv
+
+    return ["code", "run", "--example", code_head, *argv[2:]]
+
+
 def main() -> None:
     # Load .env from the repo root (walk up from cwd until we find one)
     env_file = Path.cwd() / ".env"
@@ -72,7 +95,7 @@ def main() -> None:
         graph_parser.add_argument("--part", type=int, default=None)
         graph_parser.add_argument("--checkout-dest", default=None)
 
-    args = parser.parse_args()
+    args = parser.parse_args(normalize_code_argv(sys.argv[1:]))
 
     if args.command is None:
         parser.print_help()
