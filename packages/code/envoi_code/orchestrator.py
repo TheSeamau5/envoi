@@ -2267,9 +2267,11 @@ async def run_trajectory(
             turn_outcome = await agent_backend.run_turn(
                 prompt_text=prompt_text,
                 timeout=turn_timeout_seconds,
+                current_turn=turn_count,
                 remaining_parts_budget=remaining_parts_budget,
                 global_part_count=part_count,
                 global_max_parts=max_parts or 0,
+                global_max_turns=max_turns or 0,
                 on_stream_part=stream_part_cb,
             )
             part_count = stream_part_counter[0]
@@ -2549,8 +2551,8 @@ async def run_trajectory(
                 limit=max_turns,
             )
             print(
-                f"[progress] {part_counter_label} "
-                f"{turn_counter_label} "
+                f"[progress] {turn_counter_label} "
+                f"{part_counter_label} "
                 f"commit={git_commit} "
                 f"parts_delta=+{new_parts} "
                 f"turn_end_eval={eval_label} "

@@ -337,8 +337,8 @@ def make_stream_part_callback(
                 if len(summary_preview) > 120:
                     summary_preview = summary_preview[:120] + "..."
                 print(
-                    f"[progress] part={absolute_part} "
-                    f"turn={turn_record.turn} "
+                    f"[progress] turn={turn_record.turn} "
+                    f"part={absolute_part} "
                     f"item={item_type} "
                     f"{summary_preview}".rstrip()
                 )
