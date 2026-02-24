@@ -116,12 +116,60 @@ def collect_part_timestamps(trace: dict[str, Any]) -> dict[int, str]:
     return mapping
 
 
+def collect_eval_event_map(
+    trace: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    parts = trace.get("parts")
+    if not isinstance(parts, list):
+        return {}
+    by_commit: dict[str, dict[str, Any]] = {}
+    status_rank = {
+        "completed": 3,
+        "failed": 2,
+        "running": 1,
+        "queued": 0,
+    }
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        events = part.get("eval_events_delta")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("kind") != "commit_async":
+                continue
+            commit = event.get("target_commit")
+            if not isinstance(commit, str) or not commit:
+                continue
+            current = by_commit.get(commit)
+            current_status = (
+                current.get("status")
+                if isinstance(current, dict)
+                else None
+            )
+            event_status = event.get("status")
+            current_rank = status_rank.get(
+                current_status if isinstance(current_status, str) else "",
+                -1,
+            )
+            event_rank = status_rank.get(
+                event_status if isinstance(event_status, str) else "",
+                -1,
+            )
+            if current is None or event_rank >= current_rank:
+                by_commit[commit] = event
+    return by_commit
+
+
 def build_commit_points(trace: dict[str, Any]) -> list[dict[str, Any]]:
     evaluations = trace.get("evaluations")
     if not isinstance(evaluations, dict):
         return []
 
     part_timestamps = collect_part_timestamps(trace)
+    eval_event_map = collect_eval_event_map(trace)
     points: list[dict[str, Any]] = []
 
     for commit, payload in evaluations.items():
@@ -182,6 +230,37 @@ def build_commit_points(trace: dict[str, Any]) -> list[dict[str, Any]]:
 
         error = payload.get("error")
         error_present = isinstance(error, str) and bool(error.strip())
+        response_payload = (
+            payload.get("payload")
+            if isinstance(payload.get("payload"), dict)
+            else payload
+        )
+        payload_clusters = (
+            response_payload.get("diagnostic_clusters")
+            if isinstance(response_payload, dict)
+            else None
+        )
+        if isinstance(payload_clusters, list):
+            diagnostic_clusters = payload_clusters
+        else:
+            event = eval_event_map.get(commit)
+            event_payload = (
+                event.get("payload")
+                if isinstance(event, dict)
+                and isinstance(event.get("payload"), dict)
+                else None
+            )
+            event_clusters = (
+                event_payload.get("diagnostic_clusters")
+                if isinstance(event_payload, dict)
+                else None
+            )
+            diagnostic_clusters = (
+                event_clusters
+                if isinstance(event_clusters, list)
+                else []
+            )
+
         points.append(
             {
                 "part": part,
@@ -192,6 +271,7 @@ def build_commit_points(trace: dict[str, Any]) -> list[dict[str, Any]]:
                 "total": max(0, graph_total) if isinstance(graph_total, int) else None,
                 "error": error_present,
                 "suites": suites,
+                "diagnostic_clusters": diagnostic_clusters,
             }
         )
 
@@ -246,9 +326,75 @@ def detect_suites(points: list[dict[str, Any]]) -> list[str]:
     return sorted(seen)
 
 
+def detect_cluster_keys(points: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    for point in points:
+        clusters = point.get("diagnostic_clusters")
+        if not isinstance(clusters, list):
+            continue
+        for cluster in clusters:
+            if not isinstance(cluster, dict):
+                continue
+            key = cluster.get("key")
+            if isinstance(key, str) and key:
+                seen.add(key)
+    # Sort by stable key for deterministic ordering.
+    return sorted(seen)
+
+
+def top_cluster_keys(
+    points: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+) -> list[str]:
+    counts: dict[str, int] = {}
+    for point in points:
+        clusters = point.get("diagnostic_clusters")
+        if not isinstance(clusters, list):
+            continue
+        for cluster in clusters:
+            if not isinstance(cluster, dict):
+                continue
+            key = cluster.get("key")
+            count = parse_int(cluster.get("count"))
+            if not isinstance(key, str) or not key:
+                continue
+            counts[key] = max(count or 0, counts.get(key, 0))
+    ranked = sorted(
+        counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [key for key, _ in ranked[: max(1, limit)]]
+
+
+def cluster_series(
+    points: list[dict[str, Any]],
+    cluster_key: str,
+) -> list[int | None]:
+    values: list[int | None] = []
+    for point in points:
+        clusters = point.get("diagnostic_clusters")
+        if not isinstance(clusters, list):
+            values.append(None)
+            continue
+        matched: int | None = None
+        for cluster in clusters:
+            if not isinstance(cluster, dict):
+                continue
+            key = cluster.get("key")
+            if key != cluster_key:
+                continue
+            matched = parse_int(cluster.get("count"))
+            break
+        values.append(matched if isinstance(matched, int) else 0)
+    return values
+
+
 def build_report_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
     points = annotate_elapsed_minutes(build_commit_points(trace))
     suites = detect_suites(points)
+    cluster_keys = detect_cluster_keys(points)
+    top_clusters = top_cluster_keys(points)
     return {
         "trajectory_id": trace.get("trajectory_id"),
         "agent_model": trace.get("agent_model"),
@@ -257,8 +403,13 @@ def build_report_from_trace(trace: dict[str, Any]) -> dict[str, Any]:
         "analysis_source": "graph_png_v1",
         "x_axes": ["part", "elapsed_minutes"],
         "suites": suites,
+        "diagnostic_cluster_keys": cluster_keys,
+        "diagnostic_top_clusters": top_clusters,
         "points": points,
-        "counts": {"commit_points": len(points)},
+        "counts": {
+            "commit_points": len(points),
+            "diagnostic_clusters": len(cluster_keys),
+        },
     }
 
 
@@ -352,6 +503,12 @@ def write_graph_artifacts(report: dict[str, Any], output_dir: Path) -> dict[str,
     point_list = points if isinstance(points, list) else []
     suites = report.get("suites")
     suite_list = suites if isinstance(suites, list) else []
+    top_clusters_obj = report.get("diagnostic_top_clusters")
+    top_clusters = (
+        [item for item in top_clusters_obj if isinstance(item, str) and item]
+        if isinstance(top_clusters_obj, list)
+        else []
+    )
 
     json_path = output_dir / "graph_data.json"
     json_path.write_text(json.dumps(report, indent=2))
@@ -440,6 +597,34 @@ def write_graph_artifacts(report: dict[str, Any], output_dir: Path) -> dict[str,
             y_max=suite_total,
         )
         charts[f"{suite}:by_time"] = str(suite_time)
+
+    clusters_dir = output_dir / "diagnostics"
+    for cluster_key in top_clusters:
+        key = slugify(cluster_key)[:120]
+        values = cluster_series(point_list, cluster_key)
+        cluster_parts = clusters_dir / f"{key}_by_parts.png"
+        render_chart(
+            points=point_list,
+            output_path=cluster_parts,
+            title=f"Diagnostic Cluster by Parts: {cluster_key}",
+            x_mode="part",
+            y_values=values,
+            y_label="Cluster Count",
+            y_max=None,
+        )
+        charts[f"cluster:{cluster_key}:by_parts"] = str(cluster_parts)
+
+        cluster_time = clusters_dir / f"{key}_by_time.png"
+        render_chart(
+            points=point_list,
+            output_path=cluster_time,
+            title=f"Diagnostic Cluster by Elapsed Time: {cluster_key}",
+            x_mode="elapsed_minutes",
+            y_values=values,
+            y_label="Cluster Count",
+            y_max=None,
+        )
+        charts[f"cluster:{cluster_key}:by_time"] = str(cluster_time)
     charts["graph_data"] = str(json_path)
     return charts
 

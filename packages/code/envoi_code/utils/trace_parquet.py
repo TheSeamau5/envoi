@@ -284,6 +284,7 @@ def build_evaluations_from_parts(
                     "passed": 0,
                     "failed": 0,
                     "total": 0,
+                    "payload": {},
                     "suite_results": {},
                     "tests": [],
                     "error": None,
@@ -312,6 +313,9 @@ def build_evaluations_from_parts(
                 row["failed"] = event.get("failed")
             if isinstance(event.get("total"), int):
                 row["total"] = event.get("total")
+            event_payload = event.get("payload")
+            if isinstance(event_payload, dict):
+                row["payload"] = event_payload
             suite_results = event.get("suite_results")
             if isinstance(suite_results, dict):
                 row["suite_results"] = suite_results

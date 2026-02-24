@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import base64
 import builtins
+import copy
 import importlib.util
 import inspect
 import json
@@ -56,6 +57,7 @@ from envoi_code.utils.advisor import (
     normalize_thinking_level,
     request_anthropic_advisor,
 )
+from envoi_code.utils.diagnostics import enrich_evaluation_payload
 from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
@@ -277,6 +279,23 @@ def resolve_failed_tests_feedback_limit(value: Any) -> int:
         if raw.isdigit():
             return max(1, int(raw))
     return FAILED_TEST_FEEDBACK_LIMIT
+
+
+def resolve_suite_feedback_priority(value: Any) -> tuple[str, ...]:
+    if isinstance(value, list):
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            path = item.strip().lower()
+            if not path or path in seen:
+                continue
+            normalized.append(path)
+            seen.add(path)
+        if normalized:
+            return tuple(normalized)
+    return SUITE_FEEDBACK_PRIORITY
 
 
 def format_progress_counter(
@@ -760,6 +779,7 @@ class EvaluationScheduler:
             passed=evaluation.passed,
             failed=evaluation.failed,
             total=evaluation.total,
+            payload=dict(evaluation.payload),
             suite_results=evaluation.suite_results,
             tests=list(evaluation.tests),
             error=evaluation.error,
@@ -804,6 +824,7 @@ class EvaluationScheduler:
             evaluation.passed = 0
             evaluation.failed = 0
             evaluation.total = 0
+            evaluation.payload = {}
             evaluation.suite_results = {}
             evaluation.tests = []
         elif not isinstance(payload, dict):
@@ -814,6 +835,7 @@ class EvaluationScheduler:
             evaluation.passed = 0
             evaluation.failed = 0
             evaluation.total = 0
+            evaluation.payload = {}
             evaluation.suite_results = {}
             evaluation.tests = []
         else:
@@ -829,6 +851,7 @@ class EvaluationScheduler:
             evaluation.passed = int(payload.get("passed", 0) or 0)
             evaluation.failed = int(payload.get("failed", 0) or 0)
             evaluation.total = int(payload.get("total", 0) or 0)
+            evaluation.payload = payload
             suite_results = payload.get("suite_results")
             evaluation.suite_results = (
                 suite_results if isinstance(suite_results, dict) else {}
@@ -849,6 +872,7 @@ class EvaluationScheduler:
         evaluation.passed = 0
         evaluation.failed = 0
         evaluation.total = 0
+        evaluation.payload = {}
         evaluation.suite_results = {}
         evaluation.tests = []
         if run_payload is not None:
@@ -1001,6 +1025,9 @@ SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
     "wacct",
     "torture",
 )
+CURRENT_SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
+    SUITE_FEEDBACK_PRIORITY
+)
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -1026,7 +1053,7 @@ def _normalize_suite_path(value: str | None) -> str:
 
 def _suite_family(suite_path: str) -> str | None:
     normalized = _normalize_suite_path(suite_path)
-    for family in SUITE_FEEDBACK_PRIORITY:
+    for family in CURRENT_SUITE_FEEDBACK_PRIORITY:
         if normalized == family:
             return family
         if normalized.startswith(f"{family}/"):
@@ -1039,15 +1066,23 @@ def _suite_family(suite_path: str) -> str | None:
 def _suite_rank(suite_path: str) -> tuple[int, int, str]:
     normalized = _normalize_suite_path(suite_path)
     family = _suite_family(normalized)
-    if family in SUITE_FEEDBACK_PRIORITY:
+    if family in CURRENT_SUITE_FEEDBACK_PRIORITY:
         return (
-            SUITE_FEEDBACK_PRIORITY.index(family),
+            CURRENT_SUITE_FEEDBACK_PRIORITY.index(family),
             0,
             normalized,
         )
     if normalized.endswith("/run_all") or normalized == "all/run_all":
-        return (len(SUITE_FEEDBACK_PRIORITY), 1, normalized)
-    return (len(SUITE_FEEDBACK_PRIORITY), 0, normalized)
+        return (
+            len(CURRENT_SUITE_FEEDBACK_PRIORITY),
+            1,
+            normalized,
+        )
+    return (
+        len(CURRENT_SUITE_FEEDBACK_PRIORITY),
+        0,
+        normalized,
+    )
 
 
 def _test_sort_key(test: dict[str, Any]) -> tuple[int, int, str, str]:
@@ -1128,6 +1163,16 @@ def _format_single_failed_test(
     if message is not None:
         lines.append("error:")
         lines.append(message)
+    rendered_diagnostic = _string_or_none(
+        test.get("rendered_diagnostic"),
+    )
+    if rendered_diagnostic is not None:
+        lines.extend([
+            "diagnostic:",
+            "```text",
+            rendered_diagnostic,
+            "```",
+        ])
     if source is not None:
         lines.extend([
             "source:",
@@ -1137,6 +1182,42 @@ def _format_single_failed_test(
         ])
     else:
         lines.append("source: (missing)")
+    return "\n".join(lines)
+
+
+def build_cluster_summary_section(
+    payload: dict[str, Any],
+    *,
+    limit: int = 8,
+) -> str:
+    raw_clusters = payload.get("diagnostic_clusters")
+    if not isinstance(raw_clusters, list) or not raw_clusters:
+        return "diagnostic_clusters: 0"
+
+    lines = [f"diagnostic_clusters: {len(raw_clusters)} (top {max(1, limit)})"]
+    for cluster in raw_clusters[: max(1, limit)]:
+        if not isinstance(cluster, dict):
+            continue
+        key = _string_or_none(cluster.get("key")) or "unknown"
+        kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
+        code = _string_or_none(cluster.get("code"))
+        count = (
+            int(cluster.get("count"))
+            if isinstance(cluster.get("count"), int)
+            else 0
+        )
+        suffix = f" code={code}" if code else ""
+        lines.append(
+            f"- {kind}{suffix}: count={count} key={key}"
+        )
+        samples = cluster.get("sample_tests")
+        if isinstance(samples, list) and samples:
+            rendered_samples = ", ".join(
+                sample for sample in samples
+                if isinstance(sample, str) and sample
+            )
+            if rendered_samples:
+                lines.append(f"  samples: {rendered_samples}")
     return "\n".join(lines)
 
 
@@ -1151,7 +1232,7 @@ def build_failed_tests_feedback_section(
 
     lines = [
         "Top failed tests with source "
-        f"(prioritized: {' -> '.join(SUITE_FEEDBACK_PRIORITY)}):",
+        f"(prioritized: {' -> '.join(CURRENT_SUITE_FEEDBACK_PRIORITY)}):",
         f"count: {len(selected)} (limit={max(1, limit)})",
     ]
     for idx, test in enumerate(selected, start=1):
@@ -1273,6 +1354,7 @@ def build_advisor_user_prompt(
     task_prompt: str,
     commit: str | None,
     selected_failed_tests: list[dict[str, Any]],
+    diagnostic_clusters: list[dict[str, Any]],
     code_snapshot: dict[str, Any],
 ) -> str:
     lines: list[str] = [
@@ -1283,8 +1365,29 @@ def build_advisor_user_prompt(
         "",
         f"Evaluated commit: {commit or 'unknown'}",
         "",
-        "Selected failing tests (with full source):",
+        "Top diagnostic clusters:",
     ]
+    if diagnostic_clusters:
+        for cluster in diagnostic_clusters[:10]:
+            if not isinstance(cluster, dict):
+                continue
+            key = _string_or_none(cluster.get("key")) or "unknown"
+            kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
+            code = _string_or_none(cluster.get("code"))
+            count = (
+                int(cluster.get("count"))
+                if isinstance(cluster.get("count"), int)
+                else 0
+            )
+            code_suffix = f" code={code}" if code else ""
+            lines.append(f"- {kind}{code_suffix}: count={count} key={key}")
+    else:
+        lines.append("- none")
+
+    lines.extend([
+        "",
+        "Selected failing tests (with full source):",
+    ])
     for idx, test in enumerate(selected_failed_tests, start=1):
         lines.append("")
         lines.append(_format_single_failed_test(idx, test))
@@ -1317,8 +1420,11 @@ async def build_advisor_assessment(
     advisor_model_thinking_level: str,
     failed_tests_limit: int,
 ) -> str:
+    payload_for_feedback = enrich_evaluation_payload(
+        copy.deepcopy(payload),
+    )
     selected_failed_tests = select_failed_tests_for_feedback(
-        payload,
+        payload_for_feedback,
         limit=failed_tests_limit,
     )
     if not selected_failed_tests:
@@ -1328,10 +1434,17 @@ async def build_advisor_assessment(
         sandbox,
         commit=commit,
     )
+    clusters = payload_for_feedback.get("diagnostic_clusters")
+    diagnostic_clusters = (
+        clusters
+        if isinstance(clusters, list)
+        else []
+    )
     user_prompt = build_advisor_user_prompt(
         task_prompt=task_prompt,
         commit=commit,
         selected_failed_tests=selected_failed_tests,
+        diagnostic_clusters=diagnostic_clusters,
         code_snapshot=code_snapshot,
     )
     system_prompt = (
@@ -1362,6 +1475,11 @@ def format_turn_end_evaluation_feedback(
 ) -> str:
     """Render compact, actionable turn-end evaluation feedback."""
     payload = run_payload.get("payload")
+    feedback_payload = (
+        enrich_evaluation_payload(copy.deepcopy(payload))
+        if isinstance(payload, dict)
+        else None
+    )
     exit_code = run_payload.get("exit_code")
 
     lines: list[str] = ["Turn-end full evaluation result:"]
@@ -1398,11 +1516,16 @@ def format_turn_end_evaluation_feedback(
                     f"- {suite_name}: {suite_passed}/{suite_total}"
                 )
 
-        failed_section, selected_failed_tests = (
-            build_failed_tests_feedback_section(
-                payload,
-                limit=failed_tests_limit,
-            )
+        cluster_payload = (
+            feedback_payload
+            if isinstance(feedback_payload, dict)
+            else payload
+        )
+        lines.append(build_cluster_summary_section(cluster_payload))
+
+        failed_section, selected_failed_tests = build_failed_tests_feedback_section(
+            cluster_payload,
+            limit=failed_tests_limit,
         )
         lines.append(failed_section)
         lines.append(
@@ -1479,6 +1602,7 @@ def build_turn_end_eval_event(
     passed = 0
     failed = 0
     total = 0
+    event_payload: dict[str, Any] = {}
     suite_results: dict[str, Any] = {}
     tests: list[EvalTestResult] = []
     event_error = error
@@ -1486,6 +1610,7 @@ def build_turn_end_eval_event(
         passed = int(payload.get("passed", 0) or 0)
         failed = int(payload.get("failed", 0) or 0)
         total = int(payload.get("total", 0) or 0)
+        event_payload = payload
         suite_payload = payload.get("suite_results")
         if isinstance(suite_payload, dict):
             suite_results = suite_payload
@@ -1521,6 +1646,7 @@ def build_turn_end_eval_event(
         passed=passed,
         failed=failed,
         total=total,
+        payload=event_payload,
         suite_results=suite_results,
         tests=tests,
         error=event_error,
@@ -1545,6 +1671,7 @@ async def run_trajectory(
     task_lang: str = "en",
     task_params: dict[str, str] | None = None,
 ) -> str:
+    global CURRENT_SUITE_FEEDBACK_PRIORITY
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
     max_parts = normalize_positive_limit(max_parts)
@@ -1577,6 +1704,9 @@ async def run_trajectory(
     )
     failed_tests_feedback_limit = resolve_failed_tests_feedback_limit(
         environment_params.get("failed_tests_feedback_limit"),
+    )
+    CURRENT_SUITE_FEEDBACK_PRIORITY = resolve_suite_feedback_priority(
+        environment_params.get("diagnostics_suite_priority"),
     )
     if task_params:
         task_params_loaded.update(task_params)
@@ -1632,7 +1762,10 @@ async def run_trajectory(
         f"test_timeout={test_timeout_label} "
         f"eval_concurrency={EVALUATION_CONCURRENCY} "
         f"advisor_model={normalized_advisor_model or 'none'} "
-        f"advisor_thinking={normalized_advisor_thinking_level}"
+        f"advisor_thinking={normalized_advisor_thinking_level} "
+        "suite_priority="
+        f"{'->'.join(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
+        f"failed_tests_limit={failed_tests_feedback_limit}"
     )
     if existing_trace is not None:
         print(
