@@ -29,6 +29,7 @@ import os
 import shlex
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -278,6 +279,97 @@ def first_winning_commit(
     return winner
 
 
+def winner_part_number(
+    evaluation: EvaluationRecord,
+) -> int | None:
+    part = evaluation.part
+    if isinstance(part, int) and part > 0:
+        return part
+    return None
+
+
+def trim_trace_after_part(
+    trace: AgentTrace,
+    *,
+    max_part_inclusive: int,
+) -> None:
+    if max_part_inclusive <= 0:
+        trace.parts = []
+        trace.turns = []
+        trace.evaluations = {}
+        return
+
+    trace.parts = [
+        record
+        for record in trace.parts
+        if isinstance(record.part, int)
+        and record.part <= max_part_inclusive
+    ]
+    kept_parts = {
+        record.part
+        for record in trace.parts
+        if isinstance(record.part, int)
+    }
+
+    trimmed_turns: list[TurnRecord] = []
+    for turn in trace.turns:
+        filtered_turn_parts = [
+            record
+            for record in turn.parts
+            if isinstance(record.part, int)
+            and record.part in kept_parts
+        ]
+        if filtered_turn_parts:
+            turn.parts = filtered_turn_parts
+            turn.part_start = filtered_turn_parts[0].part
+            turn.part_end = filtered_turn_parts[-1].part
+            last_commit = filtered_turn_parts[-1].git_commit
+            if isinstance(last_commit, str) and last_commit:
+                turn.git_commit = last_commit
+            trimmed_turns.append(turn)
+            continue
+
+        turn_start = turn.part_start if isinstance(turn.part_start, int) else None
+        turn_end = turn.part_end if isinstance(turn.part_end, int) else None
+        if turn_start is None and turn_end is None:
+            continue
+        if turn_start is not None and turn_start > max_part_inclusive:
+            continue
+        if turn_end is not None and turn_end > max_part_inclusive:
+            turn.part_end = max_part_inclusive
+        trimmed_turns.append(turn)
+    trace.turns = trimmed_turns
+
+    trace.evaluations = {
+        commit: evaluation
+        for commit, evaluation in trace.evaluations.items()
+        if (
+            not isinstance(evaluation.part, int)
+            or evaluation.part <= max_part_inclusive
+        )
+    }
+
+
+def apply_winning_projection(
+    trace: AgentTrace,
+    *,
+    winner_commit: str,
+    winner_eval: EvaluationRecord,
+) -> int | None:
+    winner_part = winner_part_number(winner_eval)
+    if winner_part is None:
+        return None
+
+    trim_trace_after_part(
+        trace,
+        max_part_inclusive=winner_part,
+    )
+    if trace.session_end is not None:
+        trace.session_end.final_git_commit = winner_commit
+        trace.session_end.total_parts = winner_part
+    return winner_part
+
+
 async def checkout_workspace_commit(
     sandbox: Sandbox,
     commit: str,
@@ -519,12 +611,19 @@ class EvaluationScheduler:
         trajectory_id: str,
         environment: str,
         task_params: dict[str, Any] | None,
+        should_stop: Callable[[], bool] | None = None,
+        on_winner: (
+            Callable[[str, EvaluationRecord], Awaitable[None] | None]
+            | None
+        ) = None,
     ) -> None:
         self.sandbox = sandbox
         self.agent_trace = agent_trace
         self.trajectory_id = trajectory_id
         self.environment = environment
         self.task_params = task_params
+        self.should_stop = should_stop
+        self.on_winner = on_winner
         self.tasks: set[asyncio.Task[None]] = set()
         self.seen_commits: set[str] = set(agent_trace.evaluations.keys())
         self.semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
@@ -695,6 +794,8 @@ class EvaluationScheduler:
         part: int,
         turn: int,
     ) -> None:
+        if self.should_stop is not None and self.should_stop():
+            return
         if commit in self.seen_commits:
             return
         self.seen_commits.add(commit)
@@ -763,6 +864,15 @@ class EvaluationScheduler:
                     f"passed={evaluation.passed}/{evaluation.total}"
                 )
                 self.emit_event(evaluation)
+                if (
+                    is_winning_evaluation(evaluation)
+                    and self.on_winner is not None
+                ):
+                    callback_result = self.on_winner(
+                        commit, evaluation,
+                    )
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
 
     def on_done(self, done_task: asyncio.Task[None]) -> None:
         self.tasks.discard(done_task)
@@ -1208,18 +1318,120 @@ async def run_trajectory(
                 "running without completion tracking"
             )
 
+        # --- Main loop ---
+        tracker = SolveTracker(required_test_paths)
+        for part_record in agent_trace.parts:
+            tracker.update(list(part_record.envoi_calls))
+
+        winner_stop_part_ref: list[int | None] = [None]
+
+        def winner_latched() -> bool:
+            return isinstance(winner_stop_part_ref[0], int)
+
+        def latch_winner(
+            commit: str,
+            evaluation: EvaluationRecord,
+            *,
+            source: str,
+        ) -> bool:
+            winner_part = winner_part_number(evaluation)
+            if winner_part is None:
+                return False
+            current = winner_stop_part_ref[0]
+            if isinstance(current, int) and current <= winner_part:
+                return False
+            winner_stop_part_ref[0] = winner_part
+            print(
+                "[eval] latched first winner "
+                f"source={source} commit={commit[:10]} "
+                f"part={winner_part} "
+                f"score={evaluation.passed}/{evaluation.total}"
+            )
+            return True
+
+        async def on_async_winner(
+            commit: str,
+            evaluation: EvaluationRecord,
+        ) -> None:
+            did_latch = latch_winner(
+                commit, evaluation, source="commit_async",
+            )
+            if not did_latch:
+                return
+            # Best-effort: interrupt in-flight turn command so solved runs stop fast.
+            try:
+                await sandbox.run(
+                    "pkill -f '/sandbox/codex_client.py chat-stream' "
+                    "> /dev/null 2>&1 || true\n"
+                    "pkill -f '/sandbox/opencode_agent.py chat-stream' "
+                    "> /dev/null 2>&1 || true",
+                    quiet=True,
+                    timeout=10,
+                )
+            except Exception as kill_error:
+                print(
+                    "[eval] winner interrupt failed: "
+                    f"{kill_error}"
+                )
+
         evaluator = EvaluationScheduler(
             sandbox=sandbox,
             agent_trace=agent_trace,
             trajectory_id=trajectory_id,
             environment=environment,
             task_params=task_params_loaded,
+            should_stop=winner_latched,
+            on_winner=on_async_winner,
         )
 
-        # --- Main loop ---
-        tracker = SolveTracker(required_test_paths)
-        for part_record in agent_trace.parts:
-            tracker.update(list(part_record.envoi_calls))
+        existing_winner = first_winning_commit(agent_trace.evaluations)
+        if existing_winner is not None:
+            existing_winner_commit, existing_winner_eval = existing_winner
+            latch_winner(
+                existing_winner_commit,
+                existing_winner_eval,
+                source="resume",
+            )
+
+        async def stop_for_winner(
+            *,
+            detection_point: str,
+        ) -> bool:
+            nonlocal part_count, turn_count, end_reason
+            winner = first_winning_commit(agent_trace.evaluations)
+            if winner is None:
+                return False
+            winner_commit, winner_eval = winner
+            latch_winner(
+                winner_commit,
+                winner_eval,
+                source=detection_point,
+            )
+            winner_part = apply_winning_projection(
+                agent_trace,
+                winner_commit=winner_commit,
+                winner_eval=winner_eval,
+            )
+            if isinstance(winner_part, int):
+                part_count = winner_part
+                turn_count = get_trace_last_turn(agent_trace)
+            save_trace_parquet(
+                trajectory_id, agent_trace,
+                environment=environment,
+                task_params=task_params_loaded,
+            )
+            await checkout_workspace_commit(
+                sandbox,
+                winner_commit,
+            )
+            print(
+                f"[eval] winner detected {detection_point} "
+                f"commit={winner_commit[:10]} "
+                f"part={winner_eval.part} "
+                f"score={winner_eval.passed}/{winner_eval.total}"
+            )
+            end_reason = "solved"
+            return True
 
         prompt_text = (
             prompt if part_count == 0
@@ -1229,20 +1441,9 @@ async def run_trajectory(
         consecutive_turn_failures = 0
 
         while part_count < max_parts:
-            winner = first_winning_commit(agent_trace.evaluations)
-            if winner is not None:
-                winner_commit, winner_eval = winner
-                await checkout_workspace_commit(
-                    sandbox,
-                    winner_commit,
-                )
-                print(
-                    "[eval] winner detected before turn start "
-                    f"commit={winner_commit[:10]} "
-                    f"part={winner_eval.part} "
-                    f"score={winner_eval.passed}/{winner_eval.total}"
-                )
-                end_reason = "solved"
+            if await stop_for_winner(
+                detection_point="before turn start",
+            ):
                 break
             if max_turns is not None and turn_count >= max_turns:
                 print(
@@ -1317,6 +1518,7 @@ async def run_trajectory(
                 last_part_timestamp_ms_ref=stream_last_part_ts_ref,
                 turn_record=turn_record,
                 session_id=session_id,
+                stop_at_part_ref=winner_stop_part_ref,
                 schedule_commit_evaluation=evaluator.schedule,
             )
 
@@ -1332,6 +1534,10 @@ async def run_trajectory(
             git_commit = stream_git_commit_ref[0]
 
             if turn_outcome is None:
+                if await stop_for_winner(
+                    detection_point="after interrupted turn",
+                ):
+                    break
                 if turn_record is not None and not turn_record.parts:
                     agent_trace.turns.pop()
                 consecutive_turn_failures += 1
@@ -1464,20 +1670,9 @@ async def run_trajectory(
                 environment=environment,
                 task_params=task_params_loaded,
             )
-            winner = first_winning_commit(agent_trace.evaluations)
-            if winner is not None:
-                winner_commit, winner_eval = winner
-                await checkout_workspace_commit(
-                    sandbox,
-                    winner_commit,
-                )
-                print(
-                    "[eval] winner detected after turn "
-                    f"commit={winner_commit[:10]} "
-                    f"part={winner_eval.part} "
-                    f"score={winner_eval.passed}/{winner_eval.total}"
-                )
-                end_reason = "solved"
+            if await stop_for_winner(
+                detection_point="after turn",
+            ):
                 break
             turn_end_eval_feedback = ""
             turn_end_passed: int | None = None
@@ -1663,6 +1858,19 @@ async def run_trajectory(
                 winner = first_winning_commit(agent_trace.evaluations)
                 if winner is not None:
                     winner_commit, winner_eval = winner
+                    winner_part = apply_winning_projection(
+                        agent_trace,
+                        winner_commit=winner_commit,
+                        winner_eval=winner_eval,
+                    )
+                    if isinstance(winner_part, int):
+                        part_count = winner_part
+                        turn_count = get_trace_last_turn(agent_trace)
+                    save_trace_parquet(
+                        trajectory_id, agent_trace,
+                        environment=environment,
+                        task_params=task_params_loaded,
+                    )
                     checked_out = await checkout_workspace_commit(
                         sandbox,
                         winner_commit,

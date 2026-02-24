@@ -50,6 +50,7 @@ def make_stream_part_callback(
     last_part_timestamp_ms_ref: list[int | None],
     turn_record: TurnRecord | None,
     session_id: str,
+    stop_at_part_ref: list[int | None] | None = None,
     schedule_commit_evaluation: (
         Callable[[str, int, int], None] | None
     ) = None,
@@ -62,6 +63,13 @@ def make_stream_part_callback(
         if stream_event.get("event") != "part.completed":
             return
         if part_counter[0] >= effective_max_parts:
+            return
+        if (
+            isinstance(stop_at_part_ref, list)
+            and stop_at_part_ref
+            and isinstance(stop_at_part_ref[0], int)
+            and part_counter[0] >= stop_at_part_ref[0]
+        ):
             return
 
         try:
