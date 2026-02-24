@@ -40,8 +40,11 @@ from envoi_code.agents.codex import CodexAgent
 from envoi_code.agents.opencode import OpenCodeAgent
 from envoi_code.models import (
     AgentTrace,
+    EvalEvent,
+    EvalTestResult,
     EnvoiCall,
     EvaluationRecord,
+    PartRecord,
     SessionEnd,
     TurnRecord,
 )
@@ -86,6 +89,12 @@ RESUME_FROM_S3 = (
 )
 TURN_RECOVERY_RETRIES = max(
     0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3"))
+)
+MAX_INLINE_FAILED_TESTS = max(
+    1, int(os.environ.get("MAX_INLINE_FAILED_TESTS", "40"))
+)
+MAX_INLINE_TEST_MESSAGE_CHARS = max(
+    80, int(os.environ.get("MAX_INLINE_TEST_MESSAGE_CHARS", "220"))
 )
 
 
@@ -286,6 +295,28 @@ async def checkout_workspace_commit(
         return False
     print(f"[git] checked out winning commit {commit[:10]}")
     return True
+
+
+def find_part_record_by_number(
+    trace: AgentTrace,
+    part_number: int,
+) -> PartRecord | None:
+    for record in reversed(trace.parts):
+        if record.part == part_number:
+            return record
+    return None
+
+
+def append_eval_event_delta(
+    trace: AgentTrace,
+    event: EvalEvent,
+) -> None:
+    target = find_part_record_by_number(trace, event.trigger_part)
+    if target is None and trace.parts:
+        target = trace.parts[-1]
+    if target is None:
+        return
+    target.eval_events_delta.append(event)
 
 
 def load_optional_mcp_server(
@@ -503,6 +534,7 @@ class EvaluationScheduler:
                 evaluation.status = "failed"
                 evaluation.error = "Interrupted before evaluation completed"
                 evaluation.completed_at = datetime.now(UTC).isoformat()
+                self.emit_event(evaluation)
 
     @property
     def has_pending(self) -> bool:
@@ -522,6 +554,47 @@ class EvaluationScheduler:
     @staticmethod
     def int_or_none(value: Any) -> int | None:
         return value if isinstance(value, int) else None
+
+    @staticmethod
+    def normalize_tests(value: Any) -> list[EvalTestResult]:
+        tests: list[EvalTestResult] = []
+        if not isinstance(value, list):
+            return tests
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            try:
+                tests.append(EvalTestResult.model_validate(item))
+            except Exception:
+                continue
+        return tests
+
+    @staticmethod
+    def to_event(evaluation: EvaluationRecord) -> EvalEvent:
+        return EvalEvent(
+            eval_id=evaluation.eval_id,
+            kind="commit_async",
+            trigger_part=evaluation.part,
+            trigger_turn=evaluation.trigger_turn or 0,
+            target_commit=evaluation.commit,
+            queued_at=evaluation.queued_at,
+            started_at=evaluation.started_at,
+            finished_at=evaluation.completed_at,
+            status=evaluation.status,
+            passed=evaluation.passed,
+            failed=evaluation.failed,
+            total=evaluation.total,
+            suite_results=evaluation.suite_results,
+            tests=list(evaluation.tests),
+            error=evaluation.error,
+        )
+
+    def emit_event(self, evaluation: EvaluationRecord) -> None:
+        append_eval_event_delta(
+            self.agent_trace,
+            self.to_event(evaluation),
+        )
+        self.save()
 
     @staticmethod
     def apply_result(
@@ -556,6 +629,7 @@ class EvaluationScheduler:
             evaluation.failed = 0
             evaluation.total = 0
             evaluation.suite_results = {}
+            evaluation.tests = []
         elif not isinstance(payload, dict):
             evaluation.status = "failed"
             evaluation.error = (
@@ -565,6 +639,7 @@ class EvaluationScheduler:
             evaluation.failed = 0
             evaluation.total = 0
             evaluation.suite_results = {}
+            evaluation.tests = []
         else:
             evaluation.status = "completed"
             evaluation.error = (
@@ -582,6 +657,9 @@ class EvaluationScheduler:
             evaluation.suite_results = (
                 suite_results if isinstance(suite_results, dict) else {}
             )
+            evaluation.tests = EvaluationScheduler.normalize_tests(
+                payload.get("tests"),
+            )
 
     @staticmethod
     def apply_failure(
@@ -596,6 +674,7 @@ class EvaluationScheduler:
         evaluation.failed = 0
         evaluation.total = 0
         evaluation.suite_results = {}
+        evaluation.tests = []
         if run_payload is not None:
             evaluation.command = EvaluationScheduler.str_or_none(
                 run_payload.get("command"),
@@ -610,38 +689,54 @@ class EvaluationScheduler:
                 run_payload.get("stderr"),
             )
 
-    def schedule(self, commit: str, part: int) -> None:
+    def schedule(
+        self,
+        commit: str,
+        part: int,
+        turn: int,
+    ) -> None:
         if commit in self.seen_commits:
             return
         self.seen_commits.add(commit)
         queued_at = datetime.now(UTC).isoformat()
         print(f"[eval] queued commit {commit[:10]} from part {part}")
-        self.agent_trace.evaluations[commit] = EvaluationRecord(
+        evaluation = EvaluationRecord(
+            eval_id=uuid.uuid4().hex,
             commit=commit,
             part=part,
+            trigger_turn=turn,
             status="queued",
             queued_at=queued_at,
         )
-        self.save()
+        self.agent_trace.evaluations[commit] = evaluation
+        self.emit_event(evaluation)
         task = asyncio.create_task(
-            self.run_one(commit, part, queued_at),
+            self.run_one(commit, part, turn, queued_at),
         )
         self.tasks.add(task)
         task.add_done_callback(self.on_done)
 
     async def run_one(
-        self, commit: str, part: int, queued_at: str,
+        self,
+        commit: str,
+        part: int,
+        turn: int,
+        queued_at: str,
     ) -> None:
         evaluation = self.agent_trace.evaluations.get(commit)
         if evaluation is None:
             evaluation = EvaluationRecord(
-                commit=commit, part=part,
-                status="queued", queued_at=queued_at,
+                eval_id=uuid.uuid4().hex,
+                commit=commit,
+                part=part,
+                trigger_turn=turn,
+                status="queued",
+                queued_at=queued_at,
             )
             self.agent_trace.evaluations[commit] = evaluation
         evaluation.status = "running"
         evaluation.started_at = datetime.now(UTC).isoformat()
-        self.save()
+        self.emit_event(evaluation)
 
         async with self.semaphore:
             run_payload: dict[str, Any] | None = None
@@ -667,7 +762,7 @@ class EvaluationScheduler:
                     f"status={evaluation.status} "
                     f"passed={evaluation.passed}/{evaluation.total}"
                 )
-                self.save()
+                self.emit_event(evaluation)
 
     def on_done(self, done_task: asyncio.Task[None]) -> None:
         self.tasks.discard(done_task)
@@ -714,17 +809,29 @@ def build_followup_prompt(
 def format_turn_end_evaluation_feedback(
     run_payload: dict[str, Any],
 ) -> str:
-    """Render blocking turn-end evaluation output for the next prompt."""
+    """Render compact, actionable turn-end evaluation feedback."""
     payload = run_payload.get("payload")
     exit_code = run_payload.get("exit_code")
-    stdout = run_payload.get("stdout")
-    stderr = run_payload.get("stderr")
 
     lines: list[str] = [
         "Turn-end full evaluation result:",
     ]
     if isinstance(exit_code, int):
         lines.append(f"exit_code: {exit_code}")
+
+    def _text(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
+
+    def _truncate(value: str | None, limit: int) -> str | None:
+        if value is None:
+            return None
+        if len(value) <= limit:
+            return value
+        return value[:limit].rstrip() + " ..."
+
     if isinstance(payload, dict):
         passed = int(payload.get("passed", 0) or 0)
         failed = int(payload.get("failed", 0) or 0)
@@ -735,21 +842,179 @@ def format_turn_end_evaluation_feedback(
             f"passed={passed} failed={failed} total={total} "
             f"duration_ms={duration_ms}"
         )
-        lines.append("payload:")
-        lines.append(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-        )
+        suite_results = payload.get("suite_results")
+        if isinstance(suite_results, dict) and suite_results:
+            lines.append("suites:")
+            for suite_name in sorted(suite_results):
+                suite_payload = suite_results.get(suite_name)
+                if not isinstance(suite_payload, dict):
+                    continue
+                suite_passed = int(
+                    suite_payload.get("passed", 0) or 0
+                )
+                suite_total = int(
+                    suite_payload.get("total", 0) or 0
+                )
+                lines.append(
+                    f"- {suite_name}: {suite_passed}/{suite_total}"
+                )
+
+        tests = payload.get("tests")
+        failed_tests: list[dict[str, Any]] = []
+        if isinstance(tests, list):
+            for item in tests:
+                if not isinstance(item, dict):
+                    continue
+                status = item.get("status")
+                status_text = (
+                    status.strip().lower()
+                    if isinstance(status, str)
+                    else ""
+                )
+                if status_text and status_text != "passed":
+                    failed_tests.append(item)
+        if failed_tests:
+            lines.append(
+                "failed_tests: "
+                f"{len(failed_tests)} "
+                f"(showing up to {MAX_INLINE_FAILED_TESTS})"
+            )
+            for test in failed_tests[:MAX_INLINE_FAILED_TESTS]:
+                suite = _text(test.get("suite")) or "unknown_suite"
+                test_id = _text(test.get("test_id")) or "unknown_test"
+                status = _text(test.get("status")) or "failed"
+                failure_type = _text(test.get("failure_type"))
+                detail = _text(test.get("message"))
+                if detail is None:
+                    detail = _text(test.get("stderr_tail"))
+                if detail is None:
+                    detail = _text(test.get("stdout_tail"))
+                detail = _truncate(detail, MAX_INLINE_TEST_MESSAGE_CHARS)
+                status_label = (
+                    f"{status}/{failure_type}"
+                    if failure_type is not None
+                    else status
+                )
+                if detail is not None:
+                    lines.append(
+                        f"- {suite}/{test_id}: {status_label}: {detail}"
+                    )
+                else:
+                    lines.append(
+                        f"- {suite}/{test_id}: {status_label}"
+                    )
+            remaining = len(failed_tests) - MAX_INLINE_FAILED_TESTS
+            if remaining > 0:
+                lines.append(
+                    f"... and {remaining} more failing tests."
+                )
+        else:
+            lines.append("failed_tests: 0")
+
+        payload_error = _text(payload.get("error"))
+        if payload_error is not None:
+            lines.append(f"error: {payload_error}")
     else:
         lines.append("payload: null")
-
-    if isinstance(stdout, str) and stdout.strip():
-        lines.append("stdout:")
-        lines.append(stdout.rstrip())
-    if isinstance(stderr, str) and stderr.strip():
-        lines.append("stderr:")
-        lines.append(stderr.rstrip())
+        stdout = _text(run_payload.get("stdout"))
+        stderr = _text(run_payload.get("stderr"))
+        if stdout is not None:
+            lines.append(
+                "stdout: "
+                + (_truncate(stdout, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+            )
+        if stderr is not None:
+            lines.append(
+                "stderr: "
+                + (_truncate(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+            )
 
     return "\n".join(lines).strip()
+
+
+def normalize_eval_tests(payload: dict[str, Any]) -> list[EvalTestResult]:
+    tests: list[EvalTestResult] = []
+    raw_tests = payload.get("tests")
+    if not isinstance(raw_tests, list):
+        return tests
+    for item in raw_tests:
+        if not isinstance(item, dict):
+            continue
+        try:
+            tests.append(EvalTestResult.model_validate(item))
+        except Exception:
+            continue
+    return tests
+
+
+def build_turn_end_eval_event(
+    *,
+    turn: int,
+    part: int,
+    commit: str | None,
+    run_payload: dict[str, Any] | None,
+    error: str | None = None,
+) -> EvalEvent:
+    payload = (
+        run_payload.get("payload")
+        if isinstance(run_payload, dict)
+        else None
+    )
+    exit_code = (
+        run_payload.get("exit_code")
+        if isinstance(run_payload, dict)
+        else None
+    )
+    status = "failed"
+    passed = 0
+    failed = 0
+    total = 0
+    suite_results: dict[str, Any] = {}
+    tests: list[EvalTestResult] = []
+    event_error = error
+    if isinstance(payload, dict):
+        passed = int(payload.get("passed", 0) or 0)
+        failed = int(payload.get("failed", 0) or 0)
+        total = int(payload.get("total", 0) or 0)
+        suite_payload = payload.get("suite_results")
+        if isinstance(suite_payload, dict):
+            suite_results = suite_payload
+        tests = normalize_eval_tests(payload)
+        payload_error = payload.get("error")
+        if (
+            event_error is None
+            and isinstance(payload_error, str)
+            and payload_error.strip()
+        ):
+            event_error = payload_error.strip()
+        status = "completed"
+    if isinstance(exit_code, int) and exit_code != 0:
+        if event_error is None:
+            event_error = (
+                "Turn-end evaluation command failed "
+                f"with exit code {exit_code}"
+            )
+        status = "failed"
+    if event_error is not None:
+        status = "failed"
+    now_iso = datetime.now(UTC).isoformat()
+    return EvalEvent(
+        eval_id=uuid.uuid4().hex,
+        kind="turn_end_blocking",
+        trigger_part=part,
+        trigger_turn=turn,
+        target_commit=commit,
+        queued_at=now_iso,
+        started_at=now_iso,
+        finished_at=now_iso,
+        status=status,
+        passed=passed,
+        failed=failed,
+        total=total,
+        suite_results=suite_results,
+        tests=tests,
+        error=event_error,
+    )
 
 
 async def run_trajectory(
@@ -960,6 +1225,7 @@ async def run_trajectory(
             prompt if part_count == 0
             else build_followup_prompt(tracker)
         )
+        next_turn_feedback_eval_id: str | None = None
         consecutive_turn_failures = 0
 
         while part_count < max_parts:
@@ -1028,6 +1294,7 @@ async def run_trajectory(
                 prompt=prompt_text,
                 git_commit=git_commit,
                 repo_checkpoint=None,
+                feedback_eval_id=next_turn_feedback_eval_id,
                 parts=[],
             )
             agent_trace.turns.append(turn_record)
@@ -1216,16 +1483,18 @@ async def run_trajectory(
             turn_end_passed: int | None = None
             turn_end_total: int | None = None
             turn_end_has_error = True
+            turn_end_eval_payload: dict[str, Any] | None = None
+            turn_end_event: EvalEvent | None = None
             try:
-                turn_end_eval = await run_workspace_evaluation(
+                turn_end_eval_payload = await run_workspace_evaluation(
                     sandbox=sandbox,
                 )
                 turn_end_eval_feedback = (
                     format_turn_end_evaluation_feedback(
-                        turn_end_eval,
+                        turn_end_eval_payload,
                     )
                 )
-                payload = turn_end_eval.get("payload")
+                payload = turn_end_eval_payload.get("payload")
                 if isinstance(payload, dict):
                     turn_end_passed = int(
                         payload.get("passed", 0) or 0,
@@ -1255,6 +1524,37 @@ async def run_trajectory(
                 print(
                     "[eval] turn_end failed: "
                     f"{turn_end_eval_error}"
+                )
+
+            turn_eval_part = (
+                turn_record.part_end
+                if (
+                    isinstance(turn_record.part_end, int)
+                    and turn_record.part_end > 0
+                )
+                else part_count
+            )
+            if turn_eval_part > 0:
+                turn_end_event = build_turn_end_eval_event(
+                    turn=turn_count,
+                    part=turn_eval_part,
+                    commit=git_commit,
+                    run_payload=turn_end_eval_payload,
+                    error=(
+                        turn_end_eval_feedback
+                        if turn_end_eval_payload is None
+                        else None
+                    ),
+                )
+                append_eval_event_delta(
+                    agent_trace,
+                    turn_end_event,
+                )
+                save_trace_parquet(
+                    trajectory_id,
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
                 )
 
             eval_label = (
@@ -1289,6 +1589,11 @@ async def run_trajectory(
                 end_reason = "part_limit"
                 break
 
+            next_turn_feedback_eval_id = (
+                turn_end_event.eval_id
+                if turn_end_event is not None
+                else None
+            )
             prompt_text = build_followup_prompt(
                 tracker,
                 evaluation_feedback=turn_end_eval_feedback,

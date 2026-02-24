@@ -56,12 +56,13 @@ TRACE_SCHEMA = pa.schema([
     ("testing_state", pa.string()),
     ("repo_checkpoint", pa.string()),
     ("turn", pa.int32()),
-    ("turn_prompt", pa.string()),
+    ("turn_user_message", pa.string()),
+    ("turn_feedback_eval_id", pa.string()),
+    ("eval_events_delta", pa.string()),
     ("session_end_reason", pa.string()),
     ("session_end_total_parts", pa.int32()),
     ("session_end_total_turns", pa.int32()),
     ("session_end_final_commit", pa.string()),
-    ("evaluations", pa.string()),
     ("suites", pa.string()),
     ("artifacts", pa.string()),
     ("bundle_uri", pa.string()),
@@ -74,12 +75,15 @@ SCALAR_PART_KEYS = (
     "summary_word_count", "content_word_count",
     "summary_token_estimate", "content_token_estimate",
     "tool_name", "tool_status", "tool_exit_code", "patch",
-    "turn_prompt",
+    "turn",
+    "turn_user_message",
+    "turn_feedback_eval_id",
 )
 
 JSON_PART_KEYS = (
     "files", "tool_input", "tool_output", "tool_error",
     "token_usage", "envoi_calls", "testing_state", "repo_checkpoint",
+    "eval_events_delta",
 )
 
 
@@ -100,13 +104,25 @@ def build_turn_map(trace: AgentTrace) -> dict[int, int]:
     return mapping
 
 
-def build_turn_prompt_map(trace: AgentTrace) -> dict[int, str | None]:
+def build_turn_user_message_map(
+    trace: AgentTrace,
+) -> dict[int, str | None]:
     mapping: dict[int, str | None] = {}
     for turn_rec in trace.turns:
-        if turn_rec.part_start is None or turn_rec.part_end is None:
+        if turn_rec.part_start is None:
             continue
-        for p in range(turn_rec.part_start, turn_rec.part_end + 1):
-            mapping[p] = turn_rec.prompt
+        mapping[turn_rec.part_start] = turn_rec.prompt
+    return mapping
+
+
+def build_turn_feedback_eval_map(
+    trace: AgentTrace,
+) -> dict[int, str | None]:
+    mapping: dict[int, str | None] = {}
+    for turn_rec in trace.turns:
+        if turn_rec.part_start is None:
+            continue
+        mapping[turn_rec.part_start] = turn_rec.feedback_eval_id
     return mapping
 
 
@@ -120,12 +136,13 @@ def agent_trace_to_rows(
 ) -> list[dict[str, Any]]:
     """Convert an AgentTrace to flat row dicts for parquet serialization.
 
-    Produces one dict per part. Trajectory-level fields (session_end, evaluations,
-    artifacts, suites) are denormalized into every row. Nested objects are serialized
-    to JSON strings via json_or_none().
+    Produces one dict per part. Trajectory-level fields (session_end, artifacts,
+    suites) are denormalized into every row. Nested objects are serialized to JSON
+    strings via json_or_none().
     """
     turn_map = build_turn_map(trace)
-    turn_prompt_map = build_turn_prompt_map(trace)
+    turn_user_message_map = build_turn_user_message_map(trace)
+    turn_feedback_eval_map = build_turn_feedback_eval_map(trace)
 
     se = trace.session_end
     se_reason = se.reason if se else None
@@ -133,9 +150,6 @@ def agent_trace_to_rows(
     se_total_turns = se.total_turns if se else None
     se_final_commit = se.final_git_commit if se else None
 
-    evals_json = json_or_none(
-        {k: v.model_dump(mode="json") for k, v in trace.evaluations.items()}
-    )
     suites_json = json_or_none(suites)
     artifacts_json = json_or_none(trace.artifacts)
     task_params_json = json_or_none(task_params)
@@ -178,16 +192,23 @@ def agent_trace_to_rows(
             "testing_state": json_or_none(part_rec.testing_state),
             "repo_checkpoint": json_or_none(part_rec.repo_checkpoint),
             "turn": turn_map.get(part_rec.part) if part_rec.part is not None else None,
-            "turn_prompt": (
-                turn_prompt_map.get(part_rec.part)
+            "turn_user_message": (
+                turn_user_message_map.get(part_rec.part)
                 if part_rec.part is not None
                 else None
             ),
+            "turn_feedback_eval_id": (
+                turn_feedback_eval_map.get(part_rec.part)
+                if part_rec.part is not None
+                else None
+            ),
+            "eval_events_delta": json_or_none(
+                [e.model_dump(mode="json") for e in part_rec.eval_events_delta]
+            ) if part_rec.eval_events_delta else None,
             "session_end_reason": se_reason,
             "session_end_total_parts": se_total_parts,
             "session_end_total_turns": se_total_turns,
             "session_end_final_commit": se_final_commit,
-            "evaluations": evals_json,
             "suites": suites_json,
             "artifacts": artifacts_json,
             "bundle_uri": bundle_uri,
@@ -216,6 +237,157 @@ def parse_json_field(value: Any) -> Any:
     return value
 
 
+def build_evaluations_from_parts(
+    parts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evaluations: dict[str, dict[str, Any]] = {}
+    for part in parts:
+        events = part.get("eval_events_delta")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("kind") != "commit_async":
+                continue
+            commit = event.get("target_commit")
+            if not isinstance(commit, str) or not commit:
+                continue
+            trigger_part = event.get("trigger_part")
+            part_value = (
+                int(trigger_part)
+                if isinstance(trigger_part, int)
+                else part.get("part")
+                if isinstance(part.get("part"), int)
+                else 0
+            )
+            row = evaluations.setdefault(
+                commit,
+                {
+                    "eval_id": (
+                        event.get("eval_id")
+                        if isinstance(event.get("eval_id"), str)
+                        and event.get("eval_id")
+                        else f"recovered-{commit[:12]}-{part_value}"
+                    ),
+                    "commit": commit,
+                    "part": part_value,
+                    "trigger_turn": event.get("trigger_turn"),
+                    "kind": "commit_async",
+                    "status": "queued",
+                    "queued_at": event.get("queued_at")
+                    or part.get("timestamp")
+                    or "",
+                    "started_at": None,
+                    "completed_at": None,
+                    "duration_ms": None,
+                    "passed": 0,
+                    "failed": 0,
+                    "total": 0,
+                    "suite_results": {},
+                    "tests": [],
+                    "error": None,
+                    "command": None,
+                    "exit_code": None,
+                    "stdout": None,
+                    "stderr": None,
+                },
+            )
+            status = event.get("status")
+            if isinstance(status, str) and status:
+                row["status"] = status
+            if isinstance(event.get("eval_id"), str):
+                row["eval_id"] = event.get("eval_id")
+            if isinstance(event.get("trigger_turn"), int):
+                row["trigger_turn"] = event.get("trigger_turn")
+            if isinstance(event.get("queued_at"), str):
+                row["queued_at"] = event.get("queued_at")
+            if isinstance(event.get("started_at"), str):
+                row["started_at"] = event.get("started_at")
+            if isinstance(event.get("finished_at"), str):
+                row["completed_at"] = event.get("finished_at")
+            if isinstance(event.get("passed"), int):
+                row["passed"] = event.get("passed")
+            if isinstance(event.get("failed"), int):
+                row["failed"] = event.get("failed")
+            if isinstance(event.get("total"), int):
+                row["total"] = event.get("total")
+            suite_results = event.get("suite_results")
+            if isinstance(suite_results, dict):
+                row["suite_results"] = suite_results
+            tests = event.get("tests")
+            if isinstance(tests, list):
+                row["tests"] = tests
+            error = event.get("error")
+            if isinstance(error, str):
+                row["error"] = error
+    return evaluations
+
+
+def build_turns_from_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        turn_value = row.get("turn")
+        if not isinstance(turn_value, int):
+            continue
+        info = grouped.get(turn_value)
+        if info is None:
+            info = {
+                "trajectory_id": row.get("trajectory_id"),
+                "session_id": row.get("session_id"),
+                "agent": row.get("agent"),
+                "turn": turn_value,
+                "part_start": row.get("part"),
+                "part_end": row.get("part"),
+                "timestamp": row.get("timestamp"),
+                "agent_model": row.get("agent_model"),
+                "prompt": row.get("turn_user_message"),
+                "git_commit": row.get("git_commit"),
+                "repo_checkpoint": parse_json_field(
+                    row.get("repo_checkpoint"),
+                ),
+                "session_ids": [],
+                "session_objects": [],
+                "new_messages": [],
+                "token_usage": None,
+                "feedback_eval_id": row.get("turn_feedback_eval_id"),
+                "parts": [],
+                "session_end": None,
+            }
+            grouped[turn_value] = info
+        part_number = row.get("part")
+        if isinstance(part_number, int):
+            start = info.get("part_start")
+            end = info.get("part_end")
+            if not isinstance(start, int) or part_number < start:
+                info["part_start"] = part_number
+            if not isinstance(end, int) or part_number > end:
+                info["part_end"] = part_number
+        if not isinstance(info.get("prompt"), str):
+            prompt_value = row.get("turn_user_message")
+            if isinstance(prompt_value, str):
+                info["prompt"] = prompt_value
+        if not isinstance(info.get("feedback_eval_id"), str):
+            eval_id = row.get("turn_feedback_eval_id")
+            if isinstance(eval_id, str):
+                info["feedback_eval_id"] = eval_id
+        if not isinstance(info.get("git_commit"), str):
+            git_commit = row.get("git_commit")
+            if isinstance(git_commit, str):
+                info["git_commit"] = git_commit
+    turns = list(grouped.values())
+    turns.sort(
+        key=lambda value: (
+            value.get("turn")
+            if isinstance(value.get("turn"), int)
+            else 10**9
+        ),
+    )
+    return turns
+
+
 def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconstruct the trace dict from flat parquet rows.
 
@@ -239,10 +411,15 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for key in SCALAR_PART_KEYS:
             part[key] = row.get(key)
         for key in JSON_PART_KEYS:
-            part[key] = parse_json_field(row.get(key))
+            value = parse_json_field(row.get(key))
+            if key in {"files", "envoi_calls", "eval_events_delta"}:
+                part[key] = value if isinstance(value, list) else []
+            else:
+                part[key] = value
         parts.append(part)
 
-    evaluations = parse_json_field(first.get("evaluations")) or {}
+    evaluations = build_evaluations_from_parts(parts)
+    turns = build_turns_from_rows(rows)
     artifacts = parse_json_field(first.get("artifacts")) or {}
 
     session_end = None
@@ -262,7 +439,7 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "agent_model": first.get("agent_model"),
         "started_at": first.get("started_at"),
         "parts": parts,
-        "turns": [],
+        "turns": turns,
         "evaluations": evaluations,
         "artifacts": artifacts,
         "session_end": session_end,

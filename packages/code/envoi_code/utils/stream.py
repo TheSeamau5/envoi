@@ -51,7 +51,7 @@ def make_stream_part_callback(
     turn_record: TurnRecord | None,
     session_id: str,
     schedule_commit_evaluation: (
-        Callable[[str, int], None] | None
+        Callable[[str, int, int], None] | None
     ) = None,
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
     async def on_stream_part(
@@ -188,6 +188,7 @@ def make_stream_part_callback(
             changed_files = await get_changed_files(sandbox)
             detected_file_change = bool(changed_files)
             checkpoint: RepoCheckpoint | None = None
+            commit_for_async_eval: str | None = None
             should_checkpoint = (
                 has_file_change or detected_file_change
             )
@@ -235,12 +236,9 @@ def make_stream_part_callback(
                         checkpoint.commit_after, str
                     )
                     and checkpoint.commit_after
-                    and schedule_commit_evaluation
-                    is not None
                 ):
-                    schedule_commit_evaluation(
-                        checkpoint.commit_after,
-                        absolute_part,
+                    commit_for_async_eval = (
+                        checkpoint.commit_after
                     )
 
             part_envoi_calls: list[EnvoiCall] = []
@@ -305,6 +303,15 @@ def make_stream_part_callback(
             turn_record.git_commit = git_commit_ref[0]
             if checkpoint is not None:
                 turn_record.repo_checkpoint = checkpoint
+            if (
+                commit_for_async_eval is not None
+                and schedule_commit_evaluation is not None
+            ):
+                schedule_commit_evaluation(
+                    commit_for_async_eval,
+                    absolute_part,
+                    turn_record.turn,
+                )
             save_trace_parquet(
                 trajectory_id, agent_trace,
                 environment=environment,

@@ -6,7 +6,8 @@ that holds all parts, turns, evaluations, and session metadata for one trajector
 
 Supporting models: EnvoiCall (a test invocation), TestingState (solve progress
 snapshot), RepoCheckpoint (git state before/after a part), SessionEnd (why the
-run stopped), EvaluationRecord (offline commit evaluation).
+run stopped), EvaluationRecord (offline commit evaluation), EvalEvent (lifecycle
+evaluation event persisted in trace rows).
 """
 
 from __future__ import annotations
@@ -61,9 +62,48 @@ class RepoCheckpoint(BaseModel):
     numstat: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class EvalTestResult(BaseModel):
+    suite: str
+    test_id: str
+    status: Literal[
+        "passed",
+        "failed",
+        "error",
+        "timeout",
+        "skipped",
+    ]
+    duration_ms: int | None = None
+    failure_type: str | None = None
+    message: str | None = None
+    stdout_tail: str | None = None
+    stderr_tail: str | None = None
+    truncated: bool = False
+
+
+class EvalEvent(BaseModel):
+    eval_id: str
+    kind: Literal["commit_async", "turn_end_blocking"]
+    trigger_part: int
+    trigger_turn: int
+    target_commit: str | None = None
+    queued_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    status: Literal["queued", "running", "completed", "failed"]
+    passed: int = 0
+    failed: int = 0
+    total: int = 0
+    suite_results: dict[str, Any] = Field(default_factory=dict)
+    tests: list[EvalTestResult] = Field(default_factory=list)
+    error: str | None = None
+
+
 class EvaluationRecord(BaseModel):
+    eval_id: str
     commit: str
     part: int
+    trigger_turn: int | None = None
+    kind: Literal["commit_async"] = "commit_async"
     status: Literal["queued", "running", "completed", "failed"] = "queued"
     queued_at: str
     started_at: str | None = None
@@ -73,6 +113,7 @@ class EvaluationRecord(BaseModel):
     failed: int = 0
     total: int = 0
     suite_results: dict[str, Any] = Field(default_factory=dict)
+    tests: list[EvalTestResult] = Field(default_factory=list)
     error: str | None = None
     command: str | None = None
     exit_code: int | None = None
@@ -113,6 +154,7 @@ class PartRecord(BaseModel):
     envoi_calls: list[EnvoiCall] = Field(default_factory=list)
     testing_state: TestingState | None = None
     repo_checkpoint: RepoCheckpoint | None = None
+    eval_events_delta: list[EvalEvent] = Field(default_factory=list)
 
 
 class TurnRecord(BaseModel):
@@ -131,6 +173,7 @@ class TurnRecord(BaseModel):
     session_objects: list[dict[str, Any]] = Field(default_factory=list)
     new_messages: list[dict[str, Any]] = Field(default_factory=list)
     token_usage: dict[str, Any] | None = None
+    feedback_eval_id: str | None = None
     parts: list[PartRecord] = Field(default_factory=list)
     session_end: SessionEnd | None = None
 
