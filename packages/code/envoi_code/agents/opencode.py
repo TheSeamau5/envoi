@@ -904,7 +904,7 @@ try:
         AgentTurnOutcome,
         SandboxImageRequirements,
     )
-    from envoi_code.agents.setup import run_task_setup, run_workspace_init
+    from envoi_code.agents.setup import run_workspace_init
     from envoi_code.sandbox.base import Sandbox
     from envoi_code.utils.helpers import (
         compute_turn_timeout_seconds,
@@ -1156,7 +1156,6 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                 ),
             )
             setup_uploads: list[tuple[str, str]] = [
-                ("/tmp/upload/task_setup.sh", ctx.setup_script),
                 (
                     "/sandbox/opencode_client.py",
                     OPENCODE_CLIENT_CONTENT,
@@ -1193,7 +1192,6 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                     flush=True,
                 )
 
-            await run_task_setup(sandbox)
             await run_workspace_init(sandbox)
 
             # Install opencode binary

@@ -1714,10 +1714,6 @@ async def run_trajectory(
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     task_params_loaded["_environment_params"] = environment_params
     env_files = load_environment_files(env_path)
-    setup_script_file = env_path / "setup.sh"
-    setup_script = (
-        setup_script_file.read_text() if setup_script_file.exists() else ""
-    )
 
     # Resolve agent class, model, and credentials via protocol
     agent_cls = AGENT_BACKENDS.get(agent_name)
@@ -1810,7 +1806,6 @@ async def run_trajectory(
         ctx = AgentSetupContext(
             model=resolved_model,
             credentials=credentials,
-            setup_script=setup_script,
             env_files=env_files,
             mcp_server_content=mcp_server_content,
             mcp_enabled=mcp_enabled,

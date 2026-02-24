@@ -82,7 +82,7 @@ examples/c_compiler/
   environment/
     main.py               # envoi test harness
     Dockerfile            # sandbox image
-    setup.sh              # fixture installation
+    params.py             # optional environment-level run params
     tests/                # test suites
 ```
 

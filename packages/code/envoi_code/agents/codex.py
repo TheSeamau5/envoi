@@ -1439,7 +1439,7 @@ try:
         AgentTurnOutcome,
         SandboxImageRequirements,
     )
-    from envoi_code.agents.setup import run_task_setup, run_workspace_init
+    from envoi_code.agents.setup import run_workspace_init
     from envoi_code.sandbox.base import Sandbox
     from envoi_code.utils.helpers import (
         decode_b64_to_text,
@@ -1667,7 +1667,6 @@ echo "[setup] codex install complete"
                     + "\n"
                 )
             setup_uploads: list[tuple[str, str]] = [
-                ("/tmp/upload/task_setup.sh", ctx.setup_script),
                 ("/sandbox/codex_client.py", CODEX_CLIENT_CONTENT),
                 (
                     f"{CODEX_HOME_DIR}/config.toml",
@@ -1706,7 +1705,6 @@ echo "[setup] codex install complete"
                     flush=True,
                 )
 
-            await run_task_setup(sandbox)
             await run_workspace_init(sandbox)
 
             # Install codex binary

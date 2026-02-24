@@ -1,7 +1,6 @@
 """Shared setup helpers for agent provisioning.
 
 Both CodexAgent and OpenCodeAgent call these in their setup() methods.
-run_task_setup() handles environment-specific fixture scripts.
 run_workspace_init() starts the envoi runtime and initializes the git repo.
 """
 
@@ -55,38 +54,6 @@ git config user.name "Agent"
 git commit --allow-empty -m "Initial empty commit" >/dev/null
 echo "[setup] workspace git repo ready"
 """
-
-
-async def run_task_setup(sandbox: Sandbox) -> None:
-    """Run the task-specific setup script if present in the sandbox."""
-    check = await sandbox.run(
-        "[ -f /tmp/upload/task_setup.sh ] && echo yes || echo no",
-        quiet=True,
-        timeout=10,
-    )
-    if "yes" not in check.stdout:
-        return
-
-    builtins.print("[setup] running task-specific setup", flush=True)
-
-    async def handle_line(line: str) -> None:
-        stripped = line.strip()
-        if not stripped:
-            return
-        if stripped.startswith("[setup]") or stripped.startswith("[fixtures]"):
-            builtins.print(stripped, flush=True)
-        elif stripped.startswith("ERROR:"):
-            builtins.print(f"[setup] {stripped}", flush=True)
-
-    result = await sandbox.run(
-        "bash /tmp/upload/task_setup.sh",
-        timeout=1800,
-        on_stdout_line=handle_line,
-        on_stderr_line=handle_line,
-    )
-    if result.exit_code != 0:
-        raise RuntimeError(f"Task setup failed (exit {result.exit_code})")
-    builtins.print("[setup] task-specific setup done", flush=True)
 
 
 async def run_workspace_init(sandbox: Sandbox) -> None:

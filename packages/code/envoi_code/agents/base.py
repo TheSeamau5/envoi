@@ -35,7 +35,6 @@ class AgentSetupContext(BaseModel):
 
     model: str
     credentials: AgentCredentials
-    setup_script: str = ""
     env_files: (
         tuple[dict[str, str], dict[str, str], dict[str, str]] | None
     ) = None

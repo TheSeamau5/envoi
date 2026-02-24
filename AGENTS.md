@@ -31,7 +31,7 @@ examples/
 │   └── environment/
 │       ├── main.py
 │       ├── Dockerfile
-│       ├── setup.sh
+│       ├── params.py
 │       └── tests/
 └── polish_notation/
     └── environment/
@@ -226,7 +226,7 @@ envoi code --example examples/c_compiler
 - Environment harness: `examples/<name>/environment/main.py`
 - Environment runner params (optional): `examples/<name>/environment/params.py`
 - Test suites: `examples/<name>/environment/tests/*.py`
-- Fixture installation: `examples/<name>/environment/setup.sh`
+- Fixture installation/provisioning: `examples/<name>/environment/Dockerfile`
 - Trace schema/capture: `packages/code/envoi_code/orchestrator.py` (main loop, `PartRecord`, `TurnRecord`)
 - Trace parquet serialization: `packages/code/envoi_code/utils/trace_parquet.py`
 - Agent integration: `packages/code/envoi_code/agents/codex.py`, `packages/code/envoi_code/agents/opencode.py`

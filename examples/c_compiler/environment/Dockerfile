@@ -16,4 +16,16 @@ RUN pip3 install --break-system-packages \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN mkdir -p /workspace /environment /sandbox /tmp/upload
+RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
+
+# Bake fixtures into the image to avoid per-run sync costs.
+RUN set -eux; \
+    git clone --depth 1 https://github.com/c-testsuite/c-testsuite.git /opt/tests/c-testsuite; \
+    git clone --depth 1 https://github.com/nlsandler/writing-a-c-compiler-tests.git /opt/tests/wacct; \
+    mkdir -p /opt/tests/llvm-test-suite; \
+    cd /opt/tests/llvm-test-suite; \
+    git init; \
+    git remote add origin https://github.com/llvm/llvm-test-suite.git; \
+    git config core.sparseCheckout true; \
+    echo "SingleSource/Regression/C/gcc-c-torture/execute/" > .git/info/sparse-checkout; \
+    git pull --depth 1 origin main

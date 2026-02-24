@@ -38,5 +38,5 @@ RUN pip3 install --break-system-packages \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Working directories expected by setup.sh
+# Working directories expected by the agent runtime
 RUN mkdir -p /workspace /environment /sandbox /tmp/upload
