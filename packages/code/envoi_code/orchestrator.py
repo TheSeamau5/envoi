@@ -122,6 +122,12 @@ LOGS_FLUSH_INTERVAL_SECONDS = max(
 LOGS_FLUSH_BATCH_SIZE = max(
     1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50"))
 )
+SHUTDOWN_GRACE_SECONDS = max(
+    0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "300"))
+)
+EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
+    0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "30"))
+)
 
 
 print = tprint
@@ -708,6 +714,7 @@ async def end_session(
     environment: str = "",
     task_params: dict[str, Any] | None = None,
     logs_parquet_uri: str | None = None,
+    final_commit_hint: str | None = None,
 ) -> None:
     print(f"[end] reason={reason} parts={part_count}")
 
@@ -715,7 +722,16 @@ async def end_session(
         print("[end] nothing to save (0 parts), skipping S3 upload")
         return
 
-    final_commit = await get_git_commit(sandbox)
+    final_commit = final_commit_hint
+    try:
+        commit_from_sandbox = await get_git_commit(sandbox)
+        if isinstance(commit_from_sandbox, str) and commit_from_sandbox:
+            final_commit = commit_from_sandbox
+    except Exception as commit_error:
+        print(
+            "[end] failed to read final git commit from sandbox: "
+            f"{commit_error}"
+        )
     winner = first_winning_commit(agent_trace.evaluations)
     bundle_export_commit = final_commit
     if winner is not None:
@@ -735,6 +751,18 @@ async def end_session(
         total_turns=turn_count,
         final_git_commit=final_commit,
     )
+    trace_parquet_uri = artifact_uri(agent_trace.trajectory_id, "trace.parquet")
+    agent_trace.artifacts = {
+        "trace_parquet": trace_parquet_uri,
+        "repo_bundle": None,
+        "logs_parquet": logs_parquet_uri,
+    }
+    # Persist session_end before any sandbox-dependent export steps.
+    if environment:
+        save_trace_parquet(
+            agent_trace.trajectory_id, agent_trace,
+            environment=environment, task_params=task_params,
+        )
 
     # Upload git bundle
     try:
@@ -776,7 +804,6 @@ async def end_session(
     except Exception as e:
         print(f"[bundle] failed: {e}")
 
-    trace_parquet_uri = artifact_uri(agent_trace.trajectory_id, "trace.parquet")
     agent_trace.artifacts = {
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": bundle_s3_uri,
@@ -1087,6 +1114,8 @@ class EvaluationScheduler:
         self.tasks.discard(done_task)
         try:
             done_task.result()
+        except asyncio.CancelledError:
+            return
         except Exception as task_error:
             print(f"[eval] unexpected task error: {task_error}")
 
@@ -1095,6 +1124,34 @@ class EvaluationScheduler:
             pending = list(self.tasks)
             if not pending:
                 break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def cancel_pending(self, *, reason: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        for evaluation in self.agent_trace.evaluations.values():
+            if evaluation.status == "queued":
+                evaluation.status = "failed"
+                if not evaluation.error:
+                    evaluation.error = reason
+                if evaluation.completed_at is None:
+                    evaluation.completed_at = now
+                if evaluation.passed is None:
+                    evaluation.passed = 0
+                if evaluation.failed is None:
+                    evaluation.failed = 0
+                if evaluation.total is None:
+                    evaluation.total = 0
+                self.emit_event(evaluation)
+                continue
+            if evaluation.status == "running":
+                evaluation.status = "failed"
+                if not evaluation.error:
+                    evaluation.error = reason
+
+        pending = list(self.tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
@@ -1992,12 +2049,14 @@ async def run_trajectory(
     prompt_text: str = ""
     turn_count = 0
     part_count = 0
+    latest_git_commit: str | None = None
     end_reason: str = "agent_error"
 
     try:
         # --- Create sandbox ---
+        sandbox_timeout_seconds = timeout_seconds + SHUTDOWN_GRACE_SECONDS
         config = SandboxConfig(
-            timeout=timeout_seconds,
+            timeout=sandbox_timeout_seconds,
             image_requirements=agent_cls.image_requirements(),
             environment_dockerfile=str(env_path / "Dockerfile"),
         )
@@ -2041,6 +2100,7 @@ async def run_trajectory(
                 trajectory_id=trajectory_id,
                 commit=resume_commit,
             )
+            latest_git_commit = resume_commit
 
         # --- Create session ---
         session_id = await agent_backend.create_session(
@@ -2060,6 +2120,9 @@ async def run_trajectory(
             agent_trace.session_end = None
             part_count = get_trace_last_part(agent_trace)
             turn_count = get_trace_last_turn(agent_trace)
+            trace_latest_commit = get_trace_latest_commit(agent_trace)
+            if isinstance(trace_latest_commit, str) and trace_latest_commit:
+                latest_git_commit = trace_latest_commit
             print(
                 f"[resume] continuing from part={part_count} "
                 f"turn={turn_count}"
@@ -2205,11 +2268,12 @@ async def run_trajectory(
             *,
             detection_point: str,
         ) -> bool:
-            nonlocal part_count, turn_count, end_reason
+            nonlocal part_count, turn_count, end_reason, latest_git_commit
             winner = first_winning_commit(agent_trace.evaluations)
             if winner is None:
                 return False
             winner_commit, winner_eval = winner
+            latest_git_commit = winner_commit
             latch_winner(
                 winner_commit,
                 winner_eval,
@@ -2317,6 +2381,8 @@ async def run_trajectory(
             streamed_parts = 0
             observed_parts = 0
             git_commit = await get_git_commit(sandbox)
+            if isinstance(git_commit, str) and git_commit:
+                latest_git_commit = git_commit
 
             turn_count += 1
             turn_record = TurnRecord(
@@ -2370,6 +2436,8 @@ async def run_trajectory(
             )
             part_count = stream_part_counter[0]
             git_commit = stream_git_commit_ref[0]
+            if isinstance(git_commit, str) and git_commit:
+                latest_git_commit = git_commit
             update_log_context(part=part_count, git_commit=git_commit)
 
             if turn_outcome is None:
@@ -2748,11 +2816,52 @@ async def run_trajectory(
                 await logs_flush_task
             except Exception:
                 pass
+        if agent_trace is not None:
+            trace_part_count = get_trace_last_part(agent_trace)
+            trace_turn_count = get_trace_last_turn(agent_trace)
+            if trace_part_count > part_count or trace_turn_count > turn_count:
+                print(
+                    "[end] syncing counters from trace "
+                    f"(parts {part_count}->{trace_part_count}, "
+                    f"turns {turn_count}->{trace_turn_count})"
+                )
+            part_count = max(part_count, trace_part_count)
+            turn_count = max(turn_count, trace_turn_count)
         if evaluator is not None:
             try:
-                await evaluator.wait()
-            except Exception:
-                pass
+                if EVALUATOR_DRAIN_TIMEOUT_SECONDS > 0:
+                    await asyncio.wait_for(
+                        evaluator.wait(),
+                        timeout=EVALUATOR_DRAIN_TIMEOUT_SECONDS,
+                    )
+                else:
+                    await evaluator.wait()
+            except TimeoutError:
+                print(
+                    "[eval] shutdown drain timed out after "
+                    f"{EVALUATOR_DRAIN_TIMEOUT_SECONDS}s; "
+                    "cancelling pending evaluations"
+                )
+                try:
+                    await evaluator.cancel_pending(
+                        reason=(
+                            "Cancelled during shutdown: "
+                            "evaluation drain timed out"
+                        ),
+                    )
+                except Exception:
+                    pass
+            except Exception as drain_error:
+                print(f"[eval] shutdown drain failed: {drain_error}")
+                try:
+                    await evaluator.cancel_pending(
+                        reason=(
+                            "Cancelled during shutdown: "
+                            "evaluation drain failed"
+                        ),
+                    )
+                except Exception:
+                    pass
         logs_parquet_uri = artifact_uri(trajectory_id, "logs.parquet")
         if sandbox is not None and agent_trace is not None:
             try:
@@ -2767,6 +2876,7 @@ async def run_trajectory(
                     if isinstance(winner_part, int):
                         part_count = winner_part
                         turn_count = get_trace_last_turn(agent_trace)
+                    latest_git_commit = winner_commit
                     save_trace_parquet(
                         trajectory_id, agent_trace,
                         environment=environment,
@@ -2784,13 +2894,25 @@ async def run_trajectory(
                             f"score={winner_eval.passed}/{winner_eval.total}"
                         )
                         end_reason = "solved"
-                try:
-                    sandbox_logs = await collect_sandbox_structured_logs(sandbox)
-                    if sandbox_logs:
-                        structured_logs.extend(sandbox_logs)
-                except Exception as log_error:
-                    print(f"[logs] failed collecting sandbox logs: {log_error}")
+            except Exception as winner_finalize_error:
+                print(
+                    "[eval] final winner projection failed: "
+                    f"{winner_finalize_error}"
+                )
+
+            try:
+                sandbox_logs = await collect_sandbox_structured_logs(sandbox)
+                if sandbox_logs:
+                    structured_logs.extend(sandbox_logs)
+            except Exception as log_error:
+                print(f"[logs] failed collecting sandbox logs: {log_error}")
+
+            try:
                 await flush_logs(force=True)
+            except Exception as flush_error:
+                print(f"[logs] pre-end flush failed: {flush_error}")
+
+            try:
                 await end_session(
                     sandbox,
                     agent_trace,
@@ -2800,6 +2922,7 @@ async def run_trajectory(
                     environment=environment,
                     task_params=task_params_loaded,
                     logs_parquet_uri=logs_parquet_uri,
+                    final_commit_hint=latest_git_commit,
                 )
             except Exception as end_err:
                 print(

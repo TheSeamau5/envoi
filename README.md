@@ -28,6 +28,7 @@ Default run behavior:
 - No max part cap unless `--max-parts` is set.
 - No max turn cap unless `--max-turns` is set.
 - Total run timeout defaults to `7200` seconds.
+- Sandbox lifetime adds a shutdown grace window (`SHUTDOWN_GRACE_SECONDS`, default `300`) so end-of-run artifacts can be finalized after timeout.
 - Each run writes `trace.parquet`, `repo.bundle`, and `logs.parquet` to S3.
 
 Set explicit run caps/timeouts:
@@ -57,6 +58,7 @@ envoi code --example examples/c_compiler --test-timeout-seconds 10800
 - `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
 - If `--test-timeout-seconds` is omitted, the default is `EVALUATION_TIMEOUT_SECONDS` (default `7200` seconds).
 - Commit evals run asynchronously on each git checkpoint; turn-end eval runs synchronously before the next turn prompt.
+- On shutdown, async commit eval drain is bounded (`EVALUATOR_DRAIN_TIMEOUT_SECONDS`, default `30`); remaining evals are cancelled.
 - Turn-end feedback includes the top 50 failed tests (priority: `basics -> c_testsuite -> wacct -> torture`) with full test source and failure message.
 - If environment params enable advisor model settings, turn-end feedback also includes an external assessment based on the task prompt, top failed tests, and current commit code snapshot.
 - Runs stop at the first winning commit (`passed == total`), and artifacts are projected to that winning commit.
@@ -105,6 +107,8 @@ Flush policy:
 Tuning:
 - `LOGS_FLUSH_INTERVAL_SECONDS` (default `5`)
 - `LOGS_FLUSH_BATCH_SIZE` (default `50`)
+- `SHUTDOWN_GRACE_SECONDS` (default `300`)
+- `EVALUATOR_DRAIN_TIMEOUT_SECONDS` (default `30`)
 
 Quick DuckDB query example:
 

@@ -189,6 +189,7 @@ Run defaults:
 - `--max-parts` omitted => no part cap.
 - `--max-turns` omitted => no turn cap.
 - `--timeout-seconds` default is 7200.
+- Sandbox lifetime is `timeout + SHUTDOWN_GRACE_SECONDS` (default grace `300`) to allow end-of-run finalization.
 
 Evaluation defaults and selectors:
 - If `--test` is omitted, evaluation runs all tests (`session.test()`).
@@ -202,6 +203,7 @@ Evaluation lifecycle:
 - At each turn end, a blocking workspace eval runs before the next turn prompt is built.
 - If any eval finds a winning commit (`passed == total`), the run latches to the first winner and stops.
 - On solved runs, trace/bundle outputs are projected to the winning commit (no post-win history retained).
+- On shutdown, async eval drain is bounded by `EVALUATOR_DRAIN_TIMEOUT_SECONDS` (default `30`); remaining queued/running evals are cancelled so closeout can complete.
 
 Deploy an environment locally:
 
