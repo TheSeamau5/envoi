@@ -12,8 +12,8 @@ manages the turn loop, resume logic, and artifact persistence.
 It has zero knowledge of specific sandbox providers.
 
 Usage (via CLI):
-    uv run trace run --task examples/tasks/c_compiler --env examples/environments/c_compiler
-    python3 runner.py --agent codex --max-parts 1000 --task-dir <path> --environment-dir <path>
+    envoi code --task examples/c_compiler/task --env examples/c_compiler/environment
+    envoi code --example examples/c_compiler --max-parts 1000
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ from envoi_code.agents.codex import CodexAgent
 from envoi_code.agents.opencode import OpenCodeAgent
 from envoi_code.models import (
     AgentTrace,
+    EnvoiCall,
     EvalEvent,
     EvalTestResult,
-    EnvoiCall,
     EvaluationRecord,
     PartRecord,
     SessionEnd,
@@ -54,6 +54,7 @@ from envoi_code.sandbox.base import Sandbox
 from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
     extract_leaf_paths,
+    normalize_test_paths,
     run_commit_evaluation,
     run_workspace_evaluation,
 )
@@ -611,6 +612,8 @@ class EvaluationScheduler:
         trajectory_id: str,
         environment: str,
         task_params: dict[str, Any] | None,
+        test_paths: list[str] | None = None,
+        test_timeout_seconds: int | None = None,
         should_stop: Callable[[], bool] | None = None,
         on_winner: (
             Callable[[str, EvaluationRecord], Awaitable[None] | None]
@@ -622,6 +625,8 @@ class EvaluationScheduler:
         self.trajectory_id = trajectory_id
         self.environment = environment
         self.task_params = task_params
+        self.test_paths = normalize_test_paths(test_paths)
+        self.test_timeout_seconds = test_timeout_seconds
         self.should_stop = should_stop
         self.on_winner = on_winner
         self.tasks: set[asyncio.Task[None]] = set()
@@ -846,6 +851,8 @@ class EvaluationScheduler:
                 run_payload = await run_commit_evaluation(
                     sandbox=self.sandbox,
                     commit=commit,
+                    test_paths=self.test_paths,
+                    timeout_seconds=self.test_timeout_seconds,
                 )
                 self.apply_result(evaluation, run_payload)
             except Exception as eval_error:
@@ -1132,6 +1139,8 @@ async def run_trajectory(
     model: str | None = None,
     max_parts: int = 1000,
     max_turns: int | None = None,
+    test: list[str] | None = None,
+    test_timeout_seconds: int | None = None,
     message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 14400,
     trajectory_id: str | None = None,
@@ -1147,6 +1156,9 @@ async def run_trajectory(
         trajectory_id = str(uuid.uuid4())
     if max_turns is not None and max_turns <= 0:
         max_turns = None
+    if test_timeout_seconds is not None and test_timeout_seconds <= 0:
+        raise ValueError("--test-timeout-seconds must be > 0")
+    selected_test_paths = normalize_test_paths(test)
     agent_name = (agent or DEFAULT_AGENT).strip().lower()
 
     task_path = Path(task_dir)
@@ -1155,6 +1167,8 @@ async def run_trajectory(
     prompt, task_params_loaded = await load_task(task_path, lang=task_lang)
     if task_params:
         task_params_loaded.update(task_params)
+    task_params_loaded["_eval_test_paths"] = selected_test_paths
+    task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     env_files = load_environment_files(env_path)
     setup_script_file = env_path / "setup.sh"
     setup_script = (
@@ -1190,6 +1204,12 @@ async def run_trajectory(
         f"max_parts={max_parts} max_turns={max_turns} "
         f"timeout={timeout_seconds}s "
         f"message_timeout={message_timeout_seconds}s"
+    )
+    test_selector = ",".join(selected_test_paths) if selected_test_paths else "all"
+    print(
+        f"tests={test_selector} "
+        f"test_timeout={test_timeout_seconds or 'default'}s "
+        f"eval_concurrency={EVALUATION_CONCURRENCY}"
     )
     if existing_trace is not None:
         print(
@@ -1318,6 +1338,27 @@ async def run_trajectory(
                 "running without completion tracking"
             )
 
+        if selected_test_paths and required_test_paths:
+            discovered = set(required_test_paths)
+            invalid_paths: list[str] = []
+            for path in selected_test_paths:
+                if path in discovered:
+                    continue
+                has_child = any(
+                    candidate.startswith(path + "/")
+                    for candidate in required_test_paths
+                )
+                if not has_child:
+                    invalid_paths.append(path)
+            if invalid_paths:
+                available_preview = ", ".join(required_test_paths[:20])
+                raise ValueError(
+                    "Unknown --test path(s): "
+                    + ", ".join(invalid_paths)
+                    + ". Available paths include: "
+                    + available_preview
+                )
+
         # --- Main loop ---
         tracker = SolveTracker(required_test_paths)
         for part_record in agent_trace.parts:
@@ -1380,6 +1421,8 @@ async def run_trajectory(
             trajectory_id=trajectory_id,
             environment=environment,
             task_params=task_params_loaded,
+            test_paths=selected_test_paths,
+            test_timeout_seconds=test_timeout_seconds,
             should_stop=winner_latched,
             on_winner=on_async_winner,
         )
@@ -1683,6 +1726,8 @@ async def run_trajectory(
             try:
                 turn_end_eval_payload = await run_workspace_evaluation(
                     sandbox=sandbox,
+                    test_paths=selected_test_paths,
+                    timeout_seconds=test_timeout_seconds,
                 )
                 turn_end_eval_feedback = (
                     format_turn_end_evaluation_feedback(
@@ -1921,6 +1966,25 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-parts", type=int, default=1000)
     parser.add_argument("--max-turns", type=int, default=None)
+    parser.add_argument(
+        "--test",
+        action="append",
+        default=None,
+        help=(
+            "Optional test path to run during evaluation. "
+            "Repeat to target multiple paths. "
+            "If omitted, all tests run."
+        ),
+    )
+    parser.add_argument(
+        "--test-timeout-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Timeout for each commit/turn-end evaluation run. "
+            "Defaults to EVALUATION_TIMEOUT_SECONDS."
+        ),
+    )
     parser.add_argument("--sandbox-provider", default="modal")
     parser.add_argument("--trajectory-id", default=None)
     parser.add_argument(
@@ -1953,6 +2017,8 @@ if __name__ == "__main__":
             model=args.model,
             max_parts=args.max_parts,
             max_turns=args.max_turns,
+            test=args.test,
+            test_timeout_seconds=args.test_timeout_seconds,
             message_timeout_seconds=args.message_timeout_seconds,
             trajectory_id=args.trajectory_id,
             codex_auth_json_b64=codex_auth_b64,

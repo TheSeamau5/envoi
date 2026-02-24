@@ -15,19 +15,41 @@ API-backed evaluation environments for AI coding agents.
 ```bash
 uv sync
 cp .env.example .env  # fill in credentials
-uv run envoi --help
+envoi --help
 ```
 
 ## Run an agent trajectory
 
 ```bash
-uv run envoi code run --example examples/c_compiler
+envoi code --example examples/c_compiler
 ```
+
+Run selected test paths instead of all tests:
+
+```bash
+envoi code --example examples/c_compiler --test basics
+envoi code --example examples/c_compiler --test basics --test wacct/chapter_1
+```
+
+Override evaluation timeout (commit evals + turn-end evals):
+
+```bash
+envoi code --example examples/c_compiler --test-timeout-seconds 10800
+```
+
+## Evaluation behavior
+
+- If `--test` is omitted, evaluations run all tests (`session.test()`).
+- Repeat `--test` to evaluate one or more specific test paths.
+- `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
+- If `--test-timeout-seconds` is omitted, the default is `EVALUATION_TIMEOUT_SECONDS` (default `7200` seconds).
+- Commit evals run asynchronously on each git checkpoint; turn-end eval runs synchronously before the next turn prompt.
+- Runs stop at the first winning commit (`passed == total`), and artifacts are projected to that winning commit.
 
 ## Deploy an environment locally
 
 ```bash
-uv run envoi deploy examples/c_compiler/environment
+envoi deploy examples/c_compiler/environment
 ```
 
 ## Examples

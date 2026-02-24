@@ -65,7 +65,7 @@ examples/
 
 ```
 envoi CLI (packages/cli/envoi_cli/main.py)
-  └─ envoi code run
+  └─ envoi code
        └─ modal run sandbox/modal/deploy.py
             ├─ Orchestrator (packages/code/envoi_code/orchestrator.py)
             ├─ AgentBackend (packages/code/envoi_code/agents/base.py)
@@ -174,7 +174,21 @@ envoi code --agent opencode --model opencode/gpt-5-nano --task <path> --env <pat
 envoi code --sandbox e2b --task <path> --env <path>
 envoi code --preemptible --task <path> --env <path>
 envoi code --detach --task <path> --env <path>
+envoi code --test basics --task <path> --env <path>
+envoi code --test basics --test wacct/chapter_1 --task <path> --env <path>
+envoi code --test-timeout-seconds 10800 --task <path> --env <path>
 ```
+
+Evaluation defaults and selectors:
+- If `--test` is omitted, evaluation runs all tests (`session.test()`).
+- Repeat `--test` to evaluate multiple test paths.
+- `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
+
+Evaluation lifecycle:
+- On each file-changing part/commit, commit eval is queued asynchronously.
+- At each turn end, a blocking workspace eval runs before the next turn prompt is built.
+- If any eval finds a winning commit (`passed == total`), the run latches to the first winner and stops.
+- On solved runs, trace/bundle outputs are projected to the winning commit (no post-win history retained).
 
 Deploy an environment locally:
 
@@ -195,7 +209,7 @@ envoi code graph <trajectory_id> --part 42 --checkout-dest ./repo_at_42
 ```bash
 uv sync
 cp .env.example .env  # fill in credentials
-envoi code --example examples/c_compiler --max-turns 50
+envoi code --example examples/c_compiler --max-parts 1000
 ```
 
 ## Where To Edit What
@@ -215,5 +229,6 @@ envoi code --example examples/c_compiler --max-turns 50
 
 - A turn may produce no new commit when files did not change.
 - `repo.bundle` is uploaded at end-of-run; if the run dies early, bundle may be missing.
+- On solved runs, `trace.parquet` is projected to the first winning commit part (no post-win parts are kept).
 - Full offline evaluation requires heavy fixtures at `/opt/tests/...`.
 - `--task` and `--env` are required path arguments — there are no defaults (unless using `--example`).

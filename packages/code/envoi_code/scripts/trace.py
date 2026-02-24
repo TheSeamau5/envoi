@@ -9,9 +9,9 @@ Graph mode (subcommand): downloads trace + bundle from S3 and generates
 suite-level analysis graphs.
 
 Usage:
-    envoi-trace --task examples/tasks/c_compiler --env examples/environments/c_compiler
-    envoi-trace --agent codex --max-parts 1000 --task <path> --env <path>
-    envoi-trace graph <trajectory_id>
+    envoi code --task examples/c_compiler/task --env examples/c_compiler/environment
+    envoi code --agent codex --max-parts 1000 --task <path> --env <path>
+    envoi code graph <trajectory_id>
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import json
 import os
 import subprocess
 import sys
@@ -38,7 +39,9 @@ def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
 
 
-def common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str]:
+def common_runner_args(
+    args: argparse.Namespace, trajectory_id: str, *, modal_mode: bool = False,
+) -> list[str]:
     """Build runner.py argument list shared by both modal and direct execution."""
     parts: list[str] = [
         "--agent",
@@ -54,6 +57,19 @@ def common_runner_args(args: argparse.Namespace, trajectory_id: str) -> list[str
     ]
     if args.max_turns is not None:
         parts.extend(["--max-turns", str(args.max_turns)])
+    if modal_mode:
+        if args.test:
+            parts.extend(
+                [
+                    "--test-json",
+                    json.dumps(args.test, ensure_ascii=False),
+                ],
+            )
+    else:
+        for test_path in (args.test or []):
+            parts.extend(["--test", test_path])
+    if args.test_timeout_seconds is not None:
+        parts.extend(["--test-timeout-seconds", str(args.test_timeout_seconds)])
     if args.model:
         parts.extend(["--model", args.model])
     if args.message_timeout_seconds is not None:
@@ -71,7 +87,7 @@ def build_modal_command(args: argparse.Namespace, trajectory_id: str) -> list[st
         command.append("--detach")
     deploy_path = str(Path(__file__).resolve().parent.parent / "sandbox" / "modal" / "deploy.py")
     command.append(deploy_path)
-    command.extend(common_runner_args(args, trajectory_id))
+    command.extend(common_runner_args(args, trajectory_id, modal_mode=True))
     if args.non_preemptible:
         command.append("--non-preemptible")
     return command
@@ -130,6 +146,25 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Optional turn budget. Stops after this many turns.",
+    )
+    parser.add_argument(
+        "--test",
+        action="append",
+        default=None,
+        help=(
+            "Optional test path to run during evaluation. "
+            "Repeat to target multiple paths. "
+            "If omitted, all tests run."
+        ),
+    )
+    parser.add_argument(
+        "--test-timeout-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Timeout for each commit/turn-end evaluation run. "
+            "Defaults to EVALUATION_TIMEOUT_SECONDS."
+        ),
     )
     parser.add_argument("--task", default=None, help="Path to task directory.")
     parser.add_argument("--env", default=None, help="Path to environment directory.")
@@ -196,9 +231,16 @@ def run_command(args: argparse.Namespace) -> None:
     print(f"TRAJECTORY_ID: {trajectory_id}", flush=True)
     print(f"TRACE_S3_URI: {trace_uri}", flush=True)
     print(f"BUNDLE_S3_URI: {bundle_uri}", flush=True)
+    test_timeout_label = (
+        f"{args.test_timeout_seconds}s"
+        if args.test_timeout_seconds is not None
+        else "default"
+    )
     print(
         f"agent={args.agent} max_parts={args.max_parts} "
         f"max_turns={args.max_turns} "
+        f"tests={(','.join(args.test) if args.test else 'all')} "
+        f"test_timeout={test_timeout_label} "
         f"detach={args.detach} non_preemptible={args.non_preemptible}",
         flush=True,
     )

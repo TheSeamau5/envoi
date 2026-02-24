@@ -1,9 +1,7 @@
 """Concurrent commit evaluation against envoi.
 
 After a part changes files and creates a git checkpoint, this module evaluates
-the commit by running the full environment test suite via the envoi server.
-Uses bounded concurrency to evaluate multiple commits without overwhelming
-the sandbox.
+that commit by running environment tests via the envoi server.
 """
 
 from __future__ import annotations
@@ -22,17 +20,40 @@ print = tprint
 EVALUATION_CONCURRENCY = max(
     1, int(os.environ.get("EVALUATION_CONCURRENCY", "1"))
 )
-EVALUATION_TIMEOUT_SECONDS = max(
+EVALUATION_DEFAULT_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("EVALUATION_TIMEOUT_SECONDS", "7200"))
 )
 EVALUATION_ENVOI_URL = (
     os.environ.get("EVALUATION_ENVOI_URL", "http://localhost:8000").strip()
     or "http://localhost:8000"
 )
-# Temporary debug default: run smoke suite instead of full-run.
-# Set EVALUATION_TEST_PATH="" to force full-run session.test().
-EVALUATION_TEST_PATH = os.environ.get("EVALUATION_TEST_PATH", "basics").strip()
 EVALUATION_JSON_MARKER = "__ENVOI_EVAL_JSON__"
+
+
+def normalize_test_paths(
+    test_paths: list[str] | None,
+) -> list[str]:
+    if not test_paths:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in test_paths:
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def resolve_evaluation_timeout(
+    timeout_seconds: int | None,
+) -> int:
+    if isinstance(timeout_seconds, int) and timeout_seconds > 0:
+        return timeout_seconds
+    return EVALUATION_DEFAULT_TIMEOUT_SECONDS
 
 
 def extract_leaf_paths(schema: Any) -> list[str]:
@@ -65,7 +86,8 @@ def _build_evaluation_python_script(
     *,
     repo_dir_json: str,
     envoi_url_json: str,
-    eval_test_path_json: str,
+    eval_test_paths_json: str,
+    eval_timeout_seconds_json: str,
     marker_json: str,
 ) -> str:
     return (
@@ -76,7 +98,8 @@ def _build_evaluation_python_script(
         "import envoi\n"
         f"repo_dir = {repo_dir_json}\n"
         f"envoi_url = {envoi_url_json}\n"
-        f"eval_test_path = {eval_test_path_json}\n"
+        f"eval_test_paths = {eval_test_paths_json}\n"
+        f"eval_timeout_seconds = int({eval_timeout_seconds_json})\n"
         f"marker = {marker_json}\n"
         "MAX_MESSAGE_CHARS = 320\n"
         "MAX_TAIL_CHARS = 1200\n"
@@ -219,7 +242,9 @@ def _build_evaluation_python_script(
         "                status = 'passed' if passed_value > 0 else 'failed'\n"
         "            else:\n"
         "                status = 'failed'\n"
-        "        failure_type = item.get('failure_type') if isinstance(item.get('failure_type'), str) else None\n"
+        "        failure_type = item.get('failure_type')\n"
+        "        if not isinstance(failure_type, str):\n"
+        "            failure_type = None\n"
         "        if failure_type is None and status in {'error', 'timeout'}:\n"
         "            failure_type = status\n"
         "        if failure_type is None and status == 'failed':\n"
@@ -322,15 +347,45 @@ def _build_evaluation_python_script(
         "    normalized_default_suite = _normalize_suite_path(default_suite)\n"
         "    return {\n"
         "        normalized_default_suite: {\n"
-            "            'ok': failed == 0 and total > 0,\n"
-            "            'passed': int(passed),\n"
+        "            'ok': failed == 0 and total > 0,\n"
+        "            'passed': int(passed),\n"
         "            'failed': int(failed),\n"
         "            'total': int(total),\n"
         "            'error': None,\n"
         "        }\n"
         "    }\n"
+        "def _merge_suite_results(dst, src):\n"
+        "    for suite, row in src.items():\n"
+        "        if not isinstance(suite, str) or not isinstance(row, dict):\n"
+        "            continue\n"
+        "        if suite not in dst:\n"
+        "            dst[suite] = {\n"
+        "                'ok': bool(row.get('ok', True)),\n"
+        "                'passed': int(row.get('passed', 0) or 0),\n"
+        "                'failed': int(row.get('failed', 0) or 0),\n"
+        "                'total': int(row.get('total', 0) or 0),\n"
+        "                'error': (\n"
+        "                    row.get('error')\n"
+        "                    if isinstance(row.get('error'), str)\n"
+        "                    else None\n"
+        "                ),\n"
+        "            }\n"
+        "            continue\n"
+        "        cur = dst[suite]\n"
+        "        cur['passed'] = int(cur.get('passed', 0) or 0) + int(row.get('passed', 0) or 0)\n"
+        "        cur['failed'] = int(cur.get('failed', 0) or 0) + int(row.get('failed', 0) or 0)\n"
+        "        cur['total'] = int(cur.get('total', 0) or 0) + int(row.get('total', 0) or 0)\n"
+        "        cur['ok'] = bool(cur.get('ok', True)) and bool(row.get('ok', True))\n"
+        "        if not isinstance(cur.get('error'), str):\n"
+        "            err = row.get('error')\n"
+        "            cur['error'] = err if isinstance(err, str) else None\n"
         "async def _main() -> None:\n"
         "    started_at = time.monotonic()\n"
+        "    selected_paths = [\n"
+        "        path.strip()\n"
+        "        for path in eval_test_paths\n"
+        "        if isinstance(path, str) and path.strip()\n"
+        "    ]\n"
         "    payload = {\n"
         "        'duration_ms': 0,\n"
         "        'passed': 0,\n"
@@ -338,35 +393,54 @@ def _build_evaluation_python_script(
         "        'total': 0,\n"
         "        'suite_results': {},\n"
         "        'tests': [],\n"
+        "        'selected_test_paths': selected_paths,\n"
         "        'error': None,\n"
         "    }\n"
         "    try:\n"
         "        docs = envoi.Documents(repo_dir)\n"
         "        async with await envoi.connect_session(\n"
         "            envoi_url,\n"
-        "            connect_timeout_seconds=7200,\n"
+        "            connect_timeout_seconds=eval_timeout_seconds,\n"
         "            submission=docs,\n"
-        "            session_timeout_seconds=7200,\n"
+        "            session_timeout_seconds=eval_timeout_seconds,\n"
         "        ) as session:\n"
-        "            result = (\n"
-        "                await session.test(eval_test_path)\n"
-        "                if eval_test_path\n"
-        "                else await session.test()\n"
-        "            )\n"
-        "            passed, failed, total = _collect_totals(result)\n"
-        "            payload['passed'] = int(passed)\n"
-        "            payload['failed'] = int(failed)\n"
-        "            payload['total'] = int(total)\n"
-        "            suite_key = eval_test_path if eval_test_path else 'all'\n"
-        "            extracted_tests = _dedupe_tests(_extract_tests(result, suite_key))\n"
-        "            payload['tests'] = extracted_tests\n"
-        "            payload['suite_results'] = _suite_rollup(\n"
-        "                extracted_tests,\n"
-        "                suite_key,\n"
-        "                int(passed),\n"
-        "                int(failed),\n"
-        "                int(total),\n"
-        "            )\n"
+        "            if selected_paths:\n"
+        "                for test_path in selected_paths:\n"
+        "                    result = await session.test(test_path)\n"
+        "                    passed, failed, total = _collect_totals(result)\n"
+        "                    payload['passed'] += int(passed)\n"
+        "                    payload['failed'] += int(failed)\n"
+        "                    payload['total'] += int(total)\n"
+        "                    suite_key = _normalize_suite_path(test_path)\n"
+        "                    extracted_tests = _dedupe_tests(_extract_tests(result, suite_key))\n"
+        "                    payload['tests'].extend(extracted_tests)\n"
+        "                    _merge_suite_results(\n"
+        "                        payload['suite_results'],\n"
+        "                        _suite_rollup(\n"
+        "                            extracted_tests,\n"
+        "                            suite_key,\n"
+        "                            int(passed),\n"
+        "                            int(failed),\n"
+        "                            int(total),\n"
+        "                        ),\n"
+        "                    )\n"
+        "                payload['tests'] = _dedupe_tests(payload['tests'])\n"
+        "            else:\n"
+        "                result = await session.test()\n"
+        "                passed, failed, total = _collect_totals(result)\n"
+        "                payload['passed'] = int(passed)\n"
+        "                payload['failed'] = int(failed)\n"
+        "                payload['total'] = int(total)\n"
+        "                suite_key = 'all'\n"
+        "                extracted_tests = _dedupe_tests(_extract_tests(result, suite_key))\n"
+        "                payload['tests'] = extracted_tests\n"
+        "                payload['suite_results'] = _suite_rollup(\n"
+        "                    extracted_tests,\n"
+        "                    suite_key,\n"
+        "                    int(passed),\n"
+        "                    int(failed),\n"
+        "                    int(total),\n"
+        "                )\n"
         "    except Exception as error:  # noqa: BLE001\n"
         "        msg = str(error).strip()\n"
         "        payload['error'] = msg if msg else type(error).__name__\n"
@@ -382,17 +456,26 @@ def build_commit_evaluation_command(
     *,
     commit: str,
     eval_repo_dir: str,
+    test_paths: list[str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> str:
     repo_dir_json = json.dumps(eval_repo_dir)
     envoi_url_json = json.dumps(EVALUATION_ENVOI_URL)
-    eval_test_path_json = json.dumps(EVALUATION_TEST_PATH)
+    eval_test_paths_json = json.dumps(
+        normalize_test_paths(test_paths),
+        ensure_ascii=False,
+    )
+    eval_timeout_seconds_json = json.dumps(
+        resolve_evaluation_timeout(timeout_seconds)
+    )
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
     quoted_commit = shlex.quote(commit)
     quoted_repo_dir = shlex.quote(eval_repo_dir)
     python_script = _build_evaluation_python_script(
         repo_dir_json=repo_dir_json,
         envoi_url_json=envoi_url_json,
-        eval_test_path_json=eval_test_path_json,
+        eval_test_paths_json=eval_test_paths_json,
+        eval_timeout_seconds_json=eval_timeout_seconds_json,
         marker_json=marker_json,
     )
     return (
@@ -415,16 +498,25 @@ def build_commit_evaluation_command(
 def build_workspace_evaluation_command(
     *,
     repo_dir: str = "/workspace",
+    test_paths: list[str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> str:
     repo_dir_json = json.dumps(repo_dir)
     envoi_url_json = json.dumps(EVALUATION_ENVOI_URL)
-    eval_test_path_json = json.dumps(EVALUATION_TEST_PATH)
+    eval_test_paths_json = json.dumps(
+        normalize_test_paths(test_paths),
+        ensure_ascii=False,
+    )
+    eval_timeout_seconds_json = json.dumps(
+        resolve_evaluation_timeout(timeout_seconds)
+    )
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
     quoted_repo_dir = shlex.quote(repo_dir)
     python_script = _build_evaluation_python_script(
         repo_dir_json=repo_dir_json,
         envoi_url_json=envoi_url_json,
-        eval_test_path_json=eval_test_path_json,
+        eval_test_paths_json=eval_test_paths_json,
+        eval_timeout_seconds_json=eval_timeout_seconds_json,
         marker_json=marker_json,
     )
     return (
@@ -457,18 +549,23 @@ async def run_commit_evaluation(
     *,
     sandbox: Sandbox,
     commit: str,
+    test_paths: list[str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     eval_repo_dir = (
         f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
     )
+    resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
     command = build_commit_evaluation_command(
         commit=commit,
         eval_repo_dir=eval_repo_dir,
+        test_paths=test_paths,
+        timeout_seconds=resolved_timeout,
     )
     exit_code, stdout, stderr = (
         await sandbox.run(
             command,
-            timeout=EVALUATION_TIMEOUT_SECONDS,
+            timeout=resolved_timeout,
             quiet=True,
         )
     ).unpack()
@@ -486,14 +583,19 @@ async def run_workspace_evaluation(
     *,
     sandbox: Sandbox,
     repo_dir: str = "/workspace",
+    test_paths: list[str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
+    resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
     command = build_workspace_evaluation_command(
         repo_dir=repo_dir,
+        test_paths=test_paths,
+        timeout_seconds=resolved_timeout,
     )
     exit_code, stdout, stderr = (
         await sandbox.run(
             command,
-            timeout=EVALUATION_TIMEOUT_SECONDS,
+            timeout=resolved_timeout,
             quiet=True,
         )
     ).unpack()
