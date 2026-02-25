@@ -29,6 +29,7 @@ import inspect
 import json
 import os
 import shlex
+import sys
 import time
 import traceback
 import uuid
@@ -155,7 +156,16 @@ def load_python_file_module(
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous_module = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous_module is not None:
+            sys.modules[module_name] = previous_module
+        else:
+            sys.modules.pop(module_name, None)
+        raise
     return module
 
 

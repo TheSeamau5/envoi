@@ -45,19 +45,25 @@ class ModalSandbox:
     @staticmethod
     def build_image(config: SandboxConfig) -> modal.Image:
         """Build a sandbox image from Dockerfile + agent requirements."""
-        dockerfile_path = config.environment_dockerfile
-        if config.environment_docker_context_dir:
-            try:
-                dockerfile_path = str(
-                    Path(config.environment_dockerfile).resolve().relative_to(
-                        Path(config.environment_docker_context_dir).resolve(),
-                    ),
-                )
-            except Exception:
-                dockerfile_path = config.environment_dockerfile
+        context_dir = (
+            Path(config.environment_docker_context_dir).resolve()
+            if config.environment_docker_context_dir
+            else None
+        )
+        dockerfile_path = Path(config.environment_dockerfile)
+        if not dockerfile_path.exists() and not dockerfile_path.is_absolute():
+            if context_dir is not None:
+                context_relative_path = context_dir / dockerfile_path
+                if context_relative_path.exists():
+                    dockerfile_path = context_relative_path
+        dockerfile_path = dockerfile_path.resolve()
+        if not dockerfile_path.exists():
+            raise FileNotFoundError(
+                f"Environment Dockerfile not found: {dockerfile_path}",
+            )
         image = modal.Image.from_dockerfile(
-            dockerfile_path,
-            context_dir=config.environment_docker_context_dir,
+            str(dockerfile_path),
+            context_dir=str(context_dir) if context_dir is not None else None,
             build_args=config.environment_docker_build_args,
             add_python="3.12",
         )
