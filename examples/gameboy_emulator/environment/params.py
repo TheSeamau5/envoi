@@ -25,6 +25,7 @@ def params() -> dict[str, object]:
     return {
         "advisor_model": "@anthropic/claude-opus-4.6",
         "advisor_model_thinking_level": "high",
+        "advisor_max_output_tokens": 128000,
         "failed_tests_feedback_limit": 50,
     }
 

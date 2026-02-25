@@ -119,7 +119,7 @@ FAILED_TEST_FEEDBACK_LIMIT = max(
     1, int(os.environ.get("FAILED_TEST_FEEDBACK_LIMIT", "50"))
 )
 ADVISOR_TIMEOUT_SECONDS = max(
-    30, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "180"))
+    0, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "0"))
 )
 LOGS_FLUSH_INTERVAL_SECONDS = max(
     1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SECONDS", "5"))
@@ -348,6 +348,19 @@ def resolve_failed_tests_feedback_limit(value: Any) -> int:
         if raw.isdigit():
             return max(1, int(raw))
     return FAILED_TEST_FEEDBACK_LIMIT
+
+
+def resolve_advisor_max_output_tokens(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            parsed = int(raw)
+            return parsed if parsed > 0 else None
+    return None
 
 
 def resolve_suite_feedback_priority(value: Any) -> tuple[str, ...]:
@@ -1650,6 +1663,7 @@ async def build_advisor_assessment(
     payload: dict[str, Any],
     advisor_model: str,
     advisor_model_thinking_level: str,
+    advisor_max_output_tokens: int | None,
     failed_tests_limit: int,
 ) -> str:
     payload_for_feedback = enrich_evaluation_payload(
@@ -1702,6 +1716,7 @@ async def build_advisor_assessment(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         timeout_seconds=ADVISOR_TIMEOUT_SECONDS,
+        max_output_tokens=advisor_max_output_tokens,
     )
     print(
         "[advisor] assessment_ready "
@@ -2185,6 +2200,9 @@ async def run_trajectory(
         )
         or "high",
     )
+    advisor_max_output_tokens = resolve_advisor_max_output_tokens(
+        environment_params.get("advisor_max_output_tokens"),
+    )
     failed_tests_feedback_limit = resolve_failed_tests_feedback_limit(
         environment_params.get("failed_tests_feedback_limit"),
     )
@@ -2323,6 +2341,7 @@ async def run_trajectory(
         f"eval_concurrency={EVALUATION_CONCURRENCY} "
         f"advisor_model={normalized_advisor_model or 'none'} "
         f"advisor_thinking={normalized_advisor_thinking_level} "
+        f"advisor_max_tokens={advisor_max_output_tokens or 'default'} "
         "suite_priority="
         f"{format_suite_feedback_priority(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
         f"failed_tests_limit={failed_tests_feedback_limit}"
@@ -2960,6 +2979,7 @@ async def run_trajectory(
                             advisor_model_thinking_level=(
                                 normalized_advisor_thinking_level
                             ),
+                            advisor_max_output_tokens=advisor_max_output_tokens,
                             failed_tests_limit=failed_tests_feedback_limit,
                         )
                         print(

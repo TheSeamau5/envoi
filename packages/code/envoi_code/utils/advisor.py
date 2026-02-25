@@ -26,6 +26,10 @@ ADVISOR_LOG_RESPONSE_PREVIEW_CHARS = max(
     0,
     int(os.environ.get("ADVISOR_LOG_RESPONSE_PREVIEW_CHARS", "240")),
 )
+ADVISOR_MAX_OUTPUT_TOKENS = max(
+    1,
+    int(os.environ.get("ADVISOR_MAX_OUTPUT_TOKENS", "128000")),
+)
 
 
 def normalize_advisor_model(model_spec: str) -> str:
@@ -184,8 +188,8 @@ async def request_anthropic_advisor(
     thinking_level: str,
     system_prompt: str,
     user_prompt: str,
-    timeout_seconds: int = 180,
-    max_output_tokens: int = 2200,
+    timeout_seconds: int | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not api_key:
@@ -200,10 +204,20 @@ async def request_anthropic_advisor(
 
     normalized_model = normalize_advisor_model(model_spec)
     normalized_effort = normalize_thinking_level(thinking_level)
+    effective_max_output_tokens = (
+        max_output_tokens
+        if isinstance(max_output_tokens, int) and max_output_tokens > 0
+        else ADVISOR_MAX_OUTPUT_TOKENS
+    )
+    request_timeout: float | None = (
+        float(timeout_seconds)
+        if isinstance(timeout_seconds, int) and timeout_seconds > 0
+        else None
+    )
 
     request_payload: dict[str, Any] = {
         "model": normalized_model,
-        "max_tokens": max_output_tokens,
+        "max_tokens": effective_max_output_tokens,
         "system": system_prompt,
         "messages": [{"role": "user", "content": user_prompt}],
         "thinking": {"type": "adaptive"},
@@ -212,7 +226,8 @@ async def request_anthropic_advisor(
     print(
         "[advisor] request_setup "
         f"model={normalized_model} thinking={normalized_effort} "
-        f"max_tokens={max_output_tokens} timeout_seconds={timeout_seconds} "
+        f"max_tokens={effective_max_output_tokens} "
+        f"timeout_seconds={request_timeout if request_timeout is not None else 'none'} "
         f"system_chars={len(system_prompt)} user_chars={len(user_prompt)} "
         f"max_attempts={ADVISOR_RETRY_ATTEMPTS}"
     )
@@ -230,12 +245,19 @@ async def request_anthropic_advisor(
             print(
                 "[advisor] request_attempt "
                 f"attempt={attempt}/{ADVISOR_RETRY_ATTEMPTS} "
-                f"mode={payload_mode} payload_keys={sorted(payload_for_attempt)}"
+                f"mode={payload_mode} stream=True payload_keys={sorted(payload_for_attempt)}"
             )
             started_at = time.monotonic()
             try:
-                async with asyncio.timeout(timeout_seconds):
-                    response = await client.messages.create(**payload_for_attempt)
+                async with client.messages.stream(
+                    **payload_for_attempt,
+                    timeout=request_timeout,
+                ) as stream:
+                    text_chunks: list[str] = []
+                    async for text_delta in stream.text_stream:
+                        if text_delta:
+                            text_chunks.append(text_delta)
+                    response = await stream.get_final_message()
                 elapsed_ms = int((time.monotonic() - started_at) * 1000)
                 response_summary = summarize_anthropic_response(response)
                 print(
@@ -244,7 +266,9 @@ async def request_anthropic_advisor(
                     f"summary={compact_json(response_summary)}"
                 )
 
-                text = extract_anthropic_message_text(response)
+                text = "".join(text_chunks).strip()
+                if not text:
+                    text = extract_anthropic_message_text(response)
                 if text.strip():
                     print(
                         "[advisor] response_text "
