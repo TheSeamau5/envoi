@@ -15,7 +15,9 @@ in real time. Each event is a JSON line prefixed with "TRACE_EVENT " on stderr.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -38,6 +40,15 @@ MEANINGFUL_PART_TYPES: set[str] = {
 }
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
+ALLOWED_IMAGE_SUFFIXES: set[str] = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+}
+MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
 
 
 class TraceEvent(BaseModel):
@@ -105,6 +116,176 @@ def parse_int_maybe(value: Any) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def extract_image_path_candidates(prompt_text: str) -> list[str]:
+    candidates: list[str] = []
+    patterns = (
+        re.compile(r"<image>\s*([^<]+?)\s*</image>", re.IGNORECASE),
+        re.compile(r"\[\[image:(.+?)\]\]", re.IGNORECASE),
+        re.compile(r"!\[[^\]]*]\(([^)]+)\)"),
+    )
+    for pattern in patterns:
+        for match in pattern.findall(prompt_text):
+            raw = match.strip()
+            if raw:
+                candidates.append(raw)
+    plain_path_pattern = re.compile(
+        r"(?:(?:~|/|\.{1,2}/)[^\s'\"<>]+?\.(?:png|jpg|jpeg|webp|gif|bmp))",
+        re.IGNORECASE,
+    )
+    for match in plain_path_pattern.findall(prompt_text):
+        raw = str(match).strip()
+        if raw:
+            candidates.append(raw)
+    return candidates
+
+
+def normalize_image_path_candidate(value: str) -> str:
+    text = value.strip()
+    if text.startswith("<") and text.endswith(">") and len(text) > 2:
+        text = text[1:-1].strip()
+    if text.startswith('"') and text.endswith('"') and len(text) > 2:
+        text = text[1:-1]
+    if text.startswith("'") and text.endswith("'") and len(text) > 2:
+        text = text[1:-1]
+    if (
+        " " in text
+        and "://" not in text
+        and not text.lower().startswith("data:")
+    ):
+        text = text.split(" ", 1)[0]
+    return text.strip()
+
+
+def resolve_local_image_path(value: str, cwd: str) -> Path | None:
+    normalized = normalize_image_path_candidate(value)
+    if not normalized:
+        return None
+    lowered = normalized.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return None
+    if lowered.startswith("data:"):
+        return None
+    path = Path(normalized).expanduser()
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    if resolved.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+        return None
+    return resolved
+
+
+def image_data_url(path: Path) -> str | None:
+    mime_type, _encoding = mimetypes.guess_type(str(path))
+    if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_IMAGE_INPUT_BYTES:
+        return None
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def collect_prompt_image_data(
+    prompt_text: str,
+    *,
+    cwd: str,
+) -> tuple[list[str], list[str], list[str]]:
+    urls: list[str] = []
+    attached_paths: list[str] = []
+    skipped: list[str] = []
+    seen_paths: set[str] = set()
+    for candidate in extract_image_path_candidates(prompt_text):
+        resolved = resolve_local_image_path(candidate, cwd)
+        if resolved is None:
+            skipped.append(candidate)
+            continue
+        path_text = str(resolved)
+        if path_text in seen_paths:
+            continue
+        seen_paths.add(path_text)
+        url = image_data_url(resolved)
+        if url is None:
+            skipped.append(path_text)
+            continue
+        urls.append(url)
+        attached_paths.append(path_text)
+    return urls, attached_paths, skipped
+
+
+def build_input_item_variants(
+    text: str,
+    image_urls: list[str],
+) -> list[list[dict[str, Any]]]:
+    text_only: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    if not image_urls:
+        return [text_only]
+
+    input_image_items = [
+        {"type": "input_image", "image_url": image_url}
+        for image_url in image_urls
+    ]
+    image_items = [
+        {"type": "image", "image_url": image_url}
+        for image_url in image_urls
+    ]
+    input_image_items_alt = [
+        {"type": "input_image", "url": image_url}
+        for image_url in image_urls
+    ]
+
+    return [
+        [{"type": "text", "text": text}, *input_image_items],
+        [{"type": "input_text", "text": text}, *input_image_items],
+        [{"type": "text", "text": text}, *image_items],
+        [{"type": "text", "text": text}, *input_image_items_alt],
+        text_only,
+    ]
+
+
+def build_turn_start_candidates(
+    *,
+    thread_id: str,
+    input_items: list[dict[str, Any]],
+    execution_cwd: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "threadId": thread_id,
+            "input": input_items,
+            "cwd": execution_cwd,
+            "approvalPolicy": "never",
+            "sandboxPolicy": {"type": "dangerFullAccess"},
+            "model": model,
+            "effort": "high",
+        },
+        {
+            "threadId": thread_id,
+            "input": input_items,
+            "cwd": execution_cwd,
+            "approvalPolicy": "never",
+            "model": model,
+        },
+        {
+            "threadId": thread_id,
+            "input": input_items,
+            "model": model,
+        },
+        {
+            "threadId": thread_id,
+            "input": input_items,
+        },
+    ]
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
@@ -744,12 +925,17 @@ def start_progress_heartbeat(
     part_total: int = 0,
     turn_number: int = 0,
     turn_total: int = 0,
+    elapsed_offset_seconds: int = 0,
     interval_sec: int = 15,
 ) -> threading.Thread:
     def _heartbeat() -> None:
         while not stop_event.wait(interval_sec):
-            elapsed_seconds = int(
+            turn_elapsed_seconds = int(
                 time.monotonic() - float(stats["started_at"])
+            )
+            elapsed_seconds = (
+                max(0, int(elapsed_offset_seconds))
+                + turn_elapsed_seconds
             )
             log_progress(
                 parts_seen=int(stats["meaningful_parts"]),
@@ -990,8 +1176,10 @@ def run_codex_turn(
     part_total: int = 0,
     turn_number: int = 0,
     turn_total: int = 0,
+    run_elapsed_seconds: int = 0,
 ) -> CodexTurnResult:
     turn_started_at = time.monotonic()
+    run_elapsed_offset = max(0, int(run_elapsed_seconds))
     log_progress(
         parts_seen=0,
         max_parts=max_parts,
@@ -999,7 +1187,7 @@ def run_codex_turn(
         part_total=part_total,
         turn_number=turn_number,
         turn_total=turn_total,
-        elapsed_seconds=0,
+        elapsed_seconds=run_elapsed_offset,
         description="launching codex app-server",
     )
 
@@ -1026,6 +1214,7 @@ def run_codex_turn(
         part_total=part_total,
         turn_number=turn_number,
         turn_total=turn_total,
+        elapsed_offset_seconds=run_elapsed_offset,
     )
 
     resolved_thread_id: str | None = None
@@ -1070,9 +1259,8 @@ def run_codex_turn(
                 part_total=part_total,
                 turn_number=turn_number,
                 turn_total=turn_total,
-                elapsed_seconds=int(
-                    time.monotonic() - turn_started_at
-                ),
+                elapsed_seconds=run_elapsed_offset
+                + int(time.monotonic() - turn_started_at),
                 description=description,
                 content=content,
                 truncate_content="mcp_tool_call" not in description,
@@ -1189,9 +1377,8 @@ def run_codex_turn(
                 part_total=part_total,
                 turn_number=turn_number,
                 turn_total=turn_total,
-                elapsed_seconds=int(
-                    time.monotonic() - turn_started_at
-                ),
+                elapsed_seconds=run_elapsed_offset
+                + int(time.monotonic() - turn_started_at),
                 description="part limit reached",
                 content="sending turn/interrupt",
             )
@@ -1212,9 +1399,8 @@ def run_codex_turn(
                     part_total=part_total,
                     turn_number=turn_number,
                     turn_total=turn_total,
-                    elapsed_seconds=int(
-                        time.monotonic() - turn_started_at
-                    ),
+                    elapsed_seconds=run_elapsed_offset
+                    + int(time.monotonic() - turn_started_at),
                     description="turn/interrupt warning",
                     content=str(error),
                 )
@@ -1302,34 +1488,49 @@ def run_codex_turn(
         if not isinstance(resolved_thread_id, str) or not resolved_thread_id:
             raise RuntimeError("thread id missing from app-server")
 
-        input_items = [{"type": "text", "text": text}]
-        turn_start_candidates: list[dict[str, Any]] = [
-            {
-                "threadId": resolved_thread_id,
-                "input": input_items,
-                "cwd": execution_cwd,
-                "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "dangerFullAccess"},
-                "model": model,
-                "effort": "high",
-            },
-            {
-                "threadId": resolved_thread_id,
-                "input": input_items,
-                "cwd": execution_cwd,
-                "approvalPolicy": "never",
-                "model": model,
-            },
-            {
-                "threadId": resolved_thread_id,
-                "input": input_items,
-                "model": model,
-            },
-            {
-                "threadId": resolved_thread_id,
-                "input": input_items,
-            },
-        ]
+        image_urls, attached_images, skipped_images = collect_prompt_image_data(
+            text,
+            cwd=execution_cwd,
+        )
+        if attached_images or skipped_images:
+            image_status = (
+                f"attached={len(attached_images)} "
+                f"skipped={len(skipped_images)}"
+            )
+            if attached_images:
+                image_status += (
+                    " paths="
+                    + ",".join(attached_images[:3])
+                )
+            if skipped_images:
+                image_status += (
+                    " skipped_samples="
+                    + ",".join(skipped_images[:3])
+                )
+            log_progress(
+                parts_seen=meaningful_parts_seen,
+                max_parts=max_parts,
+                part_offset=part_offset,
+                part_total=part_total,
+                turn_number=turn_number,
+                turn_total=turn_total,
+                elapsed_seconds=run_elapsed_offset
+                + int(time.monotonic() - turn_started_at),
+                description="input/images",
+                content=image_status,
+            )
+
+        input_item_variants = build_input_item_variants(text, image_urls)
+        turn_start_candidates: list[dict[str, Any]] = []
+        for input_items in input_item_variants:
+            turn_start_candidates.extend(
+                build_turn_start_candidates(
+                    thread_id=resolved_thread_id,
+                    input_items=input_items,
+                    execution_cwd=execution_cwd,
+                    model=model,
+                )
+            )
         turn_start_result = request_with_fallback(
             client,
             method="turn/start",
@@ -1409,7 +1610,10 @@ def run_codex_turn(
         if not ok and not error_text:
             error_text = "codex app-server turn failed"
 
-        elapsed = int(time.monotonic() - float(progress_stats["started_at"]))
+        turn_elapsed = int(
+            time.monotonic() - float(progress_stats["started_at"])
+        )
+        global_elapsed = run_elapsed_offset + turn_elapsed
         log_progress(
             parts_seen=meaningful_parts_seen,
             max_parts=max_parts,
@@ -1417,10 +1621,11 @@ def run_codex_turn(
             part_total=part_total,
             turn_number=turn_number,
             turn_total=turn_total,
-            elapsed_seconds=elapsed,
+            elapsed_seconds=global_elapsed,
             description="completed",
             content=(
-                f"status={turn_status} elapsed={elapsed}s events={len(events)} "
+                f"status={turn_status} turn_elapsed={turn_elapsed}s "
+                f"global_elapsed={global_elapsed}s events={len(events)} "
                 f"aborted_for_part_limit={aborted_for_part_limit}"
             ),
         )
@@ -1460,6 +1665,7 @@ def main() -> None:
     chat_stream.add_argument("--part-total", type=int, default=0)
     chat_stream.add_argument("--turn-number", type=int, default=0)
     chat_stream.add_argument("--turn-total", type=int, default=0)
+    chat_stream.add_argument("--run-elapsed-seconds", type=int, default=0)
     chat_stream.add_argument("--api-key-file", default="")
 
     args = parser.parse_args()
@@ -1479,6 +1685,7 @@ def main() -> None:
             part_total=max(0, args.part_total),
             turn_number=max(0, args.turn_number),
             turn_total=max(0, args.turn_total),
+            run_elapsed_seconds=max(0, args.run_elapsed_seconds),
         )
         print(result.model_dump_json())
         return
@@ -1662,7 +1869,12 @@ echo "[setup] codex install complete"
 
         @staticmethod
         def image_requirements() -> SandboxImageRequirements:
-            return SandboxImageRequirements()
+            return SandboxImageRequirements(
+                pip_packages=[
+                    "pypdfium2>=4.30.0",
+                    "Pillow>=10.0.0",
+                ],
+            )
 
         @staticmethod
         def load_local_auth_b64(path: str) -> str | None:
@@ -1813,6 +2025,7 @@ echo "[setup] codex install complete"
             global_part_count: int,
             global_max_parts: int,
             global_max_turns: int,
+            global_elapsed_seconds: int,
             on_stream_part=None,
         ) -> AgentTurnOutcome | None:
             assert self.sandbox is not None
@@ -1840,6 +2053,8 @@ echo "[setup] codex install complete"
                 str(max(0, current_turn)),
                 "--turn-total",
                 str(max(0, global_max_turns)),
+                "--run-elapsed-seconds",
+                str(max(0, global_elapsed_seconds)),
             ]
             if self.api_key_file:
                 args.extend(

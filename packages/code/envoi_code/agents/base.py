@@ -141,6 +141,7 @@ class Agent(Protocol):
         global_part_count: int,
         global_max_parts: int,
         global_max_turns: int,
+        global_elapsed_seconds: int,
         on_stream_part: (
             Callable[[dict[str, Any]], Awaitable[None]] | None
         ) = None,

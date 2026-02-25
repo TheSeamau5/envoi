@@ -1566,6 +1566,7 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             global_part_count: int,
             global_max_parts: int,
             global_max_turns: int,
+            global_elapsed_seconds: int,
             on_stream_part=None,
         ) -> AgentTurnOutcome | None:
             response = await self.send_message_blocking(

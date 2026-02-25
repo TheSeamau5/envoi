@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -202,25 +203,28 @@ async def main(
         else modal_run_trajectory
     )
     try:
-        result = await runner.remote.aio(
-            agent=normalized_agent,
-            model=model,
-            max_parts=max_parts,
-            max_turns=max_turns,
-            test=selected_tests,
-            test_timeout_seconds=test_timeout_seconds,
-            message_timeout_seconds=message_timeout_seconds,
-            timeout_seconds=timeout_seconds,
-            trajectory_id=trajectory_id,
-            codex_auth_json_b64=codex_auth_json_b64,
-            resume=resume,
-            sandbox_provider=sandbox_provider,
-            task_dir=task_dir,
-            environment_dir=environment_dir,
-        )
+        # Stream image build + remote execution logs to the local terminal.
+        with modal.enable_output():
+            result = await runner.remote.aio(
+                agent=normalized_agent,
+                model=model,
+                max_parts=max_parts,
+                max_turns=max_turns,
+                test=selected_tests,
+                test_timeout_seconds=test_timeout_seconds,
+                message_timeout_seconds=message_timeout_seconds,
+                timeout_seconds=timeout_seconds,
+                trajectory_id=trajectory_id,
+                codex_auth_json_b64=codex_auth_json_b64,
+                resume=resume,
+                sandbox_provider=sandbox_provider,
+                task_dir=task_dir,
+                environment_dir=environment_dir,
+            )
         print(f"Completed trajectory: {result}")
     except Exception as e:
         message = str(e).strip()
         if not message:
             message = "remote run stopped or failed"
-        print(f"[error] {message}")
+        print(f"[error] {type(e).__name__}: {message}")
+        print(traceback.format_exc())

@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ git curl wget cmake unzip \
+    bison flex \
     pkg-config libssl-dev libpng-dev \
     python3 python3-pip python3-pil ripgrep \
     imagemagick \
@@ -86,6 +87,8 @@ RUN set -eux; \
 RUN set -eux; \
     git clone --recurse-submodules --depth 1 https://github.com/mattcurrie/dmg-acid2.git /tmp/dmg-acid2; \
     cd /tmp/dmg-acid2; \
+    sed -E -i 's/^[[:space:]]*HARDWARE_INC[[:space:]]+SET[[:space:]]+1[[:space:]]*$/DEF HARDWARE_INC EQU 1/' mgblib/src/hardware.inc; \
+    grep -Eq '^DEF HARDWARE_INC EQU 1$' mgblib/src/hardware.inc; \
     make; \
     mkdir -p /opt/tests/acid2/dmg; \
     cp build/dmg-acid2.gb /opt/tests/acid2/dmg/; \
@@ -96,6 +99,8 @@ RUN set -eux; \
 RUN set -eux; \
     git clone --recurse-submodules --depth 1 https://github.com/mattcurrie/cgb-acid2.git /tmp/cgb-acid2; \
     cd /tmp/cgb-acid2; \
+    sed -E -i 's/^[[:space:]]*HARDWARE_INC[[:space:]]+SET[[:space:]]+1[[:space:]]*$/DEF HARDWARE_INC EQU 1/' mgblib/src/hardware.inc; \
+    grep -Eq '^DEF HARDWARE_INC EQU 1$' mgblib/src/hardware.inc; \
     make; \
     mkdir -p /opt/tests/acid2/cgb; \
     cp build/cgb-acid2.gbc /opt/tests/acid2/cgb/ || cp build/cgb-acid2.gb /opt/tests/acid2/cgb/cgb-acid2.gbc; \

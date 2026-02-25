@@ -30,6 +30,7 @@ import json
 import os
 import shlex
 import time
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -1111,11 +1112,20 @@ class EvaluationScheduler:
                         (time.monotonic() - started_mono) * 1000,
                     )
                 evaluation.completed_at = datetime.now(UTC).isoformat()
-                print(
-                    f"[eval] commit {commit[:10]} "
-                    f"status={evaluation.status} "
-                    f"passed={evaluation.passed}/{evaluation.total}"
-                )
+                if (
+                    evaluation.status == "completed"
+                    and evaluation.total == 0
+                    and not evaluation.error
+                ):
+                    print(
+                        f"[eval] commit {commit[:10]} status=no_tests"
+                    )
+                else:
+                    print(
+                        f"[eval] commit {commit[:10]} "
+                        f"status={evaluation.status} "
+                        f"passed={evaluation.passed}/{evaluation.total}"
+                    )
                 self.emit_event(evaluation)
                 if (
                     is_winning_evaluation(evaluation)
@@ -2581,6 +2591,7 @@ async def run_trajectory(
                 global_part_count=part_count,
                 global_max_parts=max_parts or 0,
                 global_max_turns=max_turns or 0,
+                global_elapsed_seconds=int(max(0, elapsed)),
                 on_stream_part=stream_part_cb,
             )
             part_count = stream_part_counter[0]
@@ -2754,11 +2765,18 @@ async def run_trajectory(
                         isinstance(turn_end_error, str)
                         and turn_end_error.strip()
                     )
-                    print(
-                        "[eval] turn_end "
-                        f"passed={turn_end_passed}/{turn_end_total} "
-                        f"status_error={turn_end_has_error}"
-                    )
+                    if (
+                        turn_end_total == 0
+                        and turn_end_passed == 0
+                        and not turn_end_has_error
+                    ):
+                        print("[eval] turn_end status=no_tests")
+                    else:
+                        print(
+                            "[eval] turn_end "
+                            f"passed={turn_end_passed}/{turn_end_total} "
+                            f"status_error={turn_end_has_error}"
+                        )
                 else:
                     turn_end_has_error = True
                     print("[eval] turn_end payload missing")
@@ -2909,7 +2927,8 @@ async def run_trajectory(
             end_reason = "part_limit"
 
     except Exception as exc:
-        print(f"[error] {exc}")
+        print(f"[error] {type(exc).__name__}: {exc}")
+        print(traceback.format_exc())
         if sandbox and agent_backend:
             await dump_sandbox_logs(
                 sandbox, agent=agent_backend,

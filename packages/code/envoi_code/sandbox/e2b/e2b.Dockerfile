@@ -31,6 +31,8 @@ RUN pip3 install --break-system-packages \
         "envoi @ git+https://github.com/TheSeamau5/envoi.git" \
         "httpx>=0.27.0" \
         "opencode-ai>=0.1.0a36" \
+        "pypdfium2>=4.30.0" \
+        "Pillow>=10.0.0" \
         "pydantic>=2.0.0" \
         "mcp>=1.0.0"
 
