@@ -37,17 +37,14 @@ def fetch_schema_text() -> str:
     return ""
 
 
-def extract_paths(node: object, prefix: str = "") -> list[str]:
-    """Walk a schema tree and collect all paths (leaves and branches)."""
-    paths: list[str] = []
-    if isinstance(node, dict):
-        children = node.get("children") or node.get("suites")
-        if isinstance(children, dict):
-            for key, child in children.items():
-                full = f"{prefix}/{key}" if prefix else key
-                paths.append(full)
-                paths.extend(extract_paths(child, full))
-    return paths
+def extract_paths(node: object) -> list[str]:
+    """Read test paths from the canonical envoi /schema v1 format."""
+    if not isinstance(node, dict):
+        return []
+    tests = node.get("tests")
+    if not isinstance(tests, list):
+        return []
+    return sorted(p for p in tests if isinstance(p, str) and p)
 
 
 SCHEMA_TEXT = fetch_schema_text()

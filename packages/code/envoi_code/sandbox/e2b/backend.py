@@ -42,6 +42,16 @@ class E2BSandbox:
         or ``"envoi-trace"``). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
+        if config.environment_docker_build_args:
+            raise RuntimeError(
+                "E2B backend does not support per-run Docker build args. "
+                "Use a pre-built E2B template or switch to --sandbox modal."
+            )
+        if config.cpu is not None or config.memory_mb is not None:
+            raise RuntimeError(
+                "E2B backend does not support per-run cpu/memory requests. "
+                "Configure resources in the E2B template instead."
+            )
         try:
             e2b_module = importlib.import_module(
                 "e2b_code_interpreter",

@@ -57,29 +57,13 @@ def resolve_evaluation_timeout(
 
 
 def extract_leaf_paths(schema: Any) -> list[str]:
-    """Walk an envoi /schema tree and collect all leaf test paths."""
-    # Handle the flat envoi format: {"tests": ["basics", "wacct", ...]}
-    if isinstance(schema, dict):
-        tests = schema.get("tests")
-        if isinstance(tests, list):
-            return sorted(t for t in tests if isinstance(t, str) and t)
-
-    # Fallback: walk nested children/suites dicts
-    leaves: list[str] = []
-
-    def _walk(node: Any, prefix: str) -> None:
-        if isinstance(node, dict):
-            children = node.get("children") or node.get("suites")
-            if isinstance(children, dict):
-                for key, child in children.items():
-                    _walk(child, f"{prefix}/{key}" if prefix else key)
-                return
-        # Leaf node
-        if prefix:
-            leaves.append(prefix)
-
-    _walk(schema, "")
-    return sorted(leaves) if leaves else []
+    """Read leaf test paths from the canonical envoi /schema v1 format."""
+    if not isinstance(schema, dict):
+        return []
+    tests = schema.get("tests")
+    if not isinstance(tests, list):
+        return []
+    return sorted(t for t in tests if isinstance(t, str) and t)
 
 
 def _build_evaluation_python_script(
@@ -250,7 +234,11 @@ def _build_evaluation_python_script(
         "                    continue\n"
         "                if not suite_root:\n"
         "                    continue\n"
-        "                if suite_root == key or suite_root.startswith(key + '_') or key.startswith(suite_root + '_'):\n"
+        "                if (\n"
+        "                    suite_root == key\n"
+        "                    or suite_root.startswith(key + '_')\n"
+        "                    or key.startswith(suite_root + '_')\n"
+        "                ):\n"
         "                    if best_key is None or len(key) > len(best_key):\n"
         "                        best_key = key\n"
         "            if isinstance(best_key, str):\n"

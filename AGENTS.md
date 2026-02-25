@@ -27,7 +27,9 @@ Examples live in `examples/<name>/` with colocated `task/` and `environment/` di
 ```
 examples/
 ├── c_compiler/
-│   ├── task/en.md
+│   ├── task/
+│   │   ├── task.py
+│   │   └── prompt.md
 │   └── environment/
 │       ├── main.py
 │       ├── Dockerfile
@@ -109,11 +111,12 @@ envoi CLI (packages/cli/envoi_cli/main.py)
 
 ## Task Loading
 
-`orchestrator.py`'s `load_task(task_dir)` loads a task from a directory path. Three tiers:
+`orchestrator.py`'s `load_task(task_dir)` loads a task from a directory path.
 
-- **Tier 3**: `task_dir/task.py` with a `generate()` function → returns `(prompt, params)`
-- **Tier 2**: `task_dir/prompt.md` (or `en.md`) + `task_dir/params.py` → template substitution
-- **Tier 1**: `task_dir/prompt.md` (or `en.md`) only → static prompt
+- **Canonical**: `task_dir/task.py` with `async def resolve_task(context)` → returns `ResolvedTask`
+- **Fallback**: `task_dir/prompt.md` only → static prompt (`task_params = {}`)
+- `en.md` is not a loader convention
+- Task prompt selection/generation is param-driven code in `task.py`
 
 Uses `importlib.util.spec_from_file_location` — task directories don't need to be Python packages.
 
@@ -188,6 +191,8 @@ envoi code --timeout-seconds 10800 --task <path> --env <path>
 envoi code --test basics --task <path> --env <path>
 envoi code --test basics --test wacct/chapter_1 --task <path> --env <path>
 envoi code --test-timeout-seconds 10800 --task <path> --env <path>
+envoi code --example examples/c_compiler --param-target x86_64-linux --param-impl-lang rust --param-lang en --param-milestone M0
+envoi code --example examples/c_compiler --sandbox-cpu 8 --sandbox-memory-mb 16384
 ```
 
 Run defaults:
@@ -235,9 +240,9 @@ envoi code --example examples/c_compiler
 
 ## Where To Edit What
 
-- Task prompt: `examples/<name>/task/en.md` (or `prompt.md`)
+- Task prompt/task resolver: `examples/<name>/task/task.py` (canonical) or `examples/<name>/task/prompt.md` (fallback)
 - Environment harness: `examples/<name>/environment/main.py`
-- Environment runner params (optional): `examples/<name>/environment/params.py`
+- Environment runner params + optional `resolve_params(context)`: `examples/<name>/environment/params.py`
 - Test suites: `examples/<name>/environment/tests/*.py`
 - Fixture installation/provisioning: `examples/<name>/environment/Dockerfile`
 - Trace schema/capture: `packages/code/envoi_code/orchestrator.py` (main loop, `PartRecord`, `TurnRecord`)

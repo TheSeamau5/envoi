@@ -1194,7 +1194,10 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                     flush=True,
                 )
 
-            await run_workspace_init(sandbox)
+            await run_workspace_init(
+                sandbox,
+                runtime_env=ctx.runtime_env,
+            )
 
             # Install opencode binary
             await sandbox.write_file(

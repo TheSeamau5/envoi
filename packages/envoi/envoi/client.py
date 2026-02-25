@@ -87,9 +87,15 @@ class Client:
 
     @property
     def has_setup(self) -> bool:
-        if "has_setup" in self.schema:
-            return bool(self.schema.get("has_setup"))
-        return self.schema.get("setup") is not None
+        capabilities = self.schema.get("capabilities")
+        if not isinstance(capabilities, dict):
+            raise ValueError("Invalid envoi schema: missing capabilities")
+        requires_session = capabilities.get("requires_session")
+        if not isinstance(requires_session, bool):
+            raise ValueError(
+                "Invalid envoi schema: capabilities.requires_session must be a bool"
+            )
+        return requires_session
 
     async def test(self, name: str = "", **kwargs: Any) -> Any:
         if self.has_setup:

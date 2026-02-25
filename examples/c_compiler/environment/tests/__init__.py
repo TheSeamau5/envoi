@@ -1,1 +1,3 @@
-from tests.utils import TestResult  # noqa: F401
+from .utils import TestResult
+
+__all__ = ["TestResult"]

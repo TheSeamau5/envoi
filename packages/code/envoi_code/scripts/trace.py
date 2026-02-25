@@ -27,6 +27,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pyarrow.parquet as pq
@@ -38,6 +39,57 @@ RETRYABLE_SESSION_END_REASONS = {"agent_error", "timeout", "envoi_error"}
 
 def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
+
+
+def normalize_param_key(flag_name: str) -> str:
+    raw = flag_name.removeprefix("--param-").strip()
+    if not raw:
+        raise SystemExit("Invalid param flag: missing name after --param-")
+    return raw.replace("-", "_").lower()
+
+
+def append_param_value(
+    raw_params: dict[str, Any],
+    key: str,
+    value: str,
+) -> None:
+    if key not in raw_params:
+        raw_params[key] = value
+        return
+    existing = raw_params[key]
+    if isinstance(existing, list):
+        existing.append(value)
+        return
+    raw_params[key] = [existing, value]
+
+
+def extract_param_flags(argv: list[str]) -> tuple[list[str], dict[str, Any]]:
+    passthrough_args: list[str] = []
+    raw_params: dict[str, Any] = {}
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if not token.startswith("--param-"):
+            passthrough_args.append(token)
+            index += 1
+            continue
+        if "=" in token:
+            flag_name, value = token.split("=", 1)
+            key = normalize_param_key(flag_name)
+            append_param_value(raw_params, key, value)
+            index += 1
+            continue
+        if index + 1 >= len(argv):
+            raise SystemExit(f"Missing value for {token}")
+        next_token = argv[index + 1]
+        if next_token.startswith("-"):
+            raise SystemExit(
+                f"Missing value for {token} (use {token}=<value> for values starting with '-')"
+            )
+        key = normalize_param_key(token)
+        append_param_value(raw_params, key, next_token)
+        index += 2
+    return passthrough_args, raw_params
 
 
 def common_runner_args(
@@ -77,6 +129,15 @@ def common_runner_args(
         parts.extend(["--model", args.model])
     if args.message_timeout_seconds is not None:
         parts.extend(["--message-timeout-seconds", str(args.message_timeout_seconds)])
+    if getattr(args, "raw_params", None):
+        parts.extend([
+            "--raw-params-json",
+            json.dumps(args.raw_params, ensure_ascii=False),
+        ])
+    if args.sandbox_cpu is not None:
+        parts.extend(["--sandbox-cpu", str(args.sandbox_cpu)])
+    if args.sandbox_memory_mb is not None:
+        parts.extend(["--sandbox-memory-mb", str(args.sandbox_memory_mb)])
     if args.sandbox != "modal":
         parts.extend(["--sandbox-provider", args.sandbox])
     if args.agent == "codex" and args.codex_auth_file:
@@ -177,6 +238,8 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", default=None, help="Path to task directory.")
     parser.add_argument("--env", default=None, help="Path to environment directory.")
     parser.add_argument("--message-timeout-seconds", type=int, default=None)
+    parser.add_argument("--sandbox-cpu", type=float, default=None)
+    parser.add_argument("--sandbox-memory-mb", type=int, default=None)
     parser.add_argument(
         "--timeout-seconds",
         type=int,
@@ -272,6 +335,11 @@ def run_command(args: argparse.Namespace) -> None:
         flush=True,
     )
     print(f"task={args.task} env={args.env}", flush=True)
+    if getattr(args, "raw_params", None):
+        print(
+            f"params={json.dumps(args.raw_params, ensure_ascii=False, sort_keys=True)}",
+            flush=True,
+        )
     print(banner, flush=True)
 
     print(f"sandbox={args.sandbox}", flush=True)
@@ -349,6 +417,11 @@ def graph_command(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    raw_argv = sys.argv[1:]
+    if raw_argv and raw_argv[0] == "graph":
+        argv_without_params, raw_params = raw_argv, {}
+    else:
+        argv_without_params, raw_params = extract_param_flags(raw_argv)
     parser = argparse.ArgumentParser(
         prog="envoi-trace",
         description="envoi-trace: run agent trajectories and build graphs.",
@@ -371,7 +444,8 @@ def main() -> None:
     # Default (no subcommand) = run mode: add run args to the main parser
     add_run_args(parser)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv_without_params)
+    args.raw_params = raw_params
 
     if args.command == "graph":
         graph_command(args)

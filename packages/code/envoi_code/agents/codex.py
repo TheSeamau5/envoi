@@ -1983,7 +1983,10 @@ echo "[setup] codex install complete"
                     flush=True,
                 )
 
-            await run_workspace_init(sandbox)
+            await run_workspace_init(
+                sandbox,
+                runtime_env=ctx.runtime_env,
+            )
 
             # Install codex binary
             await sandbox.write_file(

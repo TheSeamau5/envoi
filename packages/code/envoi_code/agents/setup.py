@@ -7,12 +7,14 @@ run_workspace_init() starts the envoi runtime and initializes the git repo.
 from __future__ import annotations
 
 import builtins
+import shlex
 
 from envoi_code.sandbox.base import Sandbox
 
 WORKSPACE_INIT_SCRIPT = """\
 set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
+__RUNTIME_EXPORTS__
 
 # Ensure envoi SDK is installed in the sandbox
 if ! python3 -c "import envoi" 2>/dev/null; then
@@ -58,11 +60,32 @@ echo "[setup] workspace git repo ready"
 """
 
 
-async def run_workspace_init(sandbox: Sandbox) -> None:
+def render_runtime_exports(runtime_env: dict[str, str] | None) -> str:
+    if not runtime_env:
+        return ""
+    lines: list[str] = []
+    for key in sorted(runtime_env):
+        value = runtime_env[key]
+        lines.append(f"export {key}={shlex.quote(value)}")
+    return "\n".join(lines)
+
+
+def build_workspace_init_script(runtime_env: dict[str, str] | None) -> str:
+    return WORKSPACE_INIT_SCRIPT.replace(
+        "__RUNTIME_EXPORTS__",
+        render_runtime_exports(runtime_env),
+    )
+
+
+async def run_workspace_init(
+    sandbox: Sandbox,
+    *,
+    runtime_env: dict[str, str] | None = None,
+) -> None:
     """Start the envoi runtime and initialize the workspace git repo."""
     await sandbox.write_file(
         "/tmp/workspace_init.sh",
-        WORKSPACE_INIT_SCRIPT,
+        build_workspace_init_script(runtime_env),
         ensure_dir=False,
     )
 

@@ -35,6 +35,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -59,8 +60,10 @@ from envoi_code.models import (
     SessionEnd,
     TurnRecord,
 )
+from envoi_code.params_api import ParamsResolveContext, ResolvedParams
 from envoi_code.sandbox import SandboxConfig, create_sandbox
 from envoi_code.sandbox.base import Sandbox
+from envoi_code.task_api import ResolvedTask, TaskResolveContext
 from envoi_code.utils.advisor import (
     normalize_advisor_model,
     normalize_thinking_level,
@@ -142,77 +145,77 @@ EXAMPLES_DIR = Path(__file__).parent / "examples"
 DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
 
 
-async def load_task(
-    task_dir: Path, *, lang: str = "en",
-) -> tuple[str, dict[str, Any]]:
-    """Load a task prompt from a directory path.
-
-    Three tiers, checked in order:
-      Tier 3: task_dir/task.py with a generate() function -> (prompt, params)
-      Tier 2: prompt file (en.md or prompt.md) + params.py -> template substitution
-      Tier 1: prompt file only -> static prompt text
-
-    Task directories don't need to be Python packages. Uses
-    importlib.util.spec_from_file_location for file-based module loading.
-
-    Returns (prompt_text, params_dict).
-    """
-    # Tier 3: full dynamic generation
-    if (task_dir / "task.py").exists():
-        spec = importlib.util.spec_from_file_location("_task", task_dir / "task.py")
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            gen = getattr(mod, "generate", None)
-            if gen is not None:
-                return await gen() if inspect.iscoroutinefunction(gen) else gen()
-
-    # Tier 1/2: load prompt file
-    prompt_file = task_dir / f"{lang}.md"
-    if not prompt_file.exists():
-        prompt_file = task_dir / "prompt.md"
-    if not prompt_file.exists():
-        raise FileNotFoundError(f"No prompt found in {task_dir}")
-
-    prompt = prompt_file.read_text().strip()
-
-    # Tier 2: apply params if params.py exists
-    params: dict[str, Any] = {}
-    if (task_dir / "params.py").exists():
-        spec = importlib.util.spec_from_file_location("_params", task_dir / "params.py")
-        if spec and spec.loader:
-            params_mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(params_mod)
-            params_fn = params_mod.params
-            params = (
-                await params_fn()
-                if inspect.iscoroutinefunction(params_fn)
-                else params_fn()
-            )
-            prompt = prompt.format(**params)
-
-    return prompt, params
-
-
-async def load_environment_params(
-    environment_dir: Path,
-) -> dict[str, Any]:
-    """Load optional environment params from environment/params.py."""
-    params_file = environment_dir / "params.py"
-    if not params_file.exists():
-        return {}
-
-    spec = importlib.util.spec_from_file_location(
-        "_env_params",
-        params_file,
-    )
+def load_python_file_module(
+    module_name: str,
+    file_path: Path,
+) -> ModuleType | None:
+    if not file_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def load_task(
+    task_dir: Path,
+    *,
+    environment_dir: Path,
+    raw_params: dict[str, Any],
+    selected_test_paths: list[str],
+    agent: str,
+    model: str | None,
+) -> ResolvedTask:
+    """Load a task definition.
+
+    Canonical path: task_dir/task.py with async resolve_task(context).
+    Fallback: task_dir/prompt.md (static prompt only).
+    """
+    task_module = load_python_file_module("envoi_task", task_dir / "task.py")
+    if task_module is not None:
+        resolve_task = getattr(task_module, "resolve_task", None)
+        if resolve_task is None:
+            raise TypeError("task.py must define async resolve_task(context)")
+        if not inspect.iscoroutinefunction(resolve_task):
+            raise TypeError("task.py resolve_task(context) must be async")
+        context = TaskResolveContext(
+            task_dir=str(task_dir),
+            environment_dir=str(environment_dir),
+            raw_params=raw_params,
+            selected_test_paths=selected_test_paths,
+            agent=agent,
+            model=model,
+        )
+        value = await resolve_task(context)
+        return ResolvedTask.model_validate(value)
+
+    prompt_file = task_dir / "prompt.md"
+    if not prompt_file.exists():
+        raise FileNotFoundError(
+            "No task.py resolver or prompt.md found in "
+            f"{task_dir}"
+        )
+    return ResolvedTask(
+        prompt=prompt_file.read_text().strip(),
+        task_params={},
+        metadata={},
+    )
+
+
+def load_environment_params_module(environment_dir: Path) -> ModuleType | None:
+    return load_python_file_module("envoi_environment_params", environment_dir / "params.py")
+
+
+async def load_environment_params_from_module(
+    module: ModuleType | None,
+) -> dict[str, Any]:
+    """Load optional environment runner config from environment/params.py."""
+    if module is None:
         return {}
 
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    params_fn = getattr(mod, "params", None)
+    params_fn = getattr(module, "params", None)
     if params_fn is not None:
         value = (
             await params_fn()
@@ -223,11 +226,27 @@ async def load_environment_params(
             return value
         raise TypeError("environment params() must return a dict")
 
-    params_const = getattr(mod, "PARAMS", None)
+    params_const = getattr(module, "PARAMS", None)
     if isinstance(params_const, dict):
         return params_const
 
     return {}
+
+
+async def load_environment_resolved_params(
+    module: ModuleType | None,
+    *,
+    context: ParamsResolveContext,
+) -> ResolvedParams | None:
+    if module is None:
+        return None
+    resolve_params = getattr(module, "resolve_params", None)
+    if resolve_params is None:
+        return None
+    if not inspect.iscoroutinefunction(resolve_params):
+        raise TypeError("environment resolve_params(context) must be async")
+    value = await resolve_params(context)
+    return ResolvedParams.model_validate(value)
 
 
 WORKSPACE_GITIGNORE = """\
@@ -242,6 +261,24 @@ opencode.jsonc
 .opencode/
 .codex/
 """
+
+
+def merge_resource_request(
+    *,
+    resource_name: str,
+    requested: float | int | None,
+    minimum: float | int | None,
+) -> float | int | None:
+    if minimum is None:
+        return requested
+    if requested is None:
+        return minimum
+    if requested < minimum:
+        raise ValueError(
+            f"Requested {resource_name} ({requested}) is below "
+            f"environment minimum ({minimum})"
+        )
+    return requested
 
 
 # ---------------------------------------------------------------------------
@@ -2003,8 +2040,9 @@ async def run_trajectory(
     sandbox_provider: str = "modal",
     task_dir: str = "",
     environment_dir: str = "",
-    task_lang: str = "en",
-    task_params: dict[str, str] | None = None,
+    raw_params: dict[str, Any] | None = None,
+    sandbox_cpu: float | None = None,
+    sandbox_memory_mb: int | None = None,
 ) -> str:
     global CURRENT_SUITE_FEEDBACK_PRIORITY
     if trajectory_id is None:
@@ -2078,12 +2116,51 @@ async def run_trajectory(
         raise ValueError("--test-timeout-seconds must be > 0")
     selected_test_paths = normalize_test_paths(test)
     agent_name = (agent or DEFAULT_AGENT).strip().lower()
+    raw_params_map: dict[str, Any] = dict(raw_params or {})
 
     task_path = Path(task_dir)
     env_path = Path(environment_dir)
     environment = env_path.name
-    prompt, task_params_loaded = await load_task(task_path, lang=task_lang)
-    environment_params = await load_environment_params(env_path)
+    agent_cls = AGENT_BACKENDS.get(agent_name)
+    if agent_cls is None:
+        raise ValueError(f"Unknown agent: {agent_name}")
+    resolved_model = agent_cls.resolve_model(model)
+    credentials = agent_cls.resolve_credentials(
+        codex_auth_json_b64=codex_auth_json_b64,
+    )
+
+    resolved_task = await load_task(
+        task_path,
+        environment_dir=env_path,
+        raw_params=raw_params_map,
+        selected_test_paths=selected_test_paths,
+        agent=agent_name,
+        model=resolved_model,
+    )
+    prompt = resolved_task.prompt
+    task_params_loaded = dict(resolved_task.task_params)
+    environment_params_module = load_environment_params_module(env_path)
+    environment_params = await load_environment_params_from_module(
+        environment_params_module,
+    )
+    resolved_env_params = await load_environment_resolved_params(
+        environment_params_module,
+        context=ParamsResolveContext(
+            environment_dir=str(env_path),
+            task_dir=str(task_path),
+            raw_params=raw_params_map,
+            selected_test_paths=selected_test_paths,
+            sandbox_provider=sandbox_provider,
+            user_limits={
+                "sandbox_cpu": sandbox_cpu,
+                "sandbox_memory_mb": sandbox_memory_mb,
+                "timeout_seconds": timeout_seconds,
+                "test_timeout_seconds": test_timeout_seconds,
+            },
+        ),
+    )
+    if resolved_env_params is not None and resolved_env_params.task_overrides:
+        task_params_loaded.update(resolved_env_params.task_overrides)
     advisor_model_from_env = _string_or_none(
         environment_params.get("advisor_model"),
     )
@@ -2104,21 +2181,56 @@ async def run_trajectory(
     CURRENT_SUITE_FEEDBACK_PRIORITY = resolve_suite_feedback_priority(
         environment_params.get("diagnostics_suite_priority"),
     )
-    if task_params:
-        task_params_loaded.update(task_params)
     task_params_loaded["_eval_test_paths"] = selected_test_paths
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     task_params_loaded["_environment_params"] = environment_params
-    env_files = load_environment_files(env_path)
-
-    # Resolve agent class, model, and credentials via protocol
-    agent_cls = AGENT_BACKENDS.get(agent_name)
-    if agent_cls is None:
-        raise ValueError(f"Unknown agent: {agent_name}")
-    resolved_model = agent_cls.resolve_model(model)
-    credentials = agent_cls.resolve_credentials(
-        codex_auth_json_b64=codex_auth_json_b64,
+    effective_resolved_env_params = resolved_env_params or ResolvedParams()
+    resolved_docker_plan = effective_resolved_env_params.docker
+    dockerfile_rel_path = (
+        resolved_docker_plan.dockerfile_path
+        if resolved_docker_plan is not None
+        else "Dockerfile"
     )
+    docker_build_args = (
+        dict(resolved_docker_plan.build_args)
+        if resolved_docker_plan is not None
+        else {}
+    )
+    if sandbox_provider == "e2b" and resolved_docker_plan is not None:
+        if docker_build_args or dockerfile_rel_path != "Dockerfile":
+            raise RuntimeError(
+                "E2B backend cannot honor environment Docker plan overrides "
+                "(dockerfile path/build args) in v1. "
+                "Use a compatible E2B template or switch to --sandbox modal."
+            )
+    effective_sandbox_cpu = merge_resource_request(
+        resource_name="sandbox cpu",
+        requested=sandbox_cpu,
+        minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
+    )
+    effective_sandbox_memory_mb = merge_resource_request(
+        resource_name="sandbox memory_mb",
+        requested=sandbox_memory_mb,
+        minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
+    )
+    run_metadata: dict[str, Any] = {
+        "raw_params": raw_params_map,
+        "resolved_task": {
+            "metadata": resolved_task.metadata,
+        },
+        "resolved_params": effective_resolved_env_params.model_dump(mode="json"),
+        "sandbox_request": {
+            "provider": sandbox_provider,
+            "requested_cpu": sandbox_cpu,
+            "requested_memory_mb": sandbox_memory_mb,
+        },
+        "sandbox_resolution": {
+            "applied_cpu": effective_sandbox_cpu,
+            "applied_memory_mb": effective_sandbox_memory_mb,
+            "provider_supports_runtime_resources": sandbox_provider == "modal",
+        },
+    }
+    env_files = load_environment_files(env_path)
 
     existing_trace = load_trace_snapshot(trajectory_id) if resume else None
     if existing_trace is not None and existing_trace.agent != agent_name:
@@ -2230,7 +2342,15 @@ async def run_trajectory(
         config = SandboxConfig(
             timeout=sandbox_timeout_seconds,
             image_requirements=agent_cls.image_requirements(),
-            environment_dockerfile=str(env_path / "Dockerfile"),
+            environment_dockerfile=str(env_path / dockerfile_rel_path),
+            environment_docker_context_dir=str(env_path),
+            environment_docker_build_args=docker_build_args,
+            cpu=float(effective_sandbox_cpu) if effective_sandbox_cpu is not None else None,
+            memory_mb=(
+                int(effective_sandbox_memory_mb)
+                if effective_sandbox_memory_mb is not None
+                else None
+            ),
         )
         sandbox = await create_sandbox(sandbox_provider, config)
         start_time = time.monotonic()
@@ -2254,6 +2374,7 @@ async def run_trajectory(
             mcp_server_content=mcp_server_content,
             mcp_enabled=mcp_enabled,
             workspace_gitignore=WORKSPACE_GITIGNORE,
+            runtime_env=effective_resolved_env_params.runtime_env,
         )
         await agent_backend.setup(sandbox, ctx)
 
@@ -2289,6 +2410,7 @@ async def run_trajectory(
             agent_trace.session_id = session_id
             agent_trace.agent = agent_name
             agent_trace.agent_model = resolved_model
+            agent_trace.run_metadata = run_metadata
             agent_trace.session_end = None
             part_count = get_trace_last_part(agent_trace)
             turn_count = get_trace_last_turn(agent_trace)
@@ -2306,6 +2428,7 @@ async def run_trajectory(
                 agent=agent_name,
                 agent_model=resolved_model,
                 started_at=datetime.now(UTC).isoformat(),
+                run_metadata=run_metadata,
             )
         save_trace_parquet(
             trajectory_id, agent_trace,
@@ -2814,7 +2937,7 @@ async def run_trajectory(
                         f"model={normalized_advisor_model} "
                         f"thinking={normalized_advisor_thinking_level} "
                         f"commit={(git_commit or 'unknown')[:12]} "
-                        f"turn={turn_number} "
+                        f"turn={turn_count} "
                         f"failed_tests_limit={failed_tests_feedback_limit}"
                     )
                     try:
@@ -3222,6 +3345,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--task-dir", required=True)
     parser.add_argument("--environment-dir", required=True)
+    parser.add_argument("--raw-params-json", default=None)
+    parser.add_argument("--sandbox-cpu", type=float, default=None)
+    parser.add_argument("--sandbox-memory-mb", type=int, default=None)
     args = parser.parse_args()
 
     codex_auth_b64: str | None = None
@@ -3235,6 +3361,13 @@ if __name__ == "__main__":
         codex_auth_b64 = cls.load_local_auth_b64(
             args.codex_auth_file.strip(),
         )
+
+    raw_params: dict[str, Any] | None = None
+    if isinstance(args.raw_params_json, str) and args.raw_params_json.strip():
+        decoded = json.loads(args.raw_params_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("--raw-params-json must decode to a JSON object")
+        raw_params = decoded
 
     asyncio.run(
         run_trajectory(
@@ -3251,5 +3384,8 @@ if __name__ == "__main__":
             sandbox_provider=args.sandbox_provider,
             task_dir=args.task_dir,
             environment_dir=args.environment_dir,
+            raw_params=raw_params,
+            sandbox_cpu=args.sandbox_cpu,
+            sandbox_memory_mb=args.sandbox_memory_mb,
         )
     )

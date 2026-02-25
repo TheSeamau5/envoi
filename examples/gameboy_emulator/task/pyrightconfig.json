@@ -1,0 +1,26 @@
+{
+  "extends": "../../../pyrightconfig.json",
+  "include": [
+    "task.py"
+  ],
+  "exclude": [
+    "**/__pycache__"
+  ],
+  "venvPath": "../../../",
+  "venv": ".venv",
+  "extraPaths": [
+    "../../../packages/envoi",
+    "../../../packages/code",
+    "../../../packages/cli"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "../../../packages/envoi",
+        "../../../packages/code",
+        "../../../packages/cli"
+      ]
+    }
+  ]
+}

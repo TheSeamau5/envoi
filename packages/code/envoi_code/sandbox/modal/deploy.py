@@ -58,6 +58,15 @@ from envoi_code.utils.helpers import tprint  # noqa: E402
 print = tprint
 
 
+def parse_raw_params_json(raw_params_json: str | None) -> dict[str, Any] | None:
+    if raw_params_json is None or not raw_params_json.strip():
+        return None
+    value = json.loads(raw_params_json)
+    if not isinstance(value, dict):
+        raise ValueError("--raw-params-json must decode to a JSON object")
+    return value
+
+
 @app.function(
     timeout=14400,
     secrets=[modal.Secret.from_dotenv()],
@@ -78,7 +87,11 @@ async def modal_run_trajectory(
     sandbox_provider: str = "modal",
     task_dir: str = "",
     environment_dir: str = "",
+    raw_params_json: str | None = None,
+    sandbox_cpu: float | None = None,
+    sandbox_memory_mb: int | None = None,
 ) -> str:
+    raw_params = parse_raw_params_json(raw_params_json)
     return await run_trajectory(
         agent=agent,
         model=model,
@@ -94,6 +107,9 @@ async def modal_run_trajectory(
         sandbox_provider=sandbox_provider,
         task_dir=task_dir,
         environment_dir=environment_dir,
+        raw_params=raw_params,
+        sandbox_cpu=sandbox_cpu,
+        sandbox_memory_mb=sandbox_memory_mb,
     )
 
 
@@ -119,7 +135,11 @@ async def modal_run_trajectory_non_preemptible(
     sandbox_provider: str = "modal",
     task_dir: str = "",
     environment_dir: str = "",
+    raw_params_json: str | None = None,
+    sandbox_cpu: float | None = None,
+    sandbox_memory_mb: int | None = None,
 ) -> str:
+    raw_params = parse_raw_params_json(raw_params_json)
     return await run_trajectory(
         agent=agent,
         model=model,
@@ -135,6 +155,9 @@ async def modal_run_trajectory_non_preemptible(
         sandbox_provider=sandbox_provider,
         task_dir=task_dir,
         environment_dir=environment_dir,
+        raw_params=raw_params,
+        sandbox_cpu=sandbox_cpu,
+        sandbox_memory_mb=sandbox_memory_mb,
     )
 
 
@@ -160,6 +183,9 @@ async def main(
     sandbox_provider: str = "modal",
     task_dir: str = "",
     environment_dir: str = "",
+    raw_params_json: str | None = None,
+    sandbox_cpu: float | None = None,
+    sandbox_memory_mb: int | None = None,
 ) -> None:
     selected_tests: list[str] | None = None
     if test_json and test_json.strip():
@@ -220,6 +246,9 @@ async def main(
                 sandbox_provider=sandbox_provider,
                 task_dir=task_dir,
                 environment_dir=environment_dir,
+                raw_params_json=raw_params_json,
+                sandbox_cpu=sandbox_cpu,
+                sandbox_memory_mb=sandbox_memory_mb,
             )
         print(f"Completed trajectory: {result}")
     except Exception as e:

@@ -71,6 +71,20 @@ Environment-level advisor config:
   - `advisor_model_thinking_level` (`low|medium|high`)
   - `failed_tests_feedback_limit` (default: 50)
 
+Param-driven runs:
+
+```bash
+envoi code --example examples/c_compiler \
+  --param-target x86_64-linux \
+  --param-impl-lang rust \
+  --param-lang en \
+  --param-milestone M0
+```
+
+- `--param-*` values are passed through as raw strings to task/environment resolvers.
+- Canonical task prompts are code-driven via `task/task.py` (`async def resolve_task(context)`).
+- `prompt.md` is a fallback convenience when no `task.py` is present.
+
 ## Deploy an environment locally
 
 ```bash
@@ -83,11 +97,13 @@ Examples live in `examples/<name>/` with colocated `task/` and `environment/` di
 
 ```
 examples/c_compiler/
-  task/en.md              # what to tell the agent
+  task/
+    task.py               # canonical task resolver (async resolve_task(context))
+    prompt.md             # optional fallback/helper prompt file
   environment/
     main.py               # envoi test harness
     Dockerfile            # sandbox image
-    params.py             # optional environment-level run params
+    params.py             # runner params + optional async resolve_params(context)
     tests/                # test suites
 ```
 

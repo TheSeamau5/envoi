@@ -35,6 +35,14 @@ def _str_or_none(value: Any) -> str | None:
     return stripped if stripped else None
 
 
+def _int_or_default(value: object, *, default: int = 0) -> int:
+    return value if isinstance(value, int) else default
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
 def _clip(text: str, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
@@ -132,8 +140,9 @@ def _render_diagnostic(
     lines = [header]
     if isinstance(primary, dict):
         file = _str_or_none(primary.get("file")) or "<source>"
-        line = int(primary.get("line", 0) or 0)
-        col = int(primary.get("col", 0) or 0)
+        line = _int_or_default(primary.get("line"), default=0)
+        col = _int_or_default(primary.get("col"), default=0)
+        end_col = _int_or_none(primary.get("end_col"))
         lines.append(f" --> {file}:{line}:{col}")
         if source:
             lines.append(
@@ -141,11 +150,7 @@ def _render_diagnostic(
                     source=source,
                     line=line,
                     col=col,
-                    end_col=(
-                        int(primary.get("end_col"))
-                        if isinstance(primary.get("end_col"), int)
-                        else None
-                    ),
+                    end_col=end_col,
                     label=_str_or_none(primary.get("label")),
                 )
             )

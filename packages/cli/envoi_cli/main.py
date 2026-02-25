@@ -10,11 +10,13 @@ from envoi.deploy import deploy
 try:
     from envoi_code.scripts.trace import (
         add_run_args,
+        extract_param_flags,
         graph_command,
         run_command,
     )
 except ImportError:
     add_run_args = None
+    extract_param_flags = None
     graph_command = None
     run_command = None
 
@@ -95,7 +97,18 @@ def main() -> None:
         graph_parser.add_argument("--part", type=int, default=None)
         graph_parser.add_argument("--checkout-dest", default=None)
 
-    args = parser.parse_args(normalize_code_argv(sys.argv[1:]))
+    normalized_argv = normalize_code_argv(sys.argv[1:])
+    is_code_command = bool(normalized_argv) and normalized_argv[0] == "code"
+    is_code_graph = (
+        len(normalized_argv) >= 2 and normalized_argv[0] == "code"
+        and normalized_argv[1] == "graph"
+    )
+    if extract_param_flags is not None and is_code_command and not is_code_graph:
+        argv_without_params, raw_params = extract_param_flags(normalized_argv)
+    else:
+        argv_without_params, raw_params = normalized_argv, {}
+    args = parser.parse_args(argv_without_params)
+    args.raw_params = raw_params
 
     if args.command is None:
         parser.print_help()

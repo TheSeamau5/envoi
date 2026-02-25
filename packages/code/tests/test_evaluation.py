@@ -17,3 +17,13 @@ def test_generated_evaluation_script_attaches_environment_test_source() -> None:
     assert "def _load_environment_test_sources():" in script
     assert "test_source_map = _load_environment_test_sources()" in script
     assert "extracted_tests = _attach_test_sources(" in script
+
+
+def test_extract_leaf_paths_uses_schema_v1_flat_tests() -> None:
+    schema = {
+        "schema_version": "envoi.schema.v1",
+        "tests": ["basics", "wacct/ch1"],
+        "capabilities": {"requires_session": True},
+    }
+
+    assert evaluation.extract_leaf_paths(schema) == ["basics", "wacct/ch1"]

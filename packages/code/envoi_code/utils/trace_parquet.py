@@ -22,14 +22,18 @@ import pyarrow.parquet as pq
 if TYPE_CHECKING:
     from envoi_code.models import AgentTrace
 
+TRACE_SCHEMA_VERSION = "envoi.trace.v2"
+
 TRACE_SCHEMA = pa.schema([
     ("trajectory_id", pa.string()),
     ("session_id", pa.string()),
     ("agent", pa.string()),
     ("agent_model", pa.string()),
     ("started_at", pa.string()),
+    ("trace_schema_version", pa.string()),
     ("environment", pa.string()),
     ("task_params", pa.string()),
+    ("run_metadata", pa.string()),
     ("part", pa.int32()),
     ("timestamp", pa.string()),
     ("role", pa.string()),
@@ -153,6 +157,7 @@ def agent_trace_to_rows(
     suites_json = json_or_none(suites)
     artifacts_json = json_or_none(trace.artifacts)
     task_params_json = json_or_none(task_params)
+    run_metadata_json = json_or_none(trace.run_metadata)
 
     rows: list[dict[str, Any]] = []
     for part_rec in trace.parts:
@@ -162,8 +167,10 @@ def agent_trace_to_rows(
             "agent": trace.agent,
             "agent_model": part_rec.agent_model,
             "started_at": trace.started_at,
+            "trace_schema_version": TRACE_SCHEMA_VERSION,
             "environment": environment,
             "task_params": task_params_json,
+            "run_metadata": run_metadata_json,
             "part": part_rec.part,
             "timestamp": part_rec.timestamp,
             "role": part_rec.role,
@@ -222,7 +229,14 @@ def write_trace_parquet(rows: list[dict[str, Any]], dest: str | io.BytesIO) -> N
 
 
 def read_trace_parquet(source: str | io.BytesIO) -> list[dict[str, Any]]:
-    table = pq.read_table(source, schema=TRACE_SCHEMA)
+    table = pq.read_table(source)
+    for field in TRACE_SCHEMA:
+        if field.name in table.schema.names:
+            continue
+        nulls = pa.nulls(table.num_rows, type=field.type)
+        table = table.append_column(field.name, nulls)
+    table = table.select(TRACE_SCHEMA.names)
+    table = table.cast(TRACE_SCHEMA, safe=False)
     return table.to_pylist()
 
 
@@ -382,14 +396,13 @@ def build_turns_from_rows(
             if isinstance(git_commit, str):
                 info["git_commit"] = git_commit
     turns = list(grouped.values())
-    turns.sort(
-        key=lambda value: (
-            value.get("turn")
-            if isinstance(value.get("turn"), int)
-            else 10**9
-        ),
-    )
+    turns.sort(key=turn_sort_key)
     return turns
+
+
+def turn_sort_key(value: dict[str, Any]) -> int:
+    turn_value: object = value.get("turn")
+    return turn_value if isinstance(turn_value, int) else 10**9
 
 
 def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -404,6 +417,7 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "turns": [],
             "evaluations": {},
             "artifacts": {},
+            "run_metadata": {},
             "session_end": None,
         }
 
@@ -425,6 +439,7 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
     evaluations = build_evaluations_from_parts(parts)
     turns = build_turns_from_rows(rows)
     artifacts = parse_json_field(first.get("artifacts")) or {}
+    run_metadata = parse_json_field(first.get("run_metadata")) or {}
 
     session_end = None
     se_reason = first.get("session_end_reason")
@@ -446,6 +461,7 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "turns": turns,
         "evaluations": evaluations,
         "artifacts": artifacts,
+        "run_metadata": run_metadata,
         "session_end": session_end,
     }
 

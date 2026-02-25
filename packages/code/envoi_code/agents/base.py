@@ -41,6 +41,7 @@ class AgentSetupContext(BaseModel):
     mcp_server_content: str = ""
     mcp_enabled: bool = False
     workspace_gitignore: str = ""
+    runtime_env: dict[str, str] = Field(default_factory=dict)
 
     model_config = {"arbitrary_types_allowed": True}
 

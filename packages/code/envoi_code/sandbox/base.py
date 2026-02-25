@@ -51,6 +51,10 @@ class SandboxConfig(BaseModel):
         default_factory=SandboxImageRequirements,
     )
     environment_dockerfile: str = ""
+    environment_docker_context_dir: str | None = None
+    environment_docker_build_args: dict[str, str] = Field(default_factory=dict)
+    cpu: float | None = None
+    memory_mb: int | None = None
     template: str | None = None
     api_key: str | None = None
 

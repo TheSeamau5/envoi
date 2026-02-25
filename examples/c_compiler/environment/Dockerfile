@@ -1,7 +1,15 @@
 FROM ubuntu:24.04
 
 ARG CACHE_BUST=2
+ARG TARGET=x86_64-linux
+ARG IMPL_LANG=rust
+ARG TASK_LANG=en
+ARG MILESTONE=M0
 ENV DEBIAN_FRONTEND=noninteractive
+ENV ENVOI_TARGET=${TARGET}
+ENV ENVOI_IMPL_LANG=${IMPL_LANG}
+ENV ENVOI_TASK_LANG=${TASK_LANG}
+ENV ENVOI_MILESTONE=${MILESTONE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ clang git curl wget \

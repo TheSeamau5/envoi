@@ -189,6 +189,7 @@ class AgentTrace(BaseModel):
     agent: str = "codex"
     agent_model: str
     started_at: str
+    run_metadata: dict[str, Any] = Field(default_factory=dict)
     parts: list[PartRecord] = Field(default_factory=list)
     turns: list[TurnRecord] = Field(default_factory=list)
     evaluations: dict[str, EvaluationRecord] = Field(default_factory=dict)

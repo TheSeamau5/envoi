@@ -31,6 +31,7 @@ venv = ".venv"
 typeCheckingMode = "basic"
 include = [
     "packages",
+    "examples",
 ]
 extraPaths = [
     "packages/envoi",
@@ -42,13 +43,13 @@ exclude = [
     "**/.venv/**",
     "**/*.egg-info/**",
     "output",
-    "examples",
     "**/node_modules/**",
 ]
 executionEnvironments = [
     { root = "packages/envoi" },
     { root = "packages/code" },
     { root = "packages/cli" },
+    { root = "examples" },
 ]
 
 [tool.mypy]

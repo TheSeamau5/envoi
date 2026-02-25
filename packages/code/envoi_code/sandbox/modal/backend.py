@@ -12,7 +12,7 @@ import base64
 import shlex
 import time
 from collections.abc import Awaitable, Callable
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import modal
@@ -45,8 +45,21 @@ class ModalSandbox:
     @staticmethod
     def build_image(config: SandboxConfig) -> modal.Image:
         """Build a sandbox image from Dockerfile + agent requirements."""
+        dockerfile_path = config.environment_dockerfile
+        if config.environment_docker_context_dir:
+            try:
+                dockerfile_path = str(
+                    Path(config.environment_dockerfile).resolve().relative_to(
+                        Path(config.environment_docker_context_dir).resolve(),
+                    ),
+                )
+            except Exception:
+                dockerfile_path = config.environment_dockerfile
         image = modal.Image.from_dockerfile(
-            config.environment_dockerfile, add_python="3.12",
+            dockerfile_path,
+            context_dir=config.environment_docker_context_dir,
+            build_args=config.environment_docker_build_args,
+            add_python="3.12",
         )
         reqs = config.image_requirements
         if reqs.apt_packages:
@@ -68,6 +81,8 @@ class ModalSandbox:
             image=image,
             timeout=config.timeout,
             app=await ModalSandbox.get_app(),
+            cpu=config.cpu,
+            memory=config.memory_mb,
         )
         return ModalSandbox(inner)
 
