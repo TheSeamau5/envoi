@@ -6,6 +6,10 @@ from typing import Literal
 
 from envoi_code.params_api import (
     DockerPlan,
+    ParamSpace,
+    ParamSpaceDimension,
+    ParamSpaceOption,
+    ParamSpaceResolveContext,
     ParamsResolveContext,
     ResolvedParams,
     SandboxRequirements,
@@ -71,4 +75,58 @@ async def resolve_params(context: ParamsResolveContext) -> ResolvedParams:
             "environment_family": "gameboy_emulator",
             "resolver_version": 1,
         },
+    )
+
+
+async def resolve_param_space(
+    context: ParamSpaceResolveContext,
+) -> ParamSpace:
+    return ParamSpace(
+        dimensions=[
+            ParamSpaceDimension(
+                key="impl_lang",
+                label="Implementation Language",
+                description="Gameboy emulator implementation language",
+                kind="enum",
+                required=True,
+                default_value="rust",
+                options=[
+                    ParamSpaceOption(value="rust", label="Rust"),
+                    ParamSpaceOption(value="zig", label="Zig"),
+                    ParamSpaceOption(value="c", label="C"),
+                    ParamSpaceOption(value="typescript", label="TypeScript"),
+                ],
+            ),
+            ParamSpaceDimension(
+                key="lang",
+                label="Prompt Language",
+                description="Task prompt language",
+                kind="enum",
+                required=True,
+                default_value="en",
+                options=[
+                    ParamSpaceOption(value="en", label="English"),
+                    ParamSpaceOption(value="es", label="Spanish"),
+                    ParamSpaceOption(value="fr", label="French"),
+                    ParamSpaceOption(value="zh", label="Chinese"),
+                ],
+            ),
+            ParamSpaceDimension(
+                key="milestone",
+                label="Milestone",
+                description="Challenge milestone for the task",
+                kind="enum",
+                required=True,
+                default_value="M0",
+                options=[
+                    ParamSpaceOption(value="M0"),
+                    ParamSpaceOption(value="M1"),
+                    ParamSpaceOption(value="M2"),
+                ],
+            ),
+        ],
+        notes=[
+            f"Environment dir: {context.environment_dir}",
+            "Use resolve_params for final validation before execution",
+        ],
     )
