@@ -1625,6 +1625,17 @@ async def build_advisor_assessment(
         if isinstance(clusters, list)
         else []
     )
+    snapshot_files = code_snapshot.get("files")
+    snapshot_file_count = len(snapshot_files) if isinstance(snapshot_files, list) else 0
+    snapshot_total_chars = code_snapshot.get("total_chars")
+    print(
+        "[advisor] assessment_prepare "
+        f"commit={(commit or 'unknown')[:12]} "
+        f"failed_tests={len(selected_failed_tests)} "
+        f"clusters={len(diagnostic_clusters) if isinstance(diagnostic_clusters, list) else 0} "
+        f"snapshot_files={snapshot_file_count} "
+        f"snapshot_chars={snapshot_total_chars}"
+    )
     user_prompt = build_advisor_user_prompt(
         task_prompt=task_prompt,
         commit=commit,
@@ -1644,6 +1655,11 @@ async def build_advisor_assessment(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         timeout_seconds=ADVISOR_TIMEOUT_SECONDS,
+    )
+    print(
+        "[advisor] assessment_ready "
+        f"commit={(commit or 'unknown')[:12]} "
+        f"chars={len(assessment)}"
     )
     return (
         "External assessment "
@@ -2792,6 +2808,15 @@ async def run_trajectory(
                         and not turn_end_has_error
                     )
                 ):
+                    advisor_started_at = time.monotonic()
+                    print(
+                        "[advisor] run_start "
+                        f"model={normalized_advisor_model} "
+                        f"thinking={normalized_advisor_thinking_level} "
+                        f"commit={(git_commit or 'unknown')[:12]} "
+                        f"turn={turn_number} "
+                        f"failed_tests_limit={failed_tests_feedback_limit}"
+                    )
                     try:
                         advisor_assessment = await build_advisor_assessment(
                             sandbox=sandbox,
@@ -2804,14 +2829,35 @@ async def run_trajectory(
                             ),
                             failed_tests_limit=failed_tests_feedback_limit,
                         )
+                        print(
+                            "[advisor] run_success "
+                            f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
+                            f"assessment_chars={len(advisor_assessment)}"
+                        )
                     except Exception as advisor_error:
+                        error_message = str(advisor_error).strip() or repr(advisor_error)
                         advisor_assessment = (
                             "External assessment unavailable: "
-                            + str(advisor_error).strip()
+                            + error_message
                         )
                         print(
                             "[advisor] failed: "
-                            f"{advisor_error}"
+                            f"type={type(advisor_error).__name__} "
+                            f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
+                            f"error={error_message}"
+                        )
+                        print(
+                            "[advisor] failed_traceback:\n"
+                            + traceback.format_exc().strip()
+                        )
+                elif normalized_advisor_model is not None:
+                    if not isinstance(turn_end_eval_payload_body, dict):
+                        print("[advisor] skipped reason=turn_end_payload_missing")
+                    else:
+                        print(
+                            "[advisor] skipped reason=all_tests_passing "
+                            f"passed={turn_end_passed} total={turn_end_total} "
+                            f"status_error={turn_end_has_error}"
                         )
 
                 turn_end_eval_feedback = (

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
+import traceback
 from typing import Any
 
 from envoi_code.utils.helpers import tprint
@@ -11,6 +14,18 @@ from envoi_code.utils.helpers import tprint
 print = tprint
 
 ADVISOR_THINKING_LEVELS = {"low", "medium", "high"}
+ADVISOR_RETRY_ATTEMPTS = max(
+    1,
+    int(os.environ.get("ADVISOR_RETRY_ATTEMPTS", "3")),
+)
+ADVISOR_RETRY_BASE_DELAY_SECONDS = max(
+    0.0,
+    float(os.environ.get("ADVISOR_RETRY_BASE_DELAY_SECONDS", "1.0")),
+)
+ADVISOR_LOG_RESPONSE_PREVIEW_CHARS = max(
+    0,
+    int(os.environ.get("ADVISOR_LOG_RESPONSE_PREVIEW_CHARS", "240")),
+)
 
 
 def normalize_advisor_model(model_spec: str) -> str:
@@ -50,7 +65,7 @@ def normalize_thinking_level(level: str | None) -> str:
     return value
 
 
-def _extract_text_blocks(content: Any) -> list[str]:
+def extract_text_blocks(content: Any) -> list[str]:
     if not isinstance(content, list):
         return []
 
@@ -75,17 +90,92 @@ def _extract_text_blocks(content: Any) -> list[str]:
 
 def extract_anthropic_message_text(message: Any) -> str:
     content = getattr(message, "content", None)
-    chunks = _extract_text_blocks(content)
+    chunks = extract_text_blocks(content)
     if chunks:
         return "\n\n".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
 
     if isinstance(message, dict):
-        chunks = _extract_text_blocks(message.get("content"))
+        chunks = extract_text_blocks(message.get("content"))
         if chunks:
             return "\n\n".join(
                 chunk.strip() for chunk in chunks if chunk.strip()
             ).strip()
     return ""
+
+
+def read_attr_or_key(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def compact_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def summarize_content_blocks(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for block in content:
+        block_type = read_attr_or_key(block, "type")
+        text = read_attr_or_key(block, "text")
+        item: dict[str, Any] = {"type": block_type}
+        if isinstance(text, str):
+            item["text_chars"] = len(text)
+            if ADVISOR_LOG_RESPONSE_PREVIEW_CHARS > 0:
+                item["text_preview"] = text[:ADVISOR_LOG_RESPONSE_PREVIEW_CHARS]
+        summaries.append(item)
+    return summaries
+
+
+def summarize_anthropic_response(response: Any) -> dict[str, Any]:
+    content = read_attr_or_key(response, "content")
+    usage = read_attr_or_key(response, "usage")
+    summary: dict[str, Any] = {
+        "id": read_attr_or_key(response, "id"),
+        "model": read_attr_or_key(response, "model"),
+        "type": read_attr_or_key(response, "type"),
+        "stop_reason": read_attr_or_key(response, "stop_reason"),
+        "stop_sequence": read_attr_or_key(response, "stop_sequence"),
+        "role": read_attr_or_key(response, "role"),
+        "content_blocks": summarize_content_blocks(content),
+    }
+    if usage is not None:
+        summary["usage"] = {
+            "input_tokens": read_attr_or_key(usage, "input_tokens"),
+            "output_tokens": read_attr_or_key(usage, "output_tokens"),
+            "cache_creation_input_tokens": read_attr_or_key(
+                usage,
+                "cache_creation_input_tokens",
+            ),
+            "cache_read_input_tokens": read_attr_or_key(
+                usage,
+                "cache_read_input_tokens",
+            ),
+        }
+    return summary
+
+
+def build_payload_for_attempt(
+    *,
+    base_payload: dict[str, Any],
+    attempt_number: int,
+) -> tuple[dict[str, Any], str]:
+    payload = dict(base_payload)
+    if attempt_number <= 1:
+        return payload, "thinking+output_config"
+    if attempt_number == 2:
+        payload.pop("output_config", None)
+        return payload, "thinking"
+    payload.pop("thinking", None)
+    payload.pop("output_config", None)
+    return payload, "basic"
 
 
 async def request_anthropic_advisor(
@@ -119,30 +209,89 @@ async def request_anthropic_advisor(
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": normalized_effort},
     }
+    print(
+        "[advisor] request_setup "
+        f"model={normalized_model} thinking={normalized_effort} "
+        f"max_tokens={max_output_tokens} timeout_seconds={timeout_seconds} "
+        f"system_chars={len(system_prompt)} user_chars={len(user_prompt)} "
+        f"max_attempts={ADVISOR_RETRY_ATTEMPTS}"
+    )
 
     async with AsyncAnthropic(
         api_key=api_key,
         http_client=DefaultAioHttpClient(),
     ) as client:
-        try:
-            async with asyncio.timeout(timeout_seconds):
-                response = await client.messages.create(**request_payload)
-        except Exception as error:  # noqa: BLE001
-            error_text = str(error).strip().lower()
-            if "output_config" in error_text:
-                request_payload.pop("output_config", None)
+        last_error: Exception | None = None
+        for attempt in range(1, ADVISOR_RETRY_ATTEMPTS + 1):
+            payload_for_attempt, payload_mode = build_payload_for_attempt(
+                base_payload=request_payload,
+                attempt_number=attempt,
+            )
+            print(
+                "[advisor] request_attempt "
+                f"attempt={attempt}/{ADVISOR_RETRY_ATTEMPTS} "
+                f"mode={payload_mode} payload_keys={sorted(payload_for_attempt)}"
+            )
+            started_at = time.monotonic()
+            try:
                 async with asyncio.timeout(timeout_seconds):
-                    response = await client.messages.create(**request_payload)
-            elif "thinking" in error_text:
-                # Fallback for SDK/API variants that do not accept `thinking`.
-                request_payload.pop("thinking", None)
-                request_payload.pop("output_config", None)
-                async with asyncio.timeout(timeout_seconds):
-                    response = await client.messages.create(**request_payload)
-            else:
-                raise
+                    response = await client.messages.create(**payload_for_attempt)
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                response_summary = summarize_anthropic_response(response)
+                print(
+                    "[advisor] response_received "
+                    f"attempt={attempt} elapsed_ms={elapsed_ms} "
+                    f"summary={compact_json(response_summary)}"
+                )
 
-    text = extract_anthropic_message_text(response)
-    if not text:
-        raise RuntimeError("advisor returned an empty response")
-    return text
+                text = extract_anthropic_message_text(response)
+                if text.strip():
+                    print(
+                        "[advisor] response_text "
+                        f"attempt={attempt} chars={len(text)} "
+                        f"preview={text[:ADVISOR_LOG_RESPONSE_PREVIEW_CHARS]}"
+                    )
+                    return text
+
+                error = RuntimeError("advisor returned an empty response")
+                last_error = error
+                print(
+                    "[advisor] empty_response "
+                    f"attempt={attempt} response_blocks="
+                    f"{len(response_summary.get('content_blocks', []))}"
+                )
+            except Exception as error:  # noqa: BLE001
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                last_error = error
+                print(
+                    "[advisor] request_error "
+                    f"attempt={attempt} elapsed_ms={elapsed_ms} "
+                    f"error_type={type(error).__name__} "
+                    f"error={str(error).strip()}"
+                )
+                print(
+                    "[advisor] request_error_traceback "
+                    + traceback.format_exc().strip()
+                )
+
+            if attempt < ADVISOR_RETRY_ATTEMPTS:
+                delay_seconds = (
+                    ADVISOR_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+                )
+                print(
+                    "[advisor] retry_scheduled "
+                    f"next_attempt={attempt + 1} "
+                    f"sleep_seconds={delay_seconds:.2f}"
+                )
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+
+    if last_error is None:
+        raise RuntimeError(
+            "advisor request failed after retries without a captured error",
+        )
+    raise RuntimeError(
+        "advisor request failed after "
+        f"{ADVISOR_RETRY_ATTEMPTS} attempts: "
+        f"{type(last_error).__name__}: {str(last_error).strip()}",
+    ) from last_error

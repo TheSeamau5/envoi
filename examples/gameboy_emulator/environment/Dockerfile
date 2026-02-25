@@ -83,6 +83,53 @@ RUN set -eux; \
     make install; \
     rm -rf /tmp/rgbds
 
+# ─── Breakpoint control ROMs (anti-cheat guard for exit-code semantics) ───
+RUN set -eux; \
+    mkdir -p /tmp/breakpoint-guard /opt/tests/controls; \
+    printf '%s\n' \
+    'SECTION "Entry", ROM0[$0100]' \
+    '    jp Start' \
+    '    ds $0150 - @, 0' \
+    '' \
+    'SECTION "Code", ROM0[$0150]' \
+    'Start:' \
+    '    ld b, $00' \
+    '    ld c, $00' \
+    '    ld d, $00' \
+    '    ld e, $00' \
+    '    ld h, $00' \
+    '    ld l, $00' \
+    '    db $40' \
+    'Hang:' \
+    '    jr Hang' \
+    > /tmp/breakpoint-guard/fail.asm; \
+    printf '%s\n' \
+    'SECTION "Entry", ROM0[$0100]' \
+    '    jp Start' \
+    '    ds $0150 - @, 0' \
+    '' \
+    'SECTION "Code", ROM0[$0150]' \
+    'Start:' \
+    '    ld b, $03' \
+    '    ld c, $05' \
+    '    ld d, $08' \
+    '    ld e, $0D' \
+    '    ld h, $15' \
+    '    ld l, $22' \
+    '    db $40' \
+    'Hang:' \
+    '    jr Hang' \
+    > /tmp/breakpoint-guard/pass.asm; \
+    cd /tmp/breakpoint-guard; \
+    rgbasm -o fail.o fail.asm; \
+    rgblink -o breakpoint_fail.gb fail.o; \
+    rgbfix -v -p 255 breakpoint_fail.gb; \
+    rgbasm -o pass.o pass.asm; \
+    rgblink -o breakpoint_pass.gb pass.o; \
+    rgbfix -v -p 255 breakpoint_pass.gb; \
+    cp breakpoint_fail.gb breakpoint_pass.gb /opt/tests/controls/; \
+    rm -rf /tmp/breakpoint-guard
+
 # ─── dmg-acid2 (build from source) ───
 RUN set -eux; \
     git clone --recurse-submodules --depth 1 https://github.com/mattcurrie/dmg-acid2.git /tmp/dmg-acid2; \

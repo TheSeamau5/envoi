@@ -168,6 +168,68 @@ def collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
 DEFAULT_MAX_CYCLES = 50_000_000
 # Wall-clock timeout per ROM execution. Safety net for hangs.
 DEFAULT_TIMEOUT_SECONDS = 30
+# Fast sanity checks for breakpoint pass/fail semantics.
+BREAKPOINT_GUARD_MAX_CYCLES = 1_000_000
+
+
+breakpoint_guard_cache: dict[str, str | None] = {}
+
+
+async def ensure_breakpoint_protocol(mode: str) -> str | None:
+    """Validate that breakpoint exit semantics are not trivially hardcoded."""
+    if mode in breakpoint_guard_cache:
+        return breakpoint_guard_cache[mode]
+
+    fail_rom = fixture_path("controls", "breakpoint_fail.gb")
+    pass_rom = fixture_path("controls", "breakpoint_pass.gb")
+    missing = [str(p) for p in [fail_rom, pass_rom] if not p.exists()]
+    if missing:
+        error = "breakpoint guard ROMs missing: " + ", ".join(missing)
+        breakpoint_guard_cache[mode] = error
+        return error
+
+    sp = session_path()
+    guard_png = sp / f"breakpoint_guard_{mode}.png"
+    common = (
+        " --headless"
+        f" --max-cycles {BREAKPOINT_GUARD_MAX_CYCLES}"
+        f" --screenshot-on-breakpoint {shlex.quote(str(guard_png))}"
+        f" --mode {mode}"
+    )
+
+    fail_result = await envoi.run(
+        f"./gb_emu {shlex.quote(str(fail_rom))}{common}",
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+    )
+    pass_result = await envoi.run(
+        f"./gb_emu {shlex.quote(str(pass_rom))}{common}",
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+    )
+
+    problems: list[str] = []
+    if fail_result.exit_code != 1:
+        problems.append(
+            "control fail ROM expected exit 1"
+            f" but got {fail_result.exit_code}"
+        )
+    if pass_result.exit_code != 0:
+        problems.append(
+            "control pass ROM expected exit 0"
+            f" but got {pass_result.exit_code}"
+        )
+
+    if problems:
+        details: list[str] = []
+        if fail_result.stderr:
+            details.append(f"fail control stderr:\n{fail_result.stderr.strip()}")
+        if pass_result.stderr:
+            details.append(f"pass control stderr:\n{pass_result.stderr.strip()}")
+        error = "\n".join(problems + details)
+        breakpoint_guard_cache[mode] = error
+        return error
+
+    breakpoint_guard_cache[mode] = None
+    return None
 
 
 # ─── Protocol 1: Serial output (Blargg) ───
@@ -243,6 +305,19 @@ async def run_rom_breakpoint(
     sp = session_path()
     debug_dir = reset_debug_artifacts_dir(sp)
     screenshot_path = sp / "breakpoint_screenshot.png"
+
+    guard_error = await ensure_breakpoint_protocol(mode)
+    if guard_error is not None:
+        return RomResult(
+            name=name,
+            suite=suite,
+            protocol="breakpoint",
+            passed=False,
+            rom_path=rom_path,
+            exit_code=-1,
+            stderr=f"breakpoint protocol guard failed:\n{guard_error}",
+            debug_artifacts=collect_debug_artifacts(debug_dir),
+        )
 
     cmd = (
         f"./gb_emu {shlex.quote(rom_path)} --headless"
