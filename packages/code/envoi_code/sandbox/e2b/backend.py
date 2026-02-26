@@ -13,9 +13,15 @@ import os
 import shlex
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
-from envoi_code.sandbox.base import CommandResult, SandboxConfig
+from envoi_code.sandbox.base import (
+    CommandResult,
+    SandboxCapabilities,
+    SandboxConfig,
+    SandboxResolution,
+)
 
 
 def resolve_e2b_max_session_seconds() -> int:
@@ -48,6 +54,94 @@ class E2BSandbox:
         return "e2b"
 
     @staticmethod
+    def capabilities() -> SandboxCapabilities:
+        provider_max = 86400
+        plan_max = resolve_e2b_max_session_seconds()
+        return SandboxCapabilities(
+            supports_runtime_resources=False,
+            supports_docker_build_args=False,
+            supports_dockerfile_override=False,
+            max_timeout_seconds=min(provider_max, plan_max),
+        )
+
+    @staticmethod
+    def resolve_config(config: SandboxConfig) -> SandboxResolution:
+        applied = config.model_copy(deep=True)
+        warnings: list[str] = []
+        ignored: dict[str, Any] = {}
+        capabilities = E2BSandbox.capabilities()
+
+        if applied.environment_docker_build_args:
+            ignored["environment_docker_build_args"] = dict(
+                applied.environment_docker_build_args,
+            )
+            arg_keys = ", ".join(
+                sorted(applied.environment_docker_build_args.keys()),
+            )
+            warnings.append(
+                "ignoring environment Docker build args "
+                f"(template is pre-built): {arg_keys}",
+            )
+            applied.environment_docker_build_args = {}
+
+        dockerfile_name = Path(applied.environment_dockerfile).name
+        if dockerfile_name != "Dockerfile":
+            ignored["environment_dockerfile"] = applied.environment_dockerfile
+            warnings.append(
+                "ignoring environment Dockerfile override "
+                f"(template is pre-built): {dockerfile_name}",
+            )
+
+        if applied.cpu is not None or applied.min_cpu is not None:
+            ignored["cpu"] = {
+                "requested": applied.cpu,
+                "minimum": applied.min_cpu,
+            }
+            warnings.append(
+                "ignoring cpu request/minimum "
+                "(configure resources in the sandbox template)",
+            )
+            applied.cpu = None
+            applied.min_cpu = None
+
+        if applied.memory_mb is not None or applied.min_memory_mb is not None:
+            ignored["memory_mb"] = {
+                "requested": applied.memory_mb,
+                "minimum": applied.min_memory_mb,
+            }
+            warnings.append(
+                "ignoring memory request/minimum "
+                "(configure resources in the sandbox template)",
+            )
+            applied.memory_mb = None
+            applied.min_memory_mb = None
+
+        timeout_cap = capabilities.max_timeout_seconds
+        if (
+            isinstance(timeout_cap, int)
+            and timeout_cap > 0
+            and applied.timeout > timeout_cap
+        ):
+            ignored["timeout"] = {
+                "requested": applied.timeout,
+                "applied": timeout_cap,
+            }
+            warnings.append(
+                "reducing sandbox timeout to fit provider cap: "
+                f"requested={applied.timeout}s cap={timeout_cap}s "
+                f"applied={timeout_cap}s",
+            )
+            applied.timeout = timeout_cap
+
+        return SandboxResolution(
+            provider="e2b",
+            capabilities=capabilities,
+            applied_config=applied,
+            ignored=ignored,
+            warnings=warnings,
+        )
+
+    @staticmethod
     async def create(config: SandboxConfig) -> E2BSandbox:
         """Create a new E2B sandbox from a pre-built template.
 
@@ -55,17 +149,6 @@ class E2BSandbox:
         when set). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
-        if config.environment_docker_build_args:
-            arg_keys = ", ".join(sorted(config.environment_docker_build_args.keys()))
-            builtins.print(
-                "[e2b] ignoring per-run Docker build args "
-                f"(template is pre-built): {arg_keys}"
-            )
-        if config.cpu is not None or config.memory_mb is not None:
-            builtins.print(
-                "[e2b] ignoring per-run cpu/memory request "
-                "(configure resources in the template)"
-            )
         try:
             e2b_module = importlib.import_module(
                 "e2b_code_interpreter",
@@ -86,18 +169,7 @@ class E2BSandbox:
             )
 
         resolved_template = config.template or os.environ.get("E2B_TEMPLATE")
-        # Provider hard cap is plan-dependent (hobby=1h, pro=24h).
-        provider_max = 86400
-        requested_timeout = min(config.timeout, provider_max)
-        plan_max = resolve_e2b_max_session_seconds()
-        capped_timeout = min(requested_timeout, plan_max)
-        if capped_timeout < requested_timeout:
-            builtins.print(
-                "[e2b] reducing sandbox timeout to fit plan cap: "
-                f"requested={requested_timeout}s cap={plan_max}s "
-                f"applied={capped_timeout}s"
-            )
-        kwargs: dict[str, Any] = {"timeout": capped_timeout}
+        kwargs: dict[str, Any] = {"timeout": config.timeout}
         if resolved_template:
             kwargs["template"] = resolved_template
         if config.api_key:

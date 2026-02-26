@@ -79,6 +79,19 @@ from envoi_code.utils.evaluation import (
     run_commit_evaluation,
     run_workspace_evaluation,
 )
+from envoi_code.utils.feedback_helpers import (
+    eval_result_is_passed,
+    eval_result_key,
+    eval_result_message,
+    eval_result_ref,
+    eval_result_sort_key,
+    format_single_failed_test,
+    format_suite_feedback_priority,
+    normalize_suite_path,
+    string_or_none,
+    suite_family,
+    test_sort_key,
+)
 from envoi_code.utils.git import get_git_commit
 from envoi_code.utils.helpers import (
     load_environment_files,
@@ -1348,74 +1361,6 @@ CURRENT_SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
 )
 
 
-def _string_or_none(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    return stripped if stripped else None
-
-
-def _normalize_suite_path(value: str | None) -> str:
-    if not value:
-        return ""
-    parts = [part for part in value.split("/") if part]
-    if not parts:
-        return ""
-    normalized = [parts[0]]
-    for part in parts[1:]:
-        if part == normalized[-1]:
-            continue
-        normalized.append(part)
-    return "/".join(normalized)
-
-
-def _suite_family(suite_path: str) -> str | None:
-    normalized = _normalize_suite_path(suite_path)
-    for family in CURRENT_SUITE_FEEDBACK_PRIORITY:
-        if normalized == family:
-            return family
-        if normalized.startswith(f"{family}/"):
-            return family
-        if f"/{family}/" in f"/{normalized}/":
-            return family
-    return None
-
-
-def _suite_rank(suite_path: str) -> tuple[int, int, str]:
-    normalized = _normalize_suite_path(suite_path)
-    family = _suite_family(normalized)
-    if family in CURRENT_SUITE_FEEDBACK_PRIORITY:
-        return (
-            CURRENT_SUITE_FEEDBACK_PRIORITY.index(family),
-            0,
-            normalized,
-        )
-    if normalized.endswith("/run_all") or normalized == "all/run_all":
-        return (
-            len(CURRENT_SUITE_FEEDBACK_PRIORITY),
-            1,
-            normalized,
-        )
-    return (
-        len(CURRENT_SUITE_FEEDBACK_PRIORITY),
-        0,
-        normalized,
-    )
-
-
-def format_suite_feedback_priority(priority: tuple[str, ...]) -> str:
-    if not priority:
-        return "none"
-    return " -> ".join(priority)
-
-
-def _test_sort_key(test: dict[str, Any]) -> tuple[int, int, str, str]:
-    suite = _normalize_suite_path(_string_or_none(test.get("suite")))
-    test_id = _string_or_none(test.get("test_id")) or ""
-    family_rank, run_all_rank, suite_rank = _suite_rank(suite)
-    return (family_rank, run_all_rank, suite_rank, test_id)
-
-
 def select_failed_tests_for_feedback(
     payload: dict[str, Any],
     *,
@@ -1429,7 +1374,7 @@ def select_failed_tests_for_feedback(
     for item in raw_tests:
         if not isinstance(item, dict):
             continue
-        status = _string_or_none(item.get("status")) or "failed"
+        status = string_or_none(item.get("status")) or "failed"
         if status.lower() == "passed":
             continue
         failed_tests.append(item)
@@ -1437,15 +1382,23 @@ def select_failed_tests_for_feedback(
     if not failed_tests:
         return []
 
-    failed_tests.sort(key=_test_sort_key)
+    failed_tests.sort(
+        key=lambda test: test_sort_key(
+            test,
+            CURRENT_SUITE_FEEDBACK_PRIORITY,
+        ),
+    )
 
     selected: list[dict[str, Any]] = []
     seen_family_keys: set[tuple[str, str]] = set()
     seen_suite_test_keys: set[tuple[str, str]] = set()
     for test in failed_tests:
-        suite = _normalize_suite_path(_string_or_none(test.get("suite")))
-        family = _suite_family(suite)
-        test_id = _string_or_none(test.get("test_id")) or "unknown_test"
+        suite = normalize_suite_path(string_or_none(test.get("suite")))
+        family = suite_family(
+            suite,
+            CURRENT_SUITE_FEEDBACK_PRIORITY,
+        )
+        test_id = string_or_none(test.get("test_id")) or "unknown_test"
 
         if family is not None:
             family_key = (family, test_id)
@@ -1464,51 +1417,6 @@ def select_failed_tests_for_feedback(
     return selected
 
 
-def _format_single_failed_test(
-    index: int,
-    test: dict[str, Any],
-) -> str:
-    suite = _normalize_suite_path(_string_or_none(test.get("suite"))) or "unknown_suite"
-    test_id = _string_or_none(test.get("test_id")) or "unknown_test"
-    status = (_string_or_none(test.get("status")) or "failed").lower()
-    failure_type = _string_or_none(test.get("failure_type"))
-    label = f"{status}/{failure_type}" if failure_type else status
-    message = _string_or_none(test.get("message"))
-    if message is None:
-        message = _string_or_none(test.get("stderr_tail"))
-    if message is None:
-        message = _string_or_none(test.get("stdout_tail"))
-    source = _string_or_none(test.get("source"))
-
-    lines = [
-        f"{index}. {suite}/{test_id}",
-        f"status: {label}",
-    ]
-    if message is not None:
-        lines.append("error:")
-        lines.append(message)
-    rendered_diagnostic = _string_or_none(
-        test.get("rendered_diagnostic"),
-    )
-    if rendered_diagnostic is not None:
-        lines.extend([
-            "diagnostic:",
-            "```text",
-            rendered_diagnostic,
-            "```",
-        ])
-    if source is not None:
-        lines.extend([
-            "source:",
-            "```c",
-            source,
-            "```",
-        ])
-    else:
-        lines.append("source: (missing)")
-    return "\n".join(lines)
-
-
 def build_cluster_summary_section(
     payload: dict[str, Any],
     *,
@@ -1522,9 +1430,9 @@ def build_cluster_summary_section(
     for cluster in raw_clusters[: max(1, limit)]:
         if not isinstance(cluster, dict):
             continue
-        key = _string_or_none(cluster.get("key")) or "unknown"
-        kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
-        code = _string_or_none(cluster.get("code"))
+        key = string_or_none(cluster.get("key")) or "unknown"
+        kind = string_or_none(cluster.get("kind")) or "unknown_kind"
+        code = string_or_none(cluster.get("code"))
         count_value = cluster.get("count")
         count = count_value if isinstance(count_value, int) else 0
         suffix = f" code={code}" if code else ""
@@ -1558,7 +1466,7 @@ def build_failed_tests_feedback_section(
     ]
     for idx, test in enumerate(selected, start=1):
         lines.append("")
-        lines.append(_format_single_failed_test(idx, test))
+        lines.append(format_single_failed_test(idx, test))
     return "\n".join(lines), selected
 
 
@@ -1696,9 +1604,9 @@ def build_advisor_user_prompt(
         for cluster in diagnostic_clusters[:10]:
             if not isinstance(cluster, dict):
                 continue
-            key = _string_or_none(cluster.get("key")) or "unknown"
-            kind = _string_or_none(cluster.get("kind")) or "unknown_kind"
-            code = _string_or_none(cluster.get("code"))
+            key = string_or_none(cluster.get("key")) or "unknown"
+            kind = string_or_none(cluster.get("kind")) or "unknown_kind"
+            code = string_or_none(cluster.get("code"))
             count_value = cluster.get("count")
             count = count_value if isinstance(count_value, int) else 0
             code_suffix = f" code={code}" if code else ""
@@ -1712,7 +1620,7 @@ def build_advisor_user_prompt(
     ])
     for idx, test in enumerate(selected_failed_tests, start=1):
         lines.append("")
-        lines.append(_format_single_failed_test(idx, test))
+        lines.append(format_single_failed_test(idx, test))
 
     files = code_snapshot.get("files")
     if isinstance(files, list) and files:
@@ -1720,8 +1628,8 @@ def build_advisor_user_prompt(
         for file_info in files:
             if not isinstance(file_info, dict):
                 continue
-            path = _string_or_none(file_info.get("path")) or "unknown"
-            source = _string_or_none(file_info.get("source")) or ""
+            path = string_or_none(file_info.get("path")) or "unknown"
+            source = string_or_none(file_info.get("source")) or ""
             lines.extend([
                 "",
                 f"file: {path}",
@@ -1814,39 +1722,6 @@ async def build_advisor_assessment(
     )
 
 
-def _eval_result_key(test: EvalTestResult) -> tuple[str, str]:
-    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
-    test_id = _string_or_none(test.test_id) or "unknown_test"
-    return suite, test_id
-
-
-def _eval_result_sort_key(test: EvalTestResult) -> tuple[int, int, str, str]:
-    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
-    test_id = _string_or_none(test.test_id) or ""
-    family_rank, run_all_rank, suite_rank = _suite_rank(suite)
-    return (family_rank, run_all_rank, suite_rank, test_id)
-
-
-def _eval_result_is_passed(test: EvalTestResult) -> bool:
-    return (test.status or "").strip().lower() == "passed"
-
-
-def _eval_result_ref(test: EvalTestResult) -> str:
-    suite = _normalize_suite_path(_string_or_none(test.suite) or "")
-    test_id = _string_or_none(test.test_id) or "unknown_test"
-    if suite:
-        return f"{suite}/{test_id}"
-    return test_id
-
-
-def _eval_result_message(test: EvalTestResult) -> str | None:
-    return (
-        _string_or_none(test.message)
-        or _string_or_none(test.stderr_tail)
-        or _string_or_none(test.stdout_tail)
-    )
-
-
 def build_turn_regression_feedback_section(
     *,
     current_tests: list[EvalTestResult],
@@ -1865,38 +1740,38 @@ def build_turn_regression_feedback_section(
         )
 
     prev_by_key: dict[tuple[str, str], EvalTestResult] = {
-        _eval_result_key(test): test for test in previous_tests
+        eval_result_key(test): test for test in previous_tests
     }
     cur_by_key: dict[tuple[str, str], EvalTestResult] = {
-        _eval_result_key(test): test for test in current_tests
+        eval_result_key(test): test for test in current_tests
     }
 
     prev_passed = sum(
         1 for test in prev_by_key.values()
-        if _eval_result_is_passed(test)
+        if eval_result_is_passed(test)
     )
     cur_passed = sum(
         1 for test in cur_by_key.values()
-        if _eval_result_is_passed(test)
+        if eval_result_is_passed(test)
     )
 
     newly_broken = [
         cur_by_key[key]
         for key, prev in prev_by_key.items()
         if key in cur_by_key
-        and _eval_result_is_passed(prev)
-        and not _eval_result_is_passed(cur_by_key[key])
+        and eval_result_is_passed(prev)
+        and not eval_result_is_passed(cur_by_key[key])
     ]
     newly_fixed = [
         cur_by_key[key]
         for key, prev in prev_by_key.items()
         if key in cur_by_key
-        and not _eval_result_is_passed(prev)
-        and _eval_result_is_passed(cur_by_key[key])
+        and not eval_result_is_passed(prev)
+        and eval_result_is_passed(cur_by_key[key])
     ]
     still_failing = sum(
         1 for test in cur_by_key.values()
-        if not _eval_result_is_passed(test)
+        if not eval_result_is_passed(test)
     )
     total_delta = cur_passed - prev_passed
 
@@ -1914,21 +1789,24 @@ def build_turn_regression_feedback_section(
         lines.append("- newly_broken_top:")
         sorted_broken = sorted(
             newly_broken,
-            key=_eval_result_sort_key,
+            key=lambda test: eval_result_sort_key(
+                test,
+                CURRENT_SUITE_FEEDBACK_PRIORITY,
+            ),
         )
         for index, test in enumerate(
             sorted_broken[: max(1, limit)],
             start=1,
         ):
-            failure_type = _string_or_none(test.failure_type)
+            failure_type = string_or_none(test.failure_type)
             status_suffix = (
                 f"/{failure_type}" if failure_type else ""
             )
             lines.append(
-                f"  {index}. {_eval_result_ref(test)}: "
+                f"  {index}. {eval_result_ref(test)}: "
                 f"passed -> {test.status}{status_suffix}"
             )
-            message = _eval_result_message(test)
+            message = eval_result_message(test)
             if message is not None:
                 lines.append(
                     "     error: "
@@ -2014,7 +1892,7 @@ def format_turn_end_evaluation_feedback(
             f"{len(selected_failed_tests)}"
         )
 
-        payload_error = _string_or_none(payload.get("error"))
+        payload_error = string_or_none(payload.get("error"))
         if payload_error is not None:
             lines.append(f"error: {payload_error}")
 
@@ -2025,8 +1903,8 @@ def format_turn_end_evaluation_feedback(
             ])
     else:
         lines.append("payload: null")
-        stdout = _string_or_none(run_payload.get("stdout"))
-        stderr = _string_or_none(run_payload.get("stderr"))
+        stdout = string_or_none(run_payload.get("stdout"))
+        stderr = string_or_none(run_payload.get("stderr"))
         if stdout is not None:
             lines.append(
                 "stdout: "
@@ -2211,8 +2089,10 @@ class TrajectoryPreparedContext(BaseModel):
     advisor_user_prompt_prefix_override: str | None
     dockerfile_rel_path: str
     docker_build_args: dict[str, str]
-    effective_sandbox_cpu: float | int | None
-    effective_sandbox_memory_mb: float | int | None
+    sandbox_cpu_request: float | None
+    sandbox_memory_mb_request: int | None
+    sandbox_min_cpu: float | None
+    sandbox_min_memory_mb: int | None
     run_metadata: dict[str, Any]
     env_files: EnvironmentFiles
     existing_trace: AgentTrace | None
@@ -2422,7 +2302,7 @@ async def prepare_trajectory_context(
     if resolved_env_params is not None and resolved_env_params.task_overrides:
         task_params_loaded.update(resolved_env_params.task_overrides)
 
-    advisor_model_from_env = _string_or_none(
+    advisor_model_from_env = string_or_none(
         environment_params.get("advisor_model"),
     )
     normalized_advisor_model: str | None = None
@@ -2431,7 +2311,7 @@ async def prepare_trajectory_context(
             advisor_model_from_env,
         )
     normalized_advisor_thinking_level = normalize_thinking_level(
-        _string_or_none(
+        string_or_none(
             environment_params.get("advisor_model_thinking_level"),
         )
         or "high",
@@ -2445,10 +2325,10 @@ async def prepare_trajectory_context(
     CURRENT_SUITE_FEEDBACK_PRIORITY = resolve_suite_feedback_priority(
         environment_params.get("diagnostics_suite_priority"),
     )
-    advisor_system_prompt_override = _string_or_none(
+    advisor_system_prompt_override = string_or_none(
         environment_params.get("advisor_system_prompt"),
     )
-    advisor_user_prompt_prefix_override = _string_or_none(
+    advisor_user_prompt_prefix_override = string_or_none(
         environment_params.get("advisor_user_prompt_prefix"),
     )
 
@@ -2469,51 +2349,10 @@ async def prepare_trajectory_context(
         else {}
     )
 
-    if sandbox_provider == "e2b":
-        if docker_build_args:
-            ignored_arg_keys = ", ".join(sorted(docker_build_args.keys()))
-            print(
-                "[sandbox][e2b] ignoring environment Docker build args "
-                f"(template is pre-built): {ignored_arg_keys}"
-            )
-            docker_build_args = {}
-        if dockerfile_rel_path != "Dockerfile":
-            print(
-                "[sandbox][e2b] ignoring environment Dockerfile override "
-                f"(template is pre-built): {dockerfile_rel_path}"
-            )
-
-    if sandbox_provider == "modal":
-        effective_sandbox_cpu = merge_resource_request(
-            resource_name="sandbox cpu",
-            requested=sandbox_cpu,
-            minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
-        )
-        effective_sandbox_memory_mb = merge_resource_request(
-            resource_name="sandbox memory_mb",
-            requested=sandbox_memory_mb,
-            minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
-        )
-    else:
-        if (
-            sandbox_cpu is not None
-            or effective_resolved_env_params.sandbox_requirements.min_cpu is not None
-        ):
-            print(
-                "[sandbox][e2b] ignoring cpu request/minimum "
-                "(configure resources in the E2B template)"
-            )
-        if (
-            sandbox_memory_mb is not None
-            or effective_resolved_env_params.sandbox_requirements.min_memory_mb
-            is not None
-        ):
-            print(
-                "[sandbox][e2b] ignoring memory request/minimum "
-                "(configure resources in the E2B template)"
-            )
-        effective_sandbox_cpu = None
-        effective_sandbox_memory_mb = None
+    sandbox_min_cpu = effective_resolved_env_params.sandbox_requirements.min_cpu
+    sandbox_min_memory_mb = (
+        effective_resolved_env_params.sandbox_requirements.min_memory_mb
+    )
 
     run_metadata: dict[str, Any] = {
         "raw_params": raw_params_map,
@@ -2525,11 +2364,10 @@ async def prepare_trajectory_context(
             "provider": sandbox_provider,
             "requested_cpu": sandbox_cpu,
             "requested_memory_mb": sandbox_memory_mb,
-        },
-        "sandbox_resolution": {
-            "applied_cpu": effective_sandbox_cpu,
-            "applied_memory_mb": effective_sandbox_memory_mb,
-            "provider_supports_runtime_resources": sandbox_provider == "modal",
+            "minimum_cpu": sandbox_min_cpu,
+            "minimum_memory_mb": sandbox_min_memory_mb,
+            "requested_dockerfile": dockerfile_rel_path,
+            "requested_docker_build_args": docker_build_args,
         },
     }
     env_files = load_environment_files(env_path)
@@ -2565,8 +2403,10 @@ async def prepare_trajectory_context(
         advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
         dockerfile_rel_path=dockerfile_rel_path,
         docker_build_args=docker_build_args,
-        effective_sandbox_cpu=effective_sandbox_cpu,
-        effective_sandbox_memory_mb=effective_sandbox_memory_mb,
+        sandbox_cpu_request=sandbox_cpu,
+        sandbox_memory_mb_request=sandbox_memory_mb,
+        sandbox_min_cpu=sandbox_min_cpu,
+        sandbox_min_memory_mb=sandbox_min_memory_mb,
         run_metadata=run_metadata,
         env_files=env_files,
         existing_trace=existing_trace,
@@ -3472,8 +3312,10 @@ async def execute_trajectory_main(
     env_path: Path,
     dockerfile_rel_path: str,
     docker_build_args: dict[str, str],
-    effective_sandbox_cpu: float | int | None,
-    effective_sandbox_memory_mb: int | float | None,
+    sandbox_cpu_request: float | None,
+    sandbox_memory_mb_request: int | None,
+    sandbox_min_cpu: float | None,
+    sandbox_min_memory_mb: int | None,
     task_path: Path,
     resolved_model: str,
     credentials: Any,
@@ -3505,18 +3347,40 @@ async def execute_trajectory_main(
         environment_dockerfile=str(env_path / dockerfile_rel_path),
         environment_docker_context_dir=str(env_path),
         environment_docker_build_args=docker_build_args,
-        cpu=(
-            float(effective_sandbox_cpu)
-            if effective_sandbox_cpu is not None
-            else None
-        ),
-        memory_mb=(
-            int(effective_sandbox_memory_mb)
-            if effective_sandbox_memory_mb is not None
-            else None
-        ),
+        cpu=sandbox_cpu_request,
+        memory_mb=sandbox_memory_mb_request,
+        min_cpu=sandbox_min_cpu,
+        min_memory_mb=sandbox_min_memory_mb,
     )
-    sandbox = await create_sandbox(sandbox_provider, config)
+    launch_result = await create_sandbox(sandbox_provider, config)
+    sandbox = launch_result.sandbox
+    resolution = launch_result.resolution
+    for warning in resolution.warnings:
+        print(
+            f"[sandbox][{resolution.provider}] {warning}"
+        )
+    run_metadata["sandbox_resolution"] = {
+        "provider": resolution.provider,
+        "capabilities": resolution.capabilities.model_dump(mode="json"),
+        "ignored": dict(resolution.ignored),
+        "warnings": list(resolution.warnings),
+        "applied_cpu": resolution.applied_config.cpu,
+        "applied_memory_mb": resolution.applied_config.memory_mb,
+        "provider_supports_runtime_resources": (
+            resolution.capabilities.supports_runtime_resources
+        ),
+        "applied": {
+            "timeout": resolution.applied_config.timeout,
+            "environment_dockerfile": (
+                resolution.applied_config.environment_dockerfile
+            ),
+            "environment_docker_build_args": (
+                dict(resolution.applied_config.environment_docker_build_args)
+            ),
+            "cpu": resolution.applied_config.cpu,
+            "memory_mb": resolution.applied_config.memory_mb,
+        },
+    }
     start_time = time.monotonic()
 
     agent_backend = agent_cls()
@@ -4032,8 +3896,10 @@ async def run_trajectory(
             env_path=prepared.env_path,
             dockerfile_rel_path=prepared.dockerfile_rel_path,
             docker_build_args=prepared.docker_build_args,
-            effective_sandbox_cpu=prepared.effective_sandbox_cpu,
-            effective_sandbox_memory_mb=prepared.effective_sandbox_memory_mb,
+            sandbox_cpu_request=prepared.sandbox_cpu_request,
+            sandbox_memory_mb_request=prepared.sandbox_memory_mb_request,
+            sandbox_min_cpu=prepared.sandbox_min_cpu,
+            sandbox_min_memory_mb=prepared.sandbox_min_memory_mb,
             task_path=prepared.task_path,
             resolved_model=prepared.resolved_model,
             credentials=prepared.credentials,

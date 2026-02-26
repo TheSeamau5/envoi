@@ -17,7 +17,12 @@ from typing import Any
 
 import modal
 
-from envoi_code.sandbox.base import CommandResult, SandboxConfig
+from envoi_code.sandbox.base import (
+    CommandResult,
+    SandboxCapabilities,
+    SandboxConfig,
+    SandboxResolution,
+)
 from envoi_code.utils.helpers import tprint
 
 
@@ -32,6 +37,42 @@ class ModalSandbox:
     @property
     def name(self) -> str:
         return "modal"
+
+    @staticmethod
+    def capabilities() -> SandboxCapabilities:
+        return SandboxCapabilities(
+            supports_runtime_resources=True,
+            supports_docker_build_args=True,
+            supports_dockerfile_override=True,
+            max_timeout_seconds=None,
+        )
+
+    @staticmethod
+    def resolve_config(config: SandboxConfig) -> SandboxResolution:
+        applied = config.model_copy(deep=True)
+        if applied.min_cpu is not None:
+            if applied.cpu is None:
+                applied.cpu = applied.min_cpu
+            elif applied.cpu < applied.min_cpu:
+                raise ValueError(
+                    f"Requested sandbox cpu ({applied.cpu}) is below "
+                    f"environment minimum ({applied.min_cpu})",
+                )
+        if applied.min_memory_mb is not None:
+            if applied.memory_mb is None:
+                applied.memory_mb = applied.min_memory_mb
+            elif applied.memory_mb < applied.min_memory_mb:
+                raise ValueError(
+                    f"Requested sandbox memory_mb ({applied.memory_mb}) is below "
+                    f"environment minimum ({applied.min_memory_mb})",
+                )
+        return SandboxResolution(
+            provider="modal",
+            capabilities=ModalSandbox.capabilities(),
+            applied_config=applied,
+            ignored={},
+            warnings=[],
+        )
 
     @staticmethod
     async def get_app() -> modal.App:

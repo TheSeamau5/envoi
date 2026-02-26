@@ -11,7 +11,7 @@ Also defines CommandResult, SandboxConfig, and SandboxImageRequirements.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -55,8 +55,29 @@ class SandboxConfig(BaseModel):
     environment_docker_build_args: dict[str, str] = Field(default_factory=dict)
     cpu: float | None = None
     memory_mb: int | None = None
+    min_cpu: float | None = None
+    min_memory_mb: int | None = None
     template: str | None = None
     api_key: str | None = None
+
+
+class SandboxCapabilities(BaseModel):
+    """Feature support for a sandbox provider backend."""
+
+    supports_runtime_resources: bool = True
+    supports_docker_build_args: bool = True
+    supports_dockerfile_override: bool = True
+    max_timeout_seconds: int | None = None
+
+
+class SandboxResolution(BaseModel):
+    """Provider-specific normalization result for SandboxConfig."""
+
+    provider: str
+    capabilities: SandboxCapabilities
+    applied_config: SandboxConfig
+    ignored: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 @runtime_checkable
