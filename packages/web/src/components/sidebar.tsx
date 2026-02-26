@@ -30,7 +30,7 @@ export function Sidebar() {
       style={{ width: collapsed ? 48 : 200, transition: "width 0.15s ease" }}
     >
       {/* Logo */}
-      <div className="flex items-center gap-2 border-b border-envoi-border px-3 py-3">
+      <div className="flex h-[41px] shrink-0 items-center gap-2 border-b border-envoi-border px-3">
         <span className="text-sm font-bold text-envoi-accent">envoi</span>
       </div>
 

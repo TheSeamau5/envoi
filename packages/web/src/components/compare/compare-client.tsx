@@ -1,11 +1,7 @@
 /**
  * Compare Client — main client component for the Compare page.
- * Manages mode toggle (Trace vs Setup), trace selection, and tab navigation.
- *
- * Trace Compare: sidebar with checkboxes for selecting 2-4 traces,
- * tabs for Progress Curves / Milestone Divergence / Suite Breakdown.
- *
- * Setup Compare: delegates to SetupCompare component.
+ * Manages mode toggle (Trace vs Setup), trace selection, tab navigation,
+ * sorting, and model filtering.
  */
 
 "use client";
@@ -19,12 +15,26 @@ import {
   Target,
   LayoutGrid,
   ArrowUpRight,
+  ArrowUpDown,
 } from "lucide-react";
 import Link from "next/link";
 import type { Trajectory, CompareMode, CompareTab } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
 import { TOTAL_TESTS } from "@/lib/constants";
-import { formatPercent } from "@/lib/utils";
+import { formatPercent, formatDate } from "@/lib/utils";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ProgressCurves } from "./progress-curves";
 import { MilestoneTable } from "./milestone-table";
 import { SuiteBreakdown } from "./suite-breakdown";
@@ -33,6 +43,8 @@ import { SetupCompare } from "./setup-compare";
 type CompareClientProps = {
   allTraces: Trajectory[];
 };
+
+type SortKey = "score" | "date";
 
 const TABS: { key: CompareTab; label: string; icon: typeof TrendingUp }[] = [
   { key: "curves", label: "Progress Curves", icon: TrendingUp },
@@ -43,10 +55,31 @@ const TABS: { key: CompareTab; label: string; icon: typeof TrendingUp }[] = [
 export function CompareClient({ allTraces }: CompareClientProps) {
   const [mode, setMode] = useState<CompareMode>("traces");
   const [selectedIds, setSelectedIds] = useState<string[]>(() => {
-    /** Default: select the first 2 traces */
     return allTraces.slice(0, 2).map((trace) => trace.id);
   });
   const [activeTab, setActiveTab] = useState<CompareTab>("curves");
+  const [sortBy, setSortBy] = useState<SortKey>("score");
+  const [modelFilter, setModelFilter] = useState<string>("all");
+
+  /** Filter traces by model */
+  const filteredTraces = useMemo(() => {
+    if (modelFilter === "all") return allTraces;
+    return allTraces.filter((trace) => trace.model === modelFilter);
+  }, [allTraces, modelFilter]);
+
+  /** Sort filtered traces */
+  const sortedTraces = useMemo(() => {
+    const sorted = [...filteredTraces];
+    if (sortBy === "score") {
+      sorted.sort((a, b) => b.finalPassed - a.finalPassed);
+    } else {
+      sorted.sort(
+        (a, b) =>
+          new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+      );
+    }
+    return sorted;
+  }, [filteredTraces, sortBy]);
 
   const selectedTraces = useMemo(
     () =>
@@ -69,10 +102,16 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     return selectedIds.indexOf(traceId);
   }
 
+  /** Unique model names for the filter dropdown */
+  const uniqueModels = useMemo(() => {
+    const models = new Set(allTraces.map((t) => t.model));
+    return [...models];
+  }, [allTraces]);
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Top bar: mode toggle + tab navigation */}
-      <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4 py-[10px]">
+      <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         {/* Mode toggle */}
         <div className="flex items-center gap-[2px] rounded-[4px] border border-envoi-border p-[2px]">
           <button
@@ -137,12 +176,83 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       {mode === "traces" ? (
         <div className="flex flex-1 overflow-hidden">
           {/* Trace selection sidebar */}
-          <div className="flex w-[260px] shrink-0 flex-col border-r border-envoi-border">
-            <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px] text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-              Trajectories ({allTraces.length})
+          <div className="flex w-[280px] shrink-0 flex-col border-r border-envoi-border">
+            {/* Sidebar header with sort + model filter */}
+            <div className="flex items-center gap-2 border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+                Trajectories ({sortedTraces.length})
+              </span>
+              <div className="flex-1" />
+
+              {/* Sort dropdown */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-[3px] rounded-[3px] px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
+                    <ArrowUpDown size={9} />
+                    {sortBy === "score" ? "Score" : "Date"}
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  className="min-w-[100px] border-envoi-border bg-envoi-bg font-mono shadow-md"
+                >
+                  <DropdownMenuItem
+                    onClick={() => setSortBy("score")}
+                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    style={{
+                      fontWeight: sortBy === "score" ? 600 : 400,
+                      color: sortBy === "score" ? T.accent : T.text,
+                    }}
+                  >
+                    Score
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => setSortBy("date")}
+                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    style={{
+                      fontWeight: sortBy === "date" ? 600 : 400,
+                      color: sortBy === "date" ? T.accent : T.text,
+                    }}
+                  >
+                    Date
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* Model filter */}
+              <Select value={modelFilter} onValueChange={setModelFilter}>
+                <SelectTrigger
+                  size="sm"
+                  className="h-auto gap-1 rounded-[3px] border-none bg-transparent px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent
+                  position="popper"
+                  className="border-envoi-border bg-envoi-bg font-mono shadow-md"
+                >
+                  <SelectItem
+                    value="all"
+                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                  >
+                    All models
+                  </SelectItem>
+                  {uniqueModels.map((model) => (
+                    <SelectItem
+                      key={model}
+                      value={model}
+                      className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    >
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+
+            {/* Trace list */}
             <div className="flex-1 overflow-y-auto">
-              {allTraces.map((trace) => {
+              {sortedTraces.map((trace) => {
                 const selIndex = getSelectionIndex(trace.id);
                 const isSelected = selIndex >= 0;
                 const color = isSelected
@@ -154,7 +264,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     key={trace.id}
                     className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
                     style={{
-                      borderLeft: isSelected ? `3px solid ${color!.line}` : "3px solid transparent",
+                      borderLeft: isSelected
+                        ? `3px solid ${color!.line}`
+                        : "3px solid transparent",
                       background: isSelected ? color!.fill : undefined,
                       cursor: "pointer",
                     }}
@@ -168,7 +280,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                         background: isSelected ? color!.line : "transparent",
                       }}
                     >
-                      {isSelected && <Check size={10} color={T.bg} strokeWidth={3} />}
+                      {isSelected && (
+                        <Check size={10} color={T.bg} strokeWidth={3} />
+                      )}
                     </span>
 
                     {/* Trace info */}
@@ -178,6 +292,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                       </span>
                       <span className="truncate text-[9px] text-envoi-text-dim">
                         {trace.model}
+                      </span>
+                      <span className="text-[9px] text-envoi-text-dim">
+                        {formatDate(trace.startedAt)}
                       </span>
                     </div>
 
@@ -218,9 +335,15 @@ export function CompareClient({ allTraces }: CompareClientProps) {
               </div>
             ) : (
               <>
-                {activeTab === "curves" && <ProgressCurves traces={selectedTraces} />}
-                {activeTab === "milestones" && <MilestoneTable traces={selectedTraces} />}
-                {activeTab === "suites" && <SuiteBreakdown traces={selectedTraces} />}
+                {activeTab === "curves" && (
+                  <ProgressCurves traces={selectedTraces} />
+                )}
+                {activeTab === "milestones" && (
+                  <MilestoneTable traces={selectedTraces} />
+                )}
+                {activeTab === "suites" && (
+                  <SuiteBreakdown traces={selectedTraces} />
+                )}
               </>
             )}
           </div>

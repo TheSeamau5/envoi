@@ -10,6 +10,12 @@ import type { Commit } from "@/lib/types";
 import { SUITES } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
 import { Star, TrendingDown } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 type CommitRowProps = {
   commit: Commit;
@@ -83,33 +89,38 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite }: CommitR
       </div>
 
       {/* Mini suite bars */}
-      <div className="flex flex-1 items-center gap-[6px]">
-        {suitesToShow.map((suite) => {
-          const passed = commit.suiteState[suite.name] ?? 0;
-          const ratio = passed / suite.total;
-          const suiteColor = SUITE_COLORS[suite.name];
-          return (
-            <div
-              key={suite.name}
-              className="flex-1"
-              title={`${suite.name}: ${passed}/${suite.total}`}
-            >
-              <div
-                className="h-[4px] rounded-full"
-                style={{ background: suiteColor?.bg ?? T.borderLight }}
-              >
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{
-                    width: `${(ratio * 100).toFixed(1)}%`,
-                    background: suiteColor?.color ?? T.textDim,
-                  }}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <TooltipProvider>
+        <div className="flex flex-1 items-center gap-[6px]">
+          {suitesToShow.map((suite) => {
+            const passed = commit.suiteState[suite.name] ?? 0;
+            const ratio = passed / suite.total;
+            const suiteColor = SUITE_COLORS[suite.name];
+            return (
+              <Tooltip key={suite.name}>
+                <TooltipTrigger asChild>
+                  <div className="flex-1">
+                    <div
+                      className="h-[4px] rounded-full"
+                      style={{ background: suiteColor?.bg ?? T.borderLight }}
+                    >
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${(ratio * 100).toFixed(1)}%`,
+                          background: suiteColor?.color ?? T.textDim,
+                        }}
+                      />
+                    </div>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {suite.name}: {passed}/{suite.total}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </div>
+      </TooltipProvider>
 
       {/* Feedback badges */}
       <div className="flex items-center gap-[6px]">

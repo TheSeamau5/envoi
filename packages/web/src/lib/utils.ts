@@ -79,3 +79,25 @@ export function formatPercent(value: number, total: number): string {
 export function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
+
+/** Format an ISO date string as a short date (e.g., "Jan 15, 2025") */
+export function formatDate(isoString: string): string {
+  const date = new Date(isoString);
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/** Format an ISO date string as a short date + time (e.g., "Jan 15, 10:00") */
+export function formatDateTime(isoString: string): string {
+  const date = new Date(isoString);
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}

@@ -22,8 +22,8 @@ type ProgressCurveProps = {
 
 /** Chart layout constants */
 const VIEW_WIDTH = 600;
-const VIEW_HEIGHT = 130;
-const MARGIN = { top: 14, right: 14, bottom: 14, left: 14 };
+const VIEW_HEIGHT = 160;
+const MARGIN = { top: 14, right: 42, bottom: 14, left: 38 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
@@ -96,6 +96,11 @@ function buildAreaPath(
   return `${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} L${firstX.toFixed(1)},${bottomY.toFixed(1)} Z`;
 }
 
+/** Generate Y-axis tick values */
+function getYTicks(yMax: number): number[] {
+  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * yMax));
+}
+
 export function ProgressCurve({
   commits,
   selectedIndex,
@@ -103,14 +108,54 @@ export function ProgressCurve({
   activeSuite,
 }: ProgressCurveProps) {
   const yMax = getYMax(activeSuite);
+  const yTicks = getYTicks(yMax);
 
   return (
     <div className="w-full px-[14px] pt-[10px]">
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         className="w-full"
-        style={{ height: 130, fontFamily: T.mono }}
+        style={{ height: 160, fontFamily: T.mono }}
       >
+        {/* Grid lines */}
+        {yTicks.map((tick) => (
+          <line
+            key={`y-grid-${tick}`}
+            x1={MARGIN.left}
+            y1={toY(tick, yMax)}
+            x2={VIEW_WIDTH - MARGIN.right}
+            y2={toY(tick, yMax)}
+            stroke={T.borderLight}
+            strokeWidth={0.5}
+          />
+        ))}
+
+        {/* Y axis labels — left: absolute count */}
+        {yTicks.map((tick) => (
+          <text
+            key={`y-label-${tick}`}
+            x={MARGIN.left - 6}
+            y={toY(tick, yMax) + 3}
+            textAnchor="end"
+            style={{ fontSize: "8px", fill: T.textDim }}
+          >
+            {tick}
+          </text>
+        ))}
+
+        {/* Y axis labels — right: percentage */}
+        {yTicks.map((tick) => (
+          <text
+            key={`y-pct-${tick}`}
+            x={VIEW_WIDTH - MARGIN.right + 6}
+            y={toY(tick, yMax) + 3}
+            textAnchor="start"
+            style={{ fontSize: "8px", fill: T.textDim }}
+          >
+            {`${Math.round((tick / yMax) * 100)}%`}
+          </text>
+        ))}
+
         {/* Filled area up to selection */}
         <path
           d={buildAreaPath(commits, selectedIndex, activeSuite, yMax)}

@@ -63,7 +63,7 @@ export function TrajectoryDetail({ trajectory }: TrajectoryDetailProps) {
       {/* Left panel — 42% */}
       <div className="flex flex-col overflow-hidden border-r border-envoi-border" style={{ width: "42%" }}>
         {/* Tab bar */}
-        <div className="flex border-b border-envoi-border">
+        <div className="flex h-[41px] shrink-0 border-b border-envoi-border">
           <TabButton
             label="Timeline"
             isActive={leftTab === "timeline"}
@@ -136,7 +136,7 @@ export function TrajectoryDetail({ trajectory }: TrajectoryDetailProps) {
       {/* Right panel — 58% */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Tab bar */}
-        <div className="flex border-b border-envoi-border">
+        <div className="flex h-[41px] shrink-0 border-b border-envoi-border">
           <TabButton
             label="Steps"
             isActive={rightTab === "steps"}

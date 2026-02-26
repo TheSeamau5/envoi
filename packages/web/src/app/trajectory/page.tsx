@@ -7,7 +7,7 @@ import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { generateAllTrajectories } from "@/lib/mock";
 import { TOTAL_TESTS } from "@/lib/constants";
-import { formatPercent, formatDuration } from "@/lib/utils";
+import { formatPercent, formatDuration, formatDateTime } from "@/lib/utils";
 
 export default function TrajectoryListPage() {
   const allTraces = generateAllTrajectories();
@@ -26,10 +26,39 @@ export default function TrajectoryListPage() {
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4 py-[10px]">
+      <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           All Trajectories ({allTraces.length})
         </span>
+      </div>
+
+      {/* Column header */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px]">
+        <span className="min-w-[90px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          ID
+        </span>
+        <span className="min-w-[50px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Target
+        </span>
+        <span className="min-w-[36px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Lang
+        </span>
+        <span className="min-w-[36px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          NL
+        </span>
+        <span className="min-w-[90px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Started
+        </span>
+        <span className="min-w-[70px] text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Duration
+        </span>
+        <span className="flex-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Score
+        </span>
+        <span className="min-w-[60px] text-right text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          Commits
+        </span>
+        <span className="w-[12px]" />
       </div>
 
       {/* Scrollable body */}
@@ -60,15 +89,24 @@ export default function TrajectoryListPage() {
                     {trace.id}
                   </span>
 
-                  {/* Params */}
+                  {/* Target */}
                   <span className="min-w-[50px] text-[10px] text-envoi-text-dim">
+                    {trace.params.target.split("-")[0]}
+                  </span>
+
+                  {/* Impl Language */}
+                  <span className="min-w-[36px] text-[10px] text-envoi-text-dim">
                     {trace.params.implLang}
                   </span>
-                  <span className="min-w-[50px] text-[10px] text-envoi-text-dim">
-                    {trace.params.sandbox}
+
+                  {/* Natural Language */}
+                  <span className="min-w-[36px] text-[10px] text-envoi-text-dim">
+                    {trace.params.lang}
                   </span>
-                  <span className="min-w-[60px] text-[10px] text-envoi-text-dim">
-                    {trace.params.agent}
+
+                  {/* Date started */}
+                  <span className="min-w-[90px] text-[10px] text-envoi-text-muted">
+                    {formatDateTime(trace.startedAt)}
                   </span>
 
                   {/* Duration */}
@@ -76,7 +114,7 @@ export default function TrajectoryListPage() {
                     {formatDuration(lastCommit?.minutesElapsed ?? 0)}
                   </span>
 
-                  {/* Progress bar */}
+                  {/* Progress bar + score */}
                   <div className="flex flex-1 items-center gap-2">
                     <div className="h-[4px] w-[100px] rounded-full bg-envoi-border-light">
                       <div
