@@ -32,6 +32,12 @@ print = tprint
 _s3_client = None
 _last_saved_trace_log_key: dict[str, tuple[int, int, str]] = {}
 _last_saved_logs_count: dict[str, int] = {}
+TRACE_SAVE_LOG_EVERY_PARTS = max(
+    1, int(os.environ.get("TRACE_SAVE_LOG_EVERY_PARTS", "25"))
+)
+LOGS_SAVE_LOG_EVERY_ROWS = max(
+    1, int(os.environ.get("LOGS_SAVE_LOG_EVERY_ROWS", "200"))
+)
 
 
 def get_s3_client():
@@ -95,7 +101,17 @@ def save_trace_parquet(
     log_key = (part_count, turn_count, session_reason)
     previous_log_key = _last_saved_trace_log_key.get(trajectory_id)
     if previous_log_key != log_key:
-        print(f"[s3] saved trace.parquet (parts={part_count})")
+        should_log = False
+        if previous_log_key is None:
+            should_log = True
+        elif session_reason:
+            should_log = True
+        elif part_count <= 3:
+            should_log = True
+        elif part_count % TRACE_SAVE_LOG_EVERY_PARTS == 0:
+            should_log = True
+        if should_log:
+            print(f"[s3] saved trace.parquet (parts={part_count})")
         _last_saved_trace_log_key[trajectory_id] = log_key
 
 
@@ -117,7 +133,14 @@ def save_logs_parquet(
 
     count = len(rows)
     previous_count = _last_saved_logs_count.get(trajectory_id)
-    if previous_count != count:
+    should_log = False
+    if previous_count is None:
+        should_log = True
+    elif count <= 50:
+        should_log = True
+    elif count - previous_count >= LOGS_SAVE_LOG_EVERY_ROWS:
+        should_log = True
+    if should_log:
         builtins.print(f"[{ts()}] [s3] saved logs.parquet (rows={count})", flush=True)
         _last_saved_logs_count[trajectory_id] = count
 

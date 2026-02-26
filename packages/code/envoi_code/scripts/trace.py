@@ -22,6 +22,7 @@ import asyncio
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -206,6 +207,53 @@ def build_direct_command(args: argparse.Namespace, trajectory_id: str) -> list[s
     return command
 
 
+def run_child_with_interrupt_handling(command: list[str]) -> int:
+    """Run child process and translate Ctrl+C into graceful child shutdown."""
+    proc = subprocess.Popen(command)  # noqa: S603
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        print(
+            "[launcher] interrupt received; stopping active run",
+            flush=True,
+        )
+        try:
+            proc.send_signal(signal.SIGINT)
+        except Exception:
+            pass
+
+        shutdown_grace_seconds = 30
+        try:
+            proc.wait(timeout=shutdown_grace_seconds)
+        except subprocess.TimeoutExpired:
+            print(
+                "[launcher] child did not exit after "
+                f"{shutdown_grace_seconds}s; terminating",
+                flush=True,
+            )
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print(
+                    "[launcher] child still alive; killing",
+                    flush=True,
+                )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+        # User interrupted the launcher: do not auto-resume.
+        return 130
+
+
 def load_trace_session_end(
     bucket: str, trajectory_id: str,
 ) -> tuple[str | None, int | None]:
@@ -346,12 +394,6 @@ def run_command(args: argparse.Namespace) -> None:
     bundle_uri = artifact_uri(bucket, trajectory_id, "repo.bundle")
     logs_uri = artifact_uri(bucket, trajectory_id, "logs.parquet")
 
-    banner = "=" * 72
-    print(banner, flush=True)
-    print(f"TRAJECTORY_ID: {trajectory_id}", flush=True)
-    print(f"TRACE_S3_URI: {trace_uri}", flush=True)
-    print(f"BUNDLE_S3_URI: {bundle_uri}", flush=True)
-    print(f"LOGS_S3_URI: {logs_uri}", flush=True)
     part_limit_label = (
         str(args.max_parts)
         if isinstance(args.max_parts, int) and args.max_parts > 0
@@ -368,23 +410,38 @@ def run_command(args: argparse.Namespace) -> None:
         else "default"
     )
     print(
-        f"agent={args.agent} part_limit={part_limit_label} "
+        "[launcher] start "
+        f"trajectory_id={trajectory_id} "
+        f"sandbox={args.sandbox} "
+        f"agent={args.agent} "
+        f"part_limit={part_limit_label} "
         f"turn_limit={turn_limit_label} "
         f"timeout={args.timeout_seconds}s "
         f"tests={(','.join(args.test) if args.test else 'all')} "
-        f"test_timeout={test_timeout_label} "
+        f"test_timeout={test_timeout_label}",
+        flush=True,
+    )
+    print(
+        "[launcher] io "
+        f"task={args.task} env={args.env} "
+        f"trace={trace_uri} bundle={bundle_uri} logs={logs_uri}",
+        flush=True,
+    )
+    print(
+        "[launcher] mode "
         f"detach={args.detach} non_preemptible={args.non_preemptible}",
         flush=True,
     )
-    print(f"task={args.task} env={args.env}", flush=True)
     if getattr(args, "raw_params", None):
         print(
-            f"params={json.dumps(args.raw_params, ensure_ascii=False, sort_keys=True)}",
+            "[launcher] params="
+            + json.dumps(
+                args.raw_params,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             flush=True,
         )
-    print(banner, flush=True)
-
-    print(f"sandbox={args.sandbox}", flush=True)
 
     if args.detach and args.auto_resume:
         print("[launcher] detach mode disables auto-resume checks", flush=True)
@@ -399,15 +456,15 @@ def run_command(args: argparse.Namespace) -> None:
             f"[launcher] attempt={restart_count + 1} trajectory_id={trajectory_id}",
             flush=True,
         )
-        result = subprocess.run(command, check=False)  # noqa: S603
-        if result.returncode in {130, 143}:
-            raise SystemExit(result.returncode)
+        return_code = run_child_with_interrupt_handling(command)
+        if return_code in {130, 143}:
+            raise SystemExit(return_code)
 
         should_retry = False
         retry_reason = ""
-        if result.returncode != 0:
+        if return_code != 0:
             should_retry = args.auto_resume and not args.detach
-            retry_reason = f"modal_exit={result.returncode}"
+            retry_reason = f"modal_exit={return_code}"
         elif args.auto_resume and not args.detach:
             reason, total_parts = load_trace_session_end(bucket, trajectory_id)
             under_part_cap = (
@@ -423,7 +480,7 @@ def run_command(args: argparse.Namespace) -> None:
                 retry_reason = f"session_end={reason} parts={total_parts}"
 
         if not should_retry:
-            raise SystemExit(result.returncode)
+            raise SystemExit(return_code)
 
         restart_count += 1
         if args.max_restarts > 0 and restart_count > args.max_restarts:
@@ -431,7 +488,7 @@ def run_command(args: argparse.Namespace) -> None:
                 "[launcher] maximum restarts reached; stopping",
                 flush=True,
             )
-            raise SystemExit(result.returncode if result.returncode != 0 else 1)
+            raise SystemExit(return_code if return_code != 0 else 1)
         print(
             f"[launcher] restarting in {args.restart_delay_seconds}s "
             f"({retry_reason})",

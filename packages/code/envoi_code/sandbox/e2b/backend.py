@@ -125,11 +125,9 @@ class E2BSandbox:
     ) -> CommandResult:
         """Execute a shell command inside the E2B sandbox.
 
-        E2B's ``commands.run()`` provides synchronous callbacks, so async
-        ``on_stdout_line`` / ``on_stderr_line`` are dispatched post-hoc after
-        the command completes.  This means there is no live streaming of output
-        during long-running commands — all output is delivered at once when the
-        command finishes.
+        Uses E2B's native command callbacks for live stdout/stderr delivery.
+        Callers that register ``on_stdout_line`` / ``on_stderr_line`` receive
+        line callbacks as output arrives.
         """
         if not quiet:
             builtins.print(f"[run] {cmd[:200]}")
@@ -145,22 +143,85 @@ class E2BSandbox:
             prefix += f"cd {shlex.quote(cwd)} && "
         full_cmd = prefix + cmd if prefix else cmd
 
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        stdout_line_buffer = ""
+        stderr_line_buffer = ""
+
+        async def emit_chunk(
+            chunk: str,
+            *,
+            sink: list[str],
+            live: bool = False,
+            line_callback: Callable[[str], Awaitable[None]] | None = None,
+            is_stdout: bool,
+        ) -> None:
+            nonlocal stdout_line_buffer, stderr_line_buffer
+            if not chunk:
+                return
+            sink.append(chunk)
+            if live:
+                builtins.print(chunk, end="", flush=True)
+            if line_callback is None:
+                return
+            if is_stdout:
+                stdout_line_buffer += chunk
+                while "\n" in stdout_line_buffer:
+                    line, stdout_line_buffer = stdout_line_buffer.split("\n", 1)
+                    await line_callback(line.rstrip("\r"))
+            else:
+                stderr_line_buffer += chunk
+                while "\n" in stderr_line_buffer:
+                    line, stderr_line_buffer = stderr_line_buffer.split("\n", 1)
+                    await line_callback(line.rstrip("\r"))
+
+        async def handle_stdout_chunk(chunk: str) -> None:
+            await emit_chunk(
+                chunk,
+                sink=stdout_chunks,
+                line_callback=on_stdout_line,
+                is_stdout=True,
+            )
+
+        async def handle_stderr_chunk(chunk: str) -> None:
+            await emit_chunk(
+                chunk,
+                sink=stderr_chunks,
+                live=stream_output,
+                line_callback=on_stderr_line,
+                is_stdout=False,
+            )
+
         t0 = time.monotonic()
-        result = await self._inner.commands.run(full_cmd, timeout=timeout, user="root")
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        exit_code = result.exit_code if result.exit_code is not None else 0
+        result: Any
+        try:
+            result = await self._inner.commands.run(
+                full_cmd,
+                timeout=timeout,
+                user="root",
+                on_stdout=handle_stdout_chunk,
+                on_stderr=handle_stderr_chunk,
+            )
+        except Exception as error:
+            # e2b raises CommandExitException on non-zero command exits.
+            if (
+                hasattr(error, "exit_code")
+                and hasattr(error, "stdout")
+                and hasattr(error, "stderr")
+            ):
+                result = error
+            else:
+                raise
 
-        # Post-hoc async callback dispatch.
-        if on_stdout_line is not None:
-            for line in stdout.splitlines():
-                await on_stdout_line(line)
-        if on_stderr_line is not None:
-            for line in stderr.splitlines():
-                await on_stderr_line(line)
+        if on_stdout_line is not None and stdout_line_buffer:
+            await on_stdout_line(stdout_line_buffer.rstrip("\r"))
+        if on_stderr_line is not None and stderr_line_buffer:
+            await on_stderr_line(stderr_line_buffer.rstrip("\r"))
 
-        if stream_output and stderr:
-            builtins.print(stderr, end="", flush=True)
+        stdout = getattr(result, "stdout", "") or "".join(stdout_chunks)
+        stderr = getattr(result, "stderr", "") or "".join(stderr_chunks)
+        exit_code_raw = getattr(result, "exit_code", None)
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 0
 
         duration_ms = int((time.monotonic() - t0) * 1000)
 

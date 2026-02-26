@@ -61,6 +61,19 @@ class AgentTurnOutcome(BaseModel):
     )
 
 
+class AgentFatalError(RuntimeError):
+    """Fatal agent-side failure that should stop the run immediately."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stop_reason: str = "agent_error",
+    ) -> None:
+        super().__init__(message)
+        self.stop_reason = stop_reason
+
+
 # --- Protocol ---
 
 

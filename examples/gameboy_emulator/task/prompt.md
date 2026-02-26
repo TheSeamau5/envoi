@@ -126,7 +126,6 @@ You may read this code to understand how hardware behaviors are implemented:
 - You MUST NOT call, link, import, or FFI-bind to any SameBoy code
 - You MUST NOT copy code verbatim — understand the logic, then write your own Rust implementation
 - Your Rust code must have zero dependencies on SameBoy — it is reference material only
-- The structural linter will reject any `extern`, `cc` crate, or FFI bindings in your code
 
 ## Debug Artifacts (REQUIRED)
 
