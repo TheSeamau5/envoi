@@ -5,6 +5,9 @@
  * faded after. Red dots for regressions, gold dots for milestones.
  * X-axis shows elapsed time labels (minutes or hours).
  *
+ * The SVG uses a viewBox and scales uniformly via the default
+ * preserveAspectRatio — dots stay circular, text stays proportional.
+ *
  * Client component — handles click interaction.
  */
 
@@ -21,10 +24,15 @@ type ProgressCurveProps = {
   activeSuite: string;
 };
 
-/** Chart layout constants — wide margins for axis labels, full-width plot area */
-const VIEW_WIDTH = 1000;
-const VIEW_HEIGHT = 320;
-const MARGIN = { top: 16, right: 48, bottom: 32, left: 52 };
+/**
+ * Chart layout constants.
+ * The viewBox defines a coordinate system; the SVG scales uniformly to fill
+ * its container width. A wider viewBox = more horizontal room for data, and
+ * the rendered height adjusts proportionally.
+ */
+const VIEW_WIDTH = 800;
+const VIEW_HEIGHT = 260;
+const MARGIN = { top: 14, right: 44, bottom: 28, left: 48 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
@@ -51,6 +59,13 @@ function toX(commitIndex: number, totalCommits: number): number {
 function toY(value: number, yMax: number): number {
   if (yMax === 0) return MARGIN.top + PLOT_HEIGHT;
   return MARGIN.top + PLOT_HEIGHT - (value / yMax) * PLOT_HEIGHT;
+}
+
+/** Map a time in minutes to an X pixel position (linear interpolation across duration) */
+function timeToX(minutes: number, totalMinutes: number): number {
+  if (totalMinutes <= 0) return MARGIN.left;
+  const ratio = Math.min(1, minutes / totalMinutes);
+  return MARGIN.left + ratio * PLOT_WIDTH;
 }
 
 /** Build SVG line path from commits */
@@ -102,8 +117,9 @@ function getYTicks(yMax: number): number[] {
   return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * yMax));
 }
 
-/** Format minutes as a time label (e.g., "0m", "30m", "1h", "2h 30m") */
+/** Format minutes as a time label — "0" for zero, then "30m", "1h", "2h", etc. */
 function formatTimeLabel(minutes: number): string {
+  if (minutes === 0) return "0";
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
@@ -112,16 +128,12 @@ function formatTimeLabel(minutes: number): string {
 }
 
 /** Generate sensible X-axis time ticks based on total duration */
-function getXTicks(commits: Commit[]): { minutes: number; commitIndex: number }[] {
-  if (commits.length === 0) return [];
+function getXTimeTicks(totalMinutes: number): number[] {
+  if (totalMinutes <= 0) return [0];
 
-  const lastCommit = commits[commits.length - 1]!;
-  const totalMinutes = lastCommit.minutesElapsed;
-
-  // Choose tick interval based on total duration
   let intervalMinutes: number;
   if (totalMinutes <= 60) {
-    intervalMinutes = 10;
+    intervalMinutes = 15;
   } else if (totalMinutes <= 180) {
     intervalMinutes = 30;
   } else if (totalMinutes <= 360) {
@@ -130,31 +142,15 @@ function getXTicks(commits: Commit[]): { minutes: number; commitIndex: number }[
     intervalMinutes = 120;
   }
 
-  const ticks: { minutes: number; commitIndex: number }[] = [];
-
-  // Always include the start
-  ticks.push({ minutes: 0, commitIndex: 0 });
-
-  // Add intermediate ticks
-  for (let tickMinutes = intervalMinutes; tickMinutes < totalMinutes; tickMinutes += intervalMinutes) {
-    // Find the closest commit to this time
-    let closestIndex = 0;
-    let closestDist = Infinity;
-    for (let idx = 0; idx < commits.length; idx++) {
-      const dist = Math.abs(commits[idx]!.minutesElapsed - tickMinutes);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closestIndex = idx;
-      }
-    }
-    ticks.push({ minutes: tickMinutes, commitIndex: closestIndex });
+  const ticks: number[] = [0];
+  for (let tick = intervalMinutes; tick < totalMinutes; tick += intervalMinutes) {
+    ticks.push(tick);
   }
-
-  // Always include the end
-  if (totalMinutes > 0) {
-    ticks.push({ minutes: totalMinutes, commitIndex: commits.length - 1 });
+  // Include the end if it's not already close to the last tick
+  const lastTick = ticks[ticks.length - 1]!;
+  if (totalMinutes - lastTick > intervalMinutes * 0.4) {
+    ticks.push(totalMinutes);
   }
-
   return ticks;
 }
 
@@ -166,15 +162,16 @@ export function ProgressCurve({
 }: ProgressCurveProps) {
   const yMax = getYMax(activeSuite);
   const yTicks = getYTicks(yMax);
-  const xTicks = getXTicks(commits);
+  const lastCommit = commits[commits.length - 1];
+  const totalMinutes = lastCommit?.minutesElapsed ?? 0;
+  const xTimeTicks = getXTimeTicks(totalMinutes);
 
   return (
-    <div className="w-full px-[6px] pt-[10px]">
+    <div className="w-full px-[6px] pt-[6px] pb-[2px]">
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         className="w-full"
-        style={{ height: 320, fontFamily: T.mono }}
-        preserveAspectRatio="none"
+        style={{ fontFamily: T.mono }}
       >
         {/* Horizontal grid lines */}
         {yTicks.map((tick) => (
@@ -190,11 +187,11 @@ export function ProgressCurve({
         ))}
 
         {/* Vertical grid lines at time ticks */}
-        {xTicks.map((tick) => {
-          const xPos = toX(tick.commitIndex, commits.length);
+        {xTimeTicks.map((tickMinutes) => {
+          const xPos = timeToX(tickMinutes, totalMinutes);
           return (
             <line
-              key={`x-grid-${tick.minutes}`}
+              key={`x-grid-${tickMinutes}`}
               x1={xPos}
               y1={MARGIN.top}
               x2={xPos}
@@ -232,17 +229,17 @@ export function ProgressCurve({
         ))}
 
         {/* X axis labels — time */}
-        {xTicks.map((tick) => {
-          const xPos = toX(tick.commitIndex, commits.length);
+        {xTimeTicks.map((tickMinutes) => {
+          const xPos = timeToX(tickMinutes, totalMinutes);
           return (
             <text
-              key={`x-label-${tick.minutes}`}
+              key={`x-label-${tickMinutes}`}
               x={xPos}
-              y={MARGIN.top + PLOT_HEIGHT + 18}
+              y={MARGIN.top + PLOT_HEIGHT + 16}
               textAnchor="middle"
-              style={{ fontSize: "9px", fill: T.textDim }}
+              style={{ fontSize: "8px", fill: T.textDim }}
             >
-              {formatTimeLabel(tick.minutes)}
+              {formatTimeLabel(tickMinutes)}
             </text>
           );
         })}
@@ -267,7 +264,7 @@ export function ProgressCurve({
           d={buildLinePath(commits, activeSuite, yMax)}
           fill="none"
           stroke={T.border}
-          strokeWidth={1.5}
+          strokeWidth={1.2}
           opacity={0.4}
         />
 
@@ -276,7 +273,7 @@ export function ProgressCurve({
           d={buildLinePath(commits.slice(0, selectedIndex + 1), activeSuite, yMax, commits.length)}
           fill="none"
           stroke={T.accent}
-          strokeWidth={1.5}
+          strokeWidth={1.2}
         />
 
         {/* Commit dots */}
@@ -294,7 +291,7 @@ export function ProgressCurve({
                 ? T.accent
                 : T.textDim;
 
-          const dotRadius = isSelected ? 6 : 3.5;
+          const dotRadius = isSelected ? 5 : 3;
 
           return (
             <circle
@@ -304,7 +301,7 @@ export function ProgressCurve({
               r={dotRadius}
               fill={dotColor}
               stroke={isSelected ? T.text : "none"}
-              strokeWidth={isSelected ? 2 : 0}
+              strokeWidth={isSelected ? 1.5 : 0}
               style={{ cursor: "pointer" }}
               onClick={() => onSelect(dotIndex)}
             >
