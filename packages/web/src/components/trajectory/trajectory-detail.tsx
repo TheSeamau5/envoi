@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import type { Trajectory, DetailLeftTab, DetailRightTab } from "@/lib/types";
 import { SUITES } from "@/lib/constants";
-import { usePersistedState } from "@/lib/storage";
+import { setLayoutCookie } from "@/lib/cookies.client";
 import {
   Tooltip,
   TooltipContent,
@@ -27,9 +27,16 @@ import { CodePanel } from "./code-panel";
 
 type TrajectoryDetailProps = {
   trajectory: Trajectory;
+  /** Server-read initial values — eliminates FOUC on panel layout */
+  initialRightPanelOpen: boolean;
+  initialDividerPct: number;
 };
 
-export function TrajectoryDetail({ trajectory }: TrajectoryDetailProps) {
+export function TrajectoryDetail({
+  trajectory,
+  initialRightPanelOpen,
+  initialDividerPct,
+}: TrajectoryDetailProps) {
   const { commits } = trajectory;
 
   /** Selected commit index */
@@ -46,9 +53,23 @@ export function TrajectoryDetail({ trajectory }: TrajectoryDetailProps) {
   /** Suite filter for timeline */
   const [activeSuite, setActiveSuite] = useState("all");
 
-  /** Right panel open/close + divider position (persisted) */
-  const [rightPanelOpen, setRightPanelOpen] = usePersistedState("detail-right-panel-open", true);
-  const [dividerPct, setDividerPct] = usePersistedState("detail-divider-pct", 42);
+  /**
+   * Right panel open/close + divider position.
+   * Initial values come from server-read cookies so SSR matches hydration.
+   * On change we write back to cookies for the next SSR pass.
+   */
+  const [rightPanelOpen, setRightPanelOpenRaw] = useState(initialRightPanelOpen);
+  const [dividerPct, setDividerPctRaw] = useState(initialDividerPct);
+
+  const setRightPanelOpen = useCallback((open: boolean) => {
+    setRightPanelOpenRaw(open);
+    setLayoutCookie("rightPanelOpen", open);
+  }, []);
+
+  const setDividerPct = useCallback((pct: number) => {
+    setDividerPctRaw(pct);
+    setLayoutCookie("dividerPct", pct);
+  }, []);
 
   /** Refs for drag + keyboard */
   const containerRef = useRef<HTMLDivElement>(null);

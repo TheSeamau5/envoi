@@ -5,6 +5,7 @@
 
 import { notFound } from "next/navigation";
 import { getTrajectoryById } from "@/lib/mock";
+import { readLayoutCookies } from "@/lib/cookies";
 import { TrajectoryDetail } from "@/components/trajectory/trajectory-detail";
 
 type TrajectoryPageProps = {
@@ -19,5 +20,13 @@ export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
     notFound();
   }
 
-  return <TrajectoryDetail trajectory={trajectory} />;
+  const { rightPanelOpen, dividerPct } = await readLayoutCookies();
+
+  return (
+    <TrajectoryDetail
+      trajectory={trajectory}
+      initialRightPanelOpen={rightPanelOpen}
+      initialDividerPct={dividerPct}
+    />
+  );
 }
