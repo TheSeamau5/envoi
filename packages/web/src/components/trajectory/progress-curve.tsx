@@ -57,11 +57,13 @@ function buildLinePath(
   commits: Commit[],
   activeSuite: string,
   yMax: number,
+  totalCommits?: number,
 ): string {
+  const total = totalCommits ?? commits.length;
   return commits
     .map((commit, pointIndex) => {
       const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = toX(pointIndex, commits.length);
+      const xPos = toX(pointIndex, total);
       const yPos = toY(getYValue(commit, activeSuite), yMax);
       return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
     })
@@ -135,7 +137,7 @@ export function ProgressCurve({
 
         {/* Active line up to selection */}
         <path
-          d={buildLinePath(commits.slice(0, selectedIndex + 1), activeSuite, yMax)}
+          d={buildLinePath(commits.slice(0, selectedIndex + 1), activeSuite, yMax, commits.length)}
           fill="none"
           stroke={T.accent}
           strokeWidth={1.5}
