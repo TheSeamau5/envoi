@@ -111,7 +111,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
             />
           ))}
 
-          {/* Y axis labels */}
+          {/* Y axis labels (left: absolute count) */}
           {yTicks.map((tick) => (
             <text
               key={`y-label-${tick}`}
@@ -121,6 +121,19 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
               style={{ fontSize: "9px", fill: T.textDim }}
             >
               {tick}
+            </text>
+          ))}
+
+          {/* Y axis labels (right: percentage) */}
+          {yTicks.map((tick) => (
+            <text
+              key={`y-pct-${tick}`}
+              x={VIEW_WIDTH - MARGIN.right + 8}
+              y={toY(tick) + 3}
+              textAnchor="start"
+              style={{ fontSize: "9px", fill: T.textDim }}
+            >
+              {`${Math.round((tick / TOTAL_TESTS) * 100)}%`}
             </text>
           ))}
 

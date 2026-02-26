@@ -18,7 +18,9 @@ import {
   TrendingUp,
   Target,
   LayoutGrid,
+  ArrowUpRight,
 } from "lucide-react";
+import Link from "next/link";
 import type { Trajectory, CompareMode, CompareTab } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
 import { TOTAL_TESTS } from "@/lib/constants";
@@ -31,8 +33,6 @@ import { SetupCompare } from "./setup-compare";
 type CompareClientProps = {
   allTraces: Trajectory[];
 };
-
-const MAX_SELECTED = 4;
 
 const TABS: { key: CompareTab; label: string; icon: typeof TrendingUp }[] = [
   { key: "curves", label: "Progress Curves", icon: TrendingUp },
@@ -61,7 +61,6 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       if (prev.includes(traceId)) {
         return prev.filter((existingId) => existingId !== traceId);
       }
-      if (prev.length >= MAX_SELECTED) return prev;
       return [...prev, traceId];
     });
   }
@@ -128,7 +127,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
         {mode === "traces" && (
           <div className="ml-auto flex items-center gap-2">
             <span className="text-[10px] text-envoi-text-dim">
-              {selectedTraces.length} / {MAX_SELECTED} selected
+              {selectedTraces.length} selected
             </span>
           </div>
         )}
@@ -149,18 +148,17 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 const color = isSelected
                   ? TRACE_COLORS[selIndex % TRACE_COLORS.length]!
                   : undefined;
-                const isDisabled = !isSelected && selectedIds.length >= MAX_SELECTED;
 
                 return (
-                  <button
+                  <div
                     key={trace.id}
-                    onClick={() => toggleTrace(trace.id)}
-                    disabled={isDisabled}
-                    className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
                     style={{
                       borderLeft: isSelected ? `3px solid ${color!.line}` : "3px solid transparent",
                       background: isSelected ? color!.fill : undefined,
+                      cursor: "pointer",
                     }}
+                    onClick={() => toggleTrace(trace.id)}
                   >
                     {/* Checkbox */}
                     <span
@@ -193,16 +191,15 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                       </span>
                     </div>
 
-                    {/* Color label */}
-                    {isSelected && color && (
-                      <span
-                        className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
-                        style={{ background: color.line }}
-                      >
-                        {color.label}
-                      </span>
-                    )}
-                  </button>
+                    {/* Drill-down link */}
+                    <Link
+                      href={`/trajectory/${trace.id}`}
+                      onClick={(event) => event.stopPropagation()}
+                      className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
+                    >
+                      <ArrowUpRight size={12} />
+                    </Link>
+                  </div>
                 );
               })}
             </div>
@@ -210,12 +207,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
           {/* Main content area */}
           <div className="flex-1 overflow-y-auto p-4">
-            {selectedTraces.length < 2 ? (
+            {selectedTraces.length === 0 ? (
               <div className="flex h-full items-center justify-center">
                 <div className="flex flex-col items-center gap-2">
                   <GitCompareArrows size={24} className="text-envoi-text-dim" />
                   <span className="text-[12px] text-envoi-text-muted">
-                    Select at least 2 traces to compare
+                    Select traces to compare
                   </span>
                 </div>
               </div>

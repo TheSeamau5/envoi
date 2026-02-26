@@ -16,14 +16,13 @@ export const SUITES: Suite[] = [
 /** Total number of tests across all suites */
 export const TOTAL_TESTS = SUITES.reduce((sum, suite) => sum + suite.total, 0);
 
-/** Available model identifiers for trajectory generation */
+/** Available model identifiers in agent/model format */
 export const MODELS = [
-  "claude-opus-4-5-20250514",
-  "claude-sonnet-4-5-20250514",
-  "deepseek-v3",
-  "gpt-5.3-codex",
-  "o3-2025-04-16",
-  "qwen3-32b",
+  "claude-code/opus-4.6",
+  "claude-code/sonnet-4.6",
+  "codex/gpt-5.3-codex",
+  "opencode/glm-5",
+  "opencode/minimax-m2.5",
 ] as const;
 
 /** Key milestones tracked across trajectories */
