@@ -18,6 +18,19 @@ from typing import Any
 from envoi_code.sandbox.base import CommandResult, SandboxConfig
 
 
+def resolve_e2b_max_session_seconds() -> int:
+    raw_value = os.environ.get("E2B_MAX_SESSION_SECONDS", "").strip()
+    if not raw_value:
+        return 3600
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return 3600
+    if parsed <= 0:
+        return 3600
+    return parsed
+
+
 class E2BSandbox:
     """Sandbox implementation backed by E2B.
 
@@ -39,18 +52,19 @@ class E2BSandbox:
         """Create a new E2B sandbox from a pre-built template.
 
         Reads ``config.template`` (falls back to ``E2B_TEMPLATE`` env var
-        or ``"envoi-trace"``). Ignores ``config.image_requirements`` and
+        when set). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
         if config.environment_docker_build_args:
-            raise RuntimeError(
-                "E2B backend does not support per-run Docker build args. "
-                "Use a pre-built E2B template or switch to --sandbox modal."
+            arg_keys = ", ".join(sorted(config.environment_docker_build_args.keys()))
+            builtins.print(
+                "[e2b] ignoring per-run Docker build args "
+                f"(template is pre-built): {arg_keys}"
             )
         if config.cpu is not None or config.memory_mb is not None:
-            raise RuntimeError(
-                "E2B backend does not support per-run cpu/memory requests. "
-                "Configure resources in the E2B template instead."
+            builtins.print(
+                "[e2b] ignoring per-run cpu/memory request "
+                "(configure resources in the template)"
             )
         try:
             e2b_module = importlib.import_module(
@@ -71,23 +85,29 @@ class E2BSandbox:
                 "AsyncSandbox"
             )
 
-        resolved_template = (
-            config.template
-            or os.environ.get("E2B_TEMPLATE", "envoi-trace")
-        )
-        # E2B Pro caps at 24 h; hobby at 1 h.
-        capped_timeout = min(config.timeout, 86400)
-        kwargs: dict[str, Any] = {
-            "template": resolved_template,
-            "timeout": capped_timeout,
-        }
+        resolved_template = config.template or os.environ.get("E2B_TEMPLATE")
+        # Provider hard cap is plan-dependent (hobby=1h, pro=24h).
+        provider_max = 86400
+        requested_timeout = min(config.timeout, provider_max)
+        plan_max = resolve_e2b_max_session_seconds()
+        capped_timeout = min(requested_timeout, plan_max)
+        if capped_timeout < requested_timeout:
+            builtins.print(
+                "[e2b] reducing sandbox timeout to fit plan cap: "
+                f"requested={requested_timeout}s cap={plan_max}s "
+                f"applied={capped_timeout}s"
+            )
+        kwargs: dict[str, Any] = {"timeout": capped_timeout}
+        if resolved_template:
+            kwargs["template"] = resolved_template
         if config.api_key:
             kwargs["api_key"] = config.api_key
         inner = await async_sandbox.create(**kwargs)
+        template_label = resolved_template or "<provider-default>"
         builtins.print(
             f"[e2b] sandbox created: "
             f"id={inner.sandbox_id} "
-            f"template={resolved_template}"
+            f"template={template_label}"
         )
         return E2BSandbox(inner)
 
@@ -105,11 +125,9 @@ class E2BSandbox:
     ) -> CommandResult:
         """Execute a shell command inside the E2B sandbox.
 
-        E2B's ``commands.run()`` provides synchronous callbacks, so async
-        ``on_stdout_line`` / ``on_stderr_line`` are dispatched post-hoc after
-        the command completes.  This means there is no live streaming of output
-        during long-running commands — all output is delivered at once when the
-        command finishes.
+        Uses E2B's native command callbacks for live stdout/stderr delivery.
+        Callers that register ``on_stdout_line`` / ``on_stderr_line`` receive
+        line callbacks as output arrives.
         """
         if not quiet:
             builtins.print(f"[run] {cmd[:200]}")
@@ -125,22 +143,85 @@ class E2BSandbox:
             prefix += f"cd {shlex.quote(cwd)} && "
         full_cmd = prefix + cmd if prefix else cmd
 
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        stdout_line_buffer = ""
+        stderr_line_buffer = ""
+
+        async def emit_chunk(
+            chunk: str,
+            *,
+            sink: list[str],
+            live: bool = False,
+            line_callback: Callable[[str], Awaitable[None]] | None = None,
+            is_stdout: bool,
+        ) -> None:
+            nonlocal stdout_line_buffer, stderr_line_buffer
+            if not chunk:
+                return
+            sink.append(chunk)
+            if live:
+                builtins.print(chunk, end="", flush=True)
+            if line_callback is None:
+                return
+            if is_stdout:
+                stdout_line_buffer += chunk
+                while "\n" in stdout_line_buffer:
+                    line, stdout_line_buffer = stdout_line_buffer.split("\n", 1)
+                    await line_callback(line.rstrip("\r"))
+            else:
+                stderr_line_buffer += chunk
+                while "\n" in stderr_line_buffer:
+                    line, stderr_line_buffer = stderr_line_buffer.split("\n", 1)
+                    await line_callback(line.rstrip("\r"))
+
+        async def handle_stdout_chunk(chunk: str) -> None:
+            await emit_chunk(
+                chunk,
+                sink=stdout_chunks,
+                line_callback=on_stdout_line,
+                is_stdout=True,
+            )
+
+        async def handle_stderr_chunk(chunk: str) -> None:
+            await emit_chunk(
+                chunk,
+                sink=stderr_chunks,
+                live=stream_output,
+                line_callback=on_stderr_line,
+                is_stdout=False,
+            )
+
         t0 = time.monotonic()
-        result = await self._inner.commands.run(full_cmd, timeout=timeout, user="root")
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        exit_code = result.exit_code if result.exit_code is not None else 0
+        result: Any
+        try:
+            result = await self._inner.commands.run(
+                full_cmd,
+                timeout=timeout,
+                user="root",
+                on_stdout=handle_stdout_chunk,
+                on_stderr=handle_stderr_chunk,
+            )
+        except Exception as error:
+            # e2b raises CommandExitException on non-zero command exits.
+            if (
+                hasattr(error, "exit_code")
+                and hasattr(error, "stdout")
+                and hasattr(error, "stderr")
+            ):
+                result = error
+            else:
+                raise
 
-        # Post-hoc async callback dispatch.
-        if on_stdout_line is not None:
-            for line in stdout.splitlines():
-                await on_stdout_line(line)
-        if on_stderr_line is not None:
-            for line in stderr.splitlines():
-                await on_stderr_line(line)
+        if on_stdout_line is not None and stdout_line_buffer:
+            await on_stdout_line(stdout_line_buffer.rstrip("\r"))
+        if on_stderr_line is not None and stderr_line_buffer:
+            await on_stderr_line(stderr_line_buffer.rstrip("\r"))
 
-        if stream_output and stderr:
-            builtins.print(stderr, end="", flush=True)
+        stdout = getattr(result, "stdout", "") or "".join(stdout_chunks)
+        stderr = getattr(result, "stderr", "") or "".join(stderr_chunks)
+        exit_code_raw = getattr(result, "exit_code", None)
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 0
 
         duration_ms = int((time.monotonic() - t0) * 1000)
 

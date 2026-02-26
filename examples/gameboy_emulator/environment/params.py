@@ -30,6 +30,18 @@ def params() -> dict[str, object]:
         "advisor_model": "@anthropic/claude-opus-4.6",
         "advisor_model_thinking_level": "high",
         "advisor_max_output_tokens": 128000,
+        "advisor_system_prompt": (
+            "You are a Game Boy emulator engineering reviewer. "
+            "Given failed ROM test results and current Rust emulation code, "
+            "identify the most likely root causes in CPU instruction "
+            "handling, PPU timing, or memory banking. Cluster recurring "
+            "error patterns and propose a prioritized fix plan with "
+            "concrete file-level changes."
+        ),
+        "advisor_user_prompt_prefix": (
+            "You are reviewing a Rust Game Boy emulator implementation "
+            "after an evaluation run."
+        ),
         "failed_tests_feedback_limit": 50,
     }
 

@@ -48,7 +48,7 @@ from envoi.logging import (
     update_log_context,
 )
 
-from envoi_code.agents.base import Agent, AgentSetupContext
+from envoi_code.agents.base import Agent, AgentFatalError, AgentSetupContext
 from envoi_code.agents.codex import CodexAgent
 from envoi_code.agents.opencode import OpenCodeAgent
 from envoi_code.models import (
@@ -389,6 +389,32 @@ def format_progress_counter(
     if isinstance(limit, int) and limit > 0:
         return f"{name}={current}/{limit}"
     return f"{name}={current}"
+
+
+def format_compact_duration(total_seconds: float | int) -> str:
+    seconds = max(0, int(total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def format_turn_eval_label(
+    *,
+    passed: int | None,
+    total: int | None,
+    has_error: bool,
+) -> str:
+    if not isinstance(passed, int) or not isinstance(total, int):
+        return "unknown"
+    if total <= 0:
+        return "error(no-tests)" if has_error else "no-tests"
+    if has_error:
+        return f"error({passed}/{total})"
+    return f"{passed}/{total}"
 
 
 def get_trace_latest_commit(trace: AgentTrace) -> str | None:
@@ -1070,6 +1096,16 @@ class EvaluationScheduler:
             evaluation.tests = EvaluationScheduler.normalize_tests(
                 payload.get("tests"),
             )
+            if (
+                evaluation.total == 0
+                and evaluation.passed == 0
+                and evaluation.failed == 0
+            ):
+                evaluation.status = "failed"
+                if not evaluation.error:
+                    evaluation.error = (
+                        "Evaluation returned zero tests"
+                    )
 
     @staticmethod
     def apply_failure(
@@ -1172,13 +1208,11 @@ class EvaluationScheduler:
                         (time.monotonic() - started_mono) * 1000,
                     )
                 evaluation.completed_at = datetime.now(UTC).isoformat()
-                if (
-                    evaluation.status == "completed"
-                    and evaluation.total == 0
-                    and not evaluation.error
-                ):
+                if evaluation.total == 0:
                     print(
-                        f"[eval] commit {commit[:10]} status=no_tests"
+                        f"[eval] commit {commit[:10]} "
+                        f"status={evaluation.status} tests=0 "
+                        f"error={evaluation.error or 'none'}"
                     )
                 else:
                     print(
@@ -1252,9 +1286,47 @@ def build_followup_prompt(
     evaluation_feedback: str | None = None,
     continue_prompt: str = "Continue.",
     include_mcp_status: bool = False,
+    elapsed_seconds: float = 0,
+    timeout_seconds: float = 7200,
+    consecutive_no_progress_turns: int = 0,
 ) -> str:
     """Build the re-injection prompt with current test status."""
     sections: list[str] = [continue_prompt]
+
+    # Time/budget awareness
+    remaining_seconds = max(0, timeout_seconds - elapsed_seconds)
+    remaining_minutes = int(remaining_seconds / 60)
+    if 0 < remaining_minutes < 30:
+        sections.append(
+            f"Time check: ~{remaining_minutes} minutes remaining. "
+            "Prioritize fixing the highest-impact failing tests "
+            "over adding new features."
+        )
+
+    # Plateau detection and approach-switching guidance
+    if consecutive_no_progress_turns >= 5:
+        sections.append(
+            "PLATEAU DETECTED: No progress in "
+            f"{consecutive_no_progress_turns} turns. "
+            "REQUIRED: Before your next code change:\n"
+            "1. Write a minimal reproducer for ONE failing test "
+            "as a local test\n"
+            "2. Run it and examine the debug artifacts\n"
+            "3. Identify the specific bug\n"
+            "4. Fix that one issue and verify locally before committing"
+        )
+    elif consecutive_no_progress_turns >= 3:
+        sections.append(
+            "No new tests have passed in the last "
+            f"{consecutive_no_progress_turns} turns. "
+            "Consider changing your approach:\n"
+            "- Re-read the failing test's expected output carefully\n"
+            "- Check your debug artifacts for the failing case\n"
+            "- If iterating on the same fix, step back and "
+            "reconsider the root cause\n"
+            "- Write a minimal local test to isolate the issue"
+        )
+
     if evaluation_feedback:
         sections.append(
             "End-of-turn evaluation feedback:\n"
@@ -1604,9 +1676,13 @@ def build_advisor_user_prompt(
     selected_failed_tests: list[dict[str, Any]],
     diagnostic_clusters: list[dict[str, Any]],
     code_snapshot: dict[str, Any],
+    user_prompt_prefix: str = (
+        "You are reviewing a Rust C-compiler implementation "
+        "after an evaluation run."
+    ),
 ) -> str:
     lines: list[str] = [
-        "You are reviewing a Rust C-compiler implementation after an evaluation run.",
+        user_prompt_prefix,
         "",
         "Goal task prompt:",
         task_prompt,
@@ -1665,6 +1741,8 @@ async def build_advisor_assessment(
     advisor_model_thinking_level: str,
     advisor_max_output_tokens: int | None,
     failed_tests_limit: int,
+    advisor_system_prompt: str | None = None,
+    advisor_user_prompt_prefix: str | None = None,
 ) -> str:
     payload_for_feedback = enrich_evaluation_payload(
         copy.deepcopy(payload),
@@ -1697,14 +1775,19 @@ async def build_advisor_assessment(
         f"snapshot_files={snapshot_file_count} "
         f"snapshot_chars={snapshot_total_chars}"
     )
-    user_prompt = build_advisor_user_prompt(
+    advisor_user_kwargs: dict[str, Any] = dict(
         task_prompt=task_prompt,
         commit=commit,
         selected_failed_tests=selected_failed_tests,
         diagnostic_clusters=diagnostic_clusters,
         code_snapshot=code_snapshot,
     )
-    system_prompt = (
+    if advisor_user_prompt_prefix is not None:
+        advisor_user_kwargs["user_prompt_prefix"] = (
+            advisor_user_prompt_prefix
+        )
+    user_prompt = build_advisor_user_prompt(**advisor_user_kwargs)
+    system_prompt = advisor_system_prompt or (
         "You are a strict compiler engineering reviewer. "
         "Given failed tests and current Rust code, identify the most likely "
         "root causes, cluster recurring error patterns, and propose a "
@@ -2209,6 +2292,12 @@ async def run_trajectory(
     CURRENT_SUITE_FEEDBACK_PRIORITY = resolve_suite_feedback_priority(
         environment_params.get("diagnostics_suite_priority"),
     )
+    advisor_system_prompt_override = _string_or_none(
+        environment_params.get("advisor_system_prompt"),
+    )
+    advisor_user_prompt_prefix_override = _string_or_none(
+        environment_params.get("advisor_user_prompt_prefix"),
+    )
     task_params_loaded["_eval_test_paths"] = selected_test_paths
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     task_params_loaded["_environment_params"] = environment_params
@@ -2224,23 +2313,51 @@ async def run_trajectory(
         if resolved_docker_plan is not None
         else {}
     )
-    if sandbox_provider == "e2b" and resolved_docker_plan is not None:
-        if docker_build_args or dockerfile_rel_path != "Dockerfile":
-            raise RuntimeError(
-                "E2B backend cannot honor environment Docker plan overrides "
-                "(dockerfile path/build args) in v1. "
-                "Use a compatible E2B template or switch to --sandbox modal."
+    if sandbox_provider == "e2b":
+        if docker_build_args:
+            ignored_arg_keys = ", ".join(sorted(docker_build_args.keys()))
+            print(
+                "[sandbox][e2b] ignoring environment Docker build args "
+                f"(template is pre-built): {ignored_arg_keys}"
             )
-    effective_sandbox_cpu = merge_resource_request(
-        resource_name="sandbox cpu",
-        requested=sandbox_cpu,
-        minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
-    )
-    effective_sandbox_memory_mb = merge_resource_request(
-        resource_name="sandbox memory_mb",
-        requested=sandbox_memory_mb,
-        minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
-    )
+            docker_build_args = {}
+        if dockerfile_rel_path != "Dockerfile":
+            print(
+                "[sandbox][e2b] ignoring environment Dockerfile override "
+                f"(template is pre-built): {dockerfile_rel_path}"
+            )
+
+    if sandbox_provider == "modal":
+        effective_sandbox_cpu = merge_resource_request(
+            resource_name="sandbox cpu",
+            requested=sandbox_cpu,
+            minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
+        )
+        effective_sandbox_memory_mb = merge_resource_request(
+            resource_name="sandbox memory_mb",
+            requested=sandbox_memory_mb,
+            minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
+        )
+    else:
+        if (
+            sandbox_cpu is not None
+            or effective_resolved_env_params.sandbox_requirements.min_cpu is not None
+        ):
+            print(
+                "[sandbox][e2b] ignoring cpu request/minimum "
+                "(configure resources in the E2B template)"
+            )
+        if (
+            sandbox_memory_mb is not None
+            or effective_resolved_env_params.sandbox_requirements.min_memory_mb
+            is not None
+        ):
+            print(
+                "[sandbox][e2b] ignoring memory request/minimum "
+                "(configure resources in the E2B template)"
+            )
+        effective_sandbox_cpu = None
+        effective_sandbox_memory_mb = None
     run_metadata: dict[str, Any] = {
         "raw_params": raw_params_map,
         "resolved_task": {
@@ -2315,20 +2432,8 @@ async def run_trajectory(
         periodic_logs_flush_loop(),
     )
 
-    banner = "=" * 72
-    print(banner)
-    print(f"TRAJECTORY_ID: {trajectory_id}")
-    print(f"TRACE_S3_URI: {trace_s3_uri}")
-    print(f"BUNDLE_S3_URI: {bundle_s3_uri}")
-    print(f"LOGS_S3_URI: {logs_s3_uri}")
     part_limit_label = str(max_parts) if max_parts is not None else "none"
     turn_limit_label = str(max_turns) if max_turns is not None else "none"
-    print(
-        f"agent={agent_name} model={resolved_model} "
-        f"part_limit={part_limit_label} turn_limit={turn_limit_label} "
-        f"timeout={timeout_seconds}s "
-        f"message_timeout={message_timeout_seconds}s"
-    )
     test_selector = ",".join(selected_test_paths) if selected_test_paths else "all"
     test_timeout_label = (
         f"{test_timeout_seconds}s"
@@ -2336,6 +2441,20 @@ async def run_trajectory(
         else "default"
     )
     print(
+        "[run] start "
+        f"trajectory_id={trajectory_id} "
+        f"sandbox={sandbox_provider} "
+        f"agent={agent_name} "
+        f"model={resolved_model}"
+    )
+    print(
+        "[run] limits "
+        f"part_limit={part_limit_label} turn_limit={turn_limit_label} "
+        f"timeout={timeout_seconds}s "
+        f"message_timeout={message_timeout_seconds}s"
+    )
+    print(
+        "[run] eval "
         f"tests={test_selector} "
         f"test_timeout={test_timeout_label} "
         f"eval_concurrency={EVALUATION_CONCURRENCY} "
@@ -2346,13 +2465,19 @@ async def run_trajectory(
         f"{format_suite_feedback_priority(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
         f"failed_tests_limit={failed_tests_feedback_limit}"
     )
+    print(
+        "[run] io "
+        f"task={task_path} env={env_path} "
+        f"trace={trace_s3_uri} "
+        f"bundle={bundle_s3_uri} "
+        f"logs={logs_s3_uri}"
+    )
     if existing_trace is not None:
         print(
             f"[resume] found existing trace: "
             f"parts={len(existing_trace.parts)} "
             f"turns={len(existing_trace.turns)}"
         )
-    print(banner)
 
     sandbox: Sandbox | None = None
     agent_trace: AgentTrace | None = None
@@ -2364,6 +2489,7 @@ async def run_trajectory(
     part_count = 0
     latest_git_commit: str | None = None
     end_reason: str = "agent_error"
+    interrupted_by_signal = False
 
     try:
         # --- Create sandbox ---
@@ -2467,6 +2593,7 @@ async def run_trajectory(
 
         # --- Discover test paths from envoi /schema ---
         required_test_paths: list[str] = []
+        schema_available = False
         schema_result = await sandbox.run(
             "curl -sf http://localhost:8000/schema",
             quiet=True, timeout=30,
@@ -2478,6 +2605,7 @@ async def run_trajectory(
             try:
                 schema = json.loads(schema_result.stdout)
                 required_test_paths = extract_leaf_paths(schema)
+                schema_available = True
                 print(
                     f"[schema] discovered "
                     f"{len(required_test_paths)} test paths"
@@ -2486,8 +2614,19 @@ async def run_trajectory(
                 print(f"[schema] parse error: {e}")
         else:
             print(
-                "[schema] /schema not available, "
-                "running without completion tracking"
+                "[schema] /schema not available; "
+                "cannot verify test inventory"
+            )
+
+        if not schema_available:
+            raise RuntimeError(
+                "Environment schema is unavailable. "
+                "Aborting because test inventory cannot be verified."
+            )
+        if not required_test_paths:
+            raise RuntimeError(
+                "Environment schema reported zero tests. "
+                "Aborting run."
             )
 
         if selected_test_paths and required_test_paths:
@@ -2638,6 +2777,8 @@ async def run_trajectory(
         )
         next_turn_feedback_eval_id: str | None = None
         consecutive_turn_failures = 0
+        previous_best_passed = 0
+        consecutive_no_progress_turns = 0
 
         while True:
             update_log_context(turn=turn_count + 1, part=part_count)
@@ -2683,7 +2824,6 @@ async def run_trajectory(
                 message_timeout_seconds=message_timeout_seconds,
             )
 
-            turn_banner = "=" * 60
             part_counter_label = format_progress_counter(
                 name="part",
                 current=part_count,
@@ -2694,14 +2834,20 @@ async def run_trajectory(
                 current=turn_count + 1,
                 limit=max_turns,
             )
-            builtins.print(f"\n{turn_banner}", flush=True)
+            elapsed_label = format_compact_duration(elapsed)
+            remaining_label = format_compact_duration(
+                max(0, remaining_run_seconds)
+            )
             builtins.print(
-                f" TURN {turn_count + 1}  "
-                f"({part_counter_label} {turn_counter_label} "
-                f"timeout={turn_timeout_seconds}s)",
+                "\n"
+                f"[turn] start "
+                f"turn={turn_count + 1} "
+                f"{part_counter_label} "
+                f"elapsed={elapsed_label} "
+                f"remaining={remaining_label} "
+                f"timeout={turn_timeout_seconds}s",
                 flush=True,
             )
-            builtins.print(turn_banner, flush=True)
 
             turn_started_at = datetime.now(UTC).isoformat()
             previous_part_count = part_count
@@ -2747,21 +2893,41 @@ async def run_trajectory(
                 last_part_timestamp_ms_ref=stream_last_part_ts_ref,
                 turn_record=turn_record,
                 session_id=session_id,
+                run_started_mono=start_time,
                 stop_at_part_ref=winner_stop_part_ref,
                 schedule_commit_evaluation=evaluator.schedule,
             )
 
-            turn_outcome = await agent_backend.run_turn(
-                prompt_text=prompt_text,
-                timeout=turn_timeout_seconds,
-                current_turn=turn_count,
-                remaining_parts_budget=remaining_parts_budget,
-                global_part_count=part_count,
-                global_max_parts=max_parts or 0,
-                global_max_turns=max_turns or 0,
-                global_elapsed_seconds=int(max(0, elapsed)),
-                on_stream_part=stream_part_cb,
-            )
+            try:
+                turn_outcome = await agent_backend.run_turn(
+                    prompt_text=prompt_text,
+                    timeout=turn_timeout_seconds,
+                    current_turn=turn_count,
+                    remaining_parts_budget=remaining_parts_budget,
+                    global_part_count=part_count,
+                    global_max_parts=max_parts or 0,
+                    global_max_turns=max_turns or 0,
+                    global_elapsed_seconds=int(max(0, elapsed)),
+                    on_stream_part=stream_part_cb,
+                )
+            except AgentFatalError as fatal_error:
+                stop_reason = (
+                    fatal_error.stop_reason
+                    if fatal_error.stop_reason in {
+                        "part_limit",
+                        "timeout",
+                        "agent_error",
+                        "envoi_error",
+                        "solved",
+                    }
+                    else "agent_error"
+                )
+                print(
+                    "[run] fatal agent stop: "
+                    f"{fatal_error} reason={stop_reason}"
+                )
+                end_reason = stop_reason
+                break
             part_count = stream_part_counter[0]
             git_commit = stream_git_commit_ref[0]
             if isinstance(git_commit, str) and git_commit:
@@ -2803,6 +2969,13 @@ async def run_trajectory(
                         )
                         prompt_text = build_followup_prompt(
                             tracker,
+                            elapsed_seconds=(
+                                time.monotonic() - start_time
+                            ),
+                            timeout_seconds=timeout_seconds,
+                            consecutive_no_progress_turns=(
+                                consecutive_no_progress_turns
+                            ),
                         )
                         continue
                 end_reason = "agent_error"
@@ -2913,6 +3086,7 @@ async def run_trajectory(
             turn_end_eval_payload_body: dict[str, Any] | None = None
             advisor_assessment: str | None = None
             turn_end_event: EvalEvent | None = None
+            turn_end_no_tests_detected = False
             try:
                 turn_end_eval_payload = await run_workspace_evaluation(
                     sandbox=sandbox,
@@ -2933,18 +3107,37 @@ async def run_trajectory(
                         isinstance(turn_end_error, str)
                         and turn_end_error.strip()
                     )
-                    if (
+                    turn_end_no_tests_detected = (
                         turn_end_total == 0
                         and turn_end_passed == 0
-                        and not turn_end_has_error
-                    ):
-                        print("[eval] turn_end status=no_tests")
+                    )
+                    if turn_end_no_tests_detected:
+                        if not turn_end_has_error:
+                            turn_end_has_error = True
+                            payload["error"] = (
+                                "Turn-end evaluation returned zero tests; "
+                                "aborting run."
+                            )
+                        print(
+                            "[eval] turn_end status=no_tests "
+                            f"status_error={turn_end_has_error}"
+                        )
                     else:
                         print(
                             "[eval] turn_end "
                             f"passed={turn_end_passed}/{turn_end_total} "
                             f"status_error={turn_end_has_error}"
                         )
+                    # Track plateau: no progress when pass count
+                    # does not exceed previous best
+                    if (
+                        isinstance(turn_end_passed, int)
+                        and turn_end_passed > previous_best_passed
+                    ):
+                        previous_best_passed = turn_end_passed
+                        consecutive_no_progress_turns = 0
+                    else:
+                        consecutive_no_progress_turns += 1
                 else:
                     turn_end_has_error = True
                     print("[eval] turn_end payload missing")
@@ -2952,6 +3145,7 @@ async def run_trajectory(
                 if (
                     normalized_advisor_model is not None
                     and isinstance(turn_end_eval_payload_body, dict)
+                    and not turn_end_no_tests_detected
                     and not (
                         isinstance(turn_end_passed, int)
                         and isinstance(turn_end_total, int)
@@ -2981,6 +3175,8 @@ async def run_trajectory(
                             ),
                             advisor_max_output_tokens=advisor_max_output_tokens,
                             failed_tests_limit=failed_tests_feedback_limit,
+                            advisor_system_prompt=advisor_system_prompt_override,
+                            advisor_user_prompt_prefix=advisor_user_prompt_prefix_override,
                         )
                         print(
                             "[advisor] run_success "
@@ -3006,6 +3202,8 @@ async def run_trajectory(
                 elif normalized_advisor_model is not None:
                     if not isinstance(turn_end_eval_payload_body, dict):
                         print("[advisor] skipped reason=turn_end_payload_missing")
+                    elif turn_end_no_tests_detected:
+                        print("[advisor] skipped reason=no_tests")
                     else:
                         print(
                             "[advisor] skipped reason=all_tests_passing "
@@ -3065,11 +3263,10 @@ async def run_trajectory(
                 if turn_end_event.status == "completed" and turn_end_event.tests:
                     previous_turn_end_tests = list(turn_end_event.tests)
 
-            eval_label = (
-                f"{turn_end_passed}/{turn_end_total}"
-                if isinstance(turn_end_passed, int)
-                and isinstance(turn_end_total, int)
-                else "unknown"
+            eval_label = format_turn_eval_label(
+                passed=turn_end_passed,
+                total=turn_end_total,
+                has_error=turn_end_has_error,
             )
             part_counter_label = format_progress_counter(
                 name="part",
@@ -3081,18 +3278,32 @@ async def run_trajectory(
                 current=turn_count,
                 limit=max_turns,
             )
+            elapsed_after_turn = time.monotonic() - start_time
+            commit_label = (
+                git_commit[:10]
+                if isinstance(git_commit, str) and git_commit
+                else "none"
+            )
             print(
-                f"[progress] {turn_counter_label} "
+                f"[turn] end "
+                f"{turn_counter_label} "
                 f"{part_counter_label} "
-                f"commit={git_commit} "
+                f"elapsed={format_compact_duration(elapsed_after_turn)} "
+                f"commit={commit_label} "
                 f"parts_delta=+{new_parts} "
-                f"turn_end_eval={eval_label} "
-                f"envoi_calls={len(new_envoi_calls)} "
+                f"eval={eval_label} "
+                f"calls={len(new_envoi_calls)} "
                 f"observed_parts={observed_parts} "
-                f"streamed_parts={streamed_parts} "
-                f"started={turn_started_at}"
+                f"streamed_parts={streamed_parts}"
             )
             await flush_logs(force=True)
+
+            if turn_end_no_tests_detected:
+                print(
+                    "[run] stopping: evaluation returned zero tests"
+                )
+                end_reason = "envoi_error"
+                break
 
             if (
                 isinstance(turn_end_passed, int)
@@ -3120,10 +3331,38 @@ async def run_trajectory(
             prompt_text = build_followup_prompt(
                 tracker,
                 evaluation_feedback=turn_end_eval_feedback,
+                elapsed_seconds=time.monotonic() - start_time,
+                timeout_seconds=timeout_seconds,
+                consecutive_no_progress_turns=(
+                    consecutive_no_progress_turns
+                ),
             )
 
         if end_reason == "agent_error":
             end_reason = "part_limit"
+
+    except asyncio.CancelledError:
+        interrupted_by_signal = True
+        end_reason = "agent_error"
+        print("[run] interrupt received; finalizing and terminating sandbox")
+
+    except AgentFatalError as fatal_error:
+        stop_reason = (
+            fatal_error.stop_reason
+            if fatal_error.stop_reason in {
+                "part_limit",
+                "timeout",
+                "agent_error",
+                "envoi_error",
+                "solved",
+            }
+            else "agent_error"
+        )
+        print(
+            "[run] fatal agent stop: "
+            f"{fatal_error} reason={stop_reason}"
+        )
+        end_reason = stop_reason
 
     except Exception as exc:
         print(f"[error] {type(exc).__name__}: {exc}")
@@ -3132,7 +3371,16 @@ async def run_trajectory(
             await dump_sandbox_logs(
                 sandbox, agent=agent_backend,
             )
-        end_reason = "agent_error"
+        error_text = str(exc).lower()
+        if (
+            "schema" in error_text
+            and ("test" in error_text or "zero tests" in error_text)
+        ):
+            end_reason = "envoi_error"
+        elif "zero tests" in error_text:
+            end_reason = "envoi_error"
+        else:
+            end_reason = "agent_error"
         # Crash recovery via protocol (no name checks)
         try:
             if (
@@ -3321,6 +3569,9 @@ async def run_trajectory(
         if log_context_token is not None:
             reset_log_context(log_context_token)
 
+    if interrupted_by_signal:
+        raise KeyboardInterrupt
+
     return trajectory_id
 
 
@@ -3399,23 +3650,27 @@ if __name__ == "__main__":
             raise ValueError("--raw-params-json must decode to a JSON object")
         raw_params = decoded
 
-    asyncio.run(
-        run_trajectory(
-            agent=args.agent,
-            model=args.model,
-            max_parts=args.max_parts,
-            max_turns=args.max_turns,
-            test=args.test,
-            test_timeout_seconds=args.test_timeout_seconds,
-            message_timeout_seconds=args.message_timeout_seconds,
-            timeout_seconds=args.timeout_seconds,
-            trajectory_id=args.trajectory_id,
-            codex_auth_json_b64=codex_auth_b64,
-            sandbox_provider=args.sandbox_provider,
-            task_dir=args.task_dir,
-            environment_dir=args.environment_dir,
-            raw_params=raw_params,
-            sandbox_cpu=args.sandbox_cpu,
-            sandbox_memory_mb=args.sandbox_memory_mb,
+    try:
+        asyncio.run(
+            run_trajectory(
+                agent=args.agent,
+                model=args.model,
+                max_parts=args.max_parts,
+                max_turns=args.max_turns,
+                test=args.test,
+                test_timeout_seconds=args.test_timeout_seconds,
+                message_timeout_seconds=args.message_timeout_seconds,
+                timeout_seconds=args.timeout_seconds,
+                trajectory_id=args.trajectory_id,
+                codex_auth_json_b64=codex_auth_b64,
+                sandbox_provider=args.sandbox_provider,
+                task_dir=args.task_dir,
+                environment_dir=args.environment_dir,
+                raw_params=raw_params,
+                sandbox_cpu=args.sandbox_cpu,
+                sandbox_memory_mb=args.sandbox_memory_mb,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        print("[run] interrupted", flush=True)
+        raise SystemExit(130)

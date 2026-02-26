@@ -1706,6 +1706,7 @@ try:
 
     from envoi_code.agents.base import (
         AgentCredentials,
+        AgentFatalError,
         AgentSetupContext,
         AgentTurnOutcome,
         SandboxImageRequirements,
@@ -1784,6 +1785,98 @@ mkdir -p /tmp/codex-home
 echo "[setup] codex install complete"
 """
 
+    CODEX_PROGRESS_LINE_RE = re.compile(
+        r"^\[(?P<elapsed>[^\]]+)\]\s+\[(?P<counters>[^\]]+)\]\s+(?P<desc>.+)$"
+    )
+    CODEX_HEARTBEAT_LOG_INTERVAL_SECONDS = 60
+    CODEX_USAGE_LIMIT_TOKENS = (
+        "usage limit",
+        "upgrade to pro",
+        "purchase more credits",
+        "codex/settings/usage",
+        "hit your usage limit",
+    )
+
+    def format_runner_codex_stderr_line(
+        line: str,
+        *,
+        now_mono: float,
+        last_heartbeat_mono: float,
+    ) -> tuple[str | None, float]:
+        stripped = line.strip()
+        if not stripped:
+            return None, last_heartbeat_mono
+
+        progress_match = CODEX_PROGRESS_LINE_RE.match(stripped)
+        if progress_match is not None:
+            elapsed_label = progress_match.group("elapsed").strip()
+            counters_label = progress_match.group("counters").strip()
+            description = progress_match.group("desc").strip()
+            if description in {
+                "thread/token_usage/updated",
+                "turn/diff/updated",
+            }:
+                return None, last_heartbeat_mono
+            if description == "heartbeat":
+                if (
+                    now_mono - last_heartbeat_mono
+                    < CODEX_HEARTBEAT_LOG_INTERVAL_SECONDS
+                ):
+                    return None, last_heartbeat_mono
+                return (
+                    "[agent] heartbeat "
+                    f"elapsed={elapsed_label} "
+                    f"{counters_label}",
+                    now_mono,
+                )
+            if description in {
+                "launching codex app-server",
+                "completed",
+            }:
+                return (
+                    "[agent] "
+                    f"{description} "
+                    f"elapsed={elapsed_label} "
+                    f"{counters_label}",
+                    last_heartbeat_mono,
+                )
+            if description in {
+                "part limit reached",
+                "turn/interrupt warning",
+            }:
+                return (
+                    "[agent] "
+                    f"{description} "
+                    f"elapsed={elapsed_label} "
+                    f"{counters_label}",
+                    last_heartbeat_mono,
+                )
+            return None, last_heartbeat_mono
+
+        if stripped.startswith("status="):
+            return (
+                "[agent] " + truncate_text(stripped, limit=320),
+                last_heartbeat_mono,
+            )
+
+        lowered = stripped.lower()
+        if any(
+            token in lowered
+            for token in ("error", "failed", "exception", "traceback")
+        ):
+            return (
+                "[agent] " + truncate_text(stripped, limit=500),
+                last_heartbeat_mono,
+            )
+
+        return None, last_heartbeat_mono
+
+    def is_usage_limit_message(text: str) -> bool:
+        lowered = text.strip().lower()
+        if not lowered:
+            return False
+        return any(token in lowered for token in CODEX_USAGE_LIMIT_TOKENS)
+
     class CodexCredentials(AgentCredentials):
         """Codex-specific credentials with optional auth.json."""
 
@@ -1812,6 +1905,7 @@ echo "[setup] codex install complete"
             self.api_key_file: str | None = None
             self.current_session_id: str | None = None
             self.seen_message_ids: set[str] = set()
+            self.last_heartbeat_log_mono: float = 0.0
 
         # -- static methods -----------------------------------------
 
@@ -2032,6 +2126,7 @@ echo "[setup] codex install complete"
             on_stream_part=None,
         ) -> AgentTurnOutcome | None:
             assert self.sandbox is not None
+            usage_limit_detected = False
             prompt_path = "/tmp/prompt.txt"
             await self.sandbox.write_file(
                 prompt_path,
@@ -2065,17 +2160,24 @@ echo "[setup] codex install complete"
                 )
 
             async def handle_stderr_line(line: str) -> None:
+                nonlocal usage_limit_detected
                 handled = await parse_trace_event_line(
                     line, on_stream_part,
                 )
                 if handled:
                     return
-                stripped = line.strip()
-                if stripped:
-                    tprint(
-                        "[codex][stderr] "
-                        + truncate_text(stripped, limit=500)
+                if is_usage_limit_message(line):
+                    usage_limit_detected = True
+                rendered, heartbeat_mark = (
+                    format_runner_codex_stderr_line(
+                        line,
+                        now_mono=time.monotonic(),
+                        last_heartbeat_mono=self.last_heartbeat_log_mono,
                     )
+                )
+                self.last_heartbeat_log_mono = heartbeat_mark
+                if rendered is not None:
+                    tprint(rendered)
 
             response = await self.run_client(
                 args,
@@ -2084,6 +2186,11 @@ echo "[setup] codex install complete"
                 on_stderr_line=handle_stderr_line,
             )
             if response is None:
+                if usage_limit_detected:
+                    raise AgentFatalError(
+                        "Codex usage limit reached",
+                        stop_reason="part_limit",
+                    )
                 return None
             if not response.get("ok"):
                 error_text = str(response.get("error"))
@@ -2095,6 +2202,11 @@ echo "[setup] codex install complete"
                     f"[codex] turn failed: {error_text}",
                     flush=True,
                 )
+                if usage_limit_detected or is_usage_limit_message(error_text):
+                    raise AgentFatalError(
+                        "Codex usage limit reached",
+                        stop_reason="part_limit",
+                    )
                 return None
             body = response.get("body")
             if not isinstance(body, dict):

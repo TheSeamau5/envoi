@@ -34,6 +34,17 @@ from envoi_code.utils.storage import save_trace_parquet
 print = tprint
 
 
+def format_compact_duration(total_seconds: float | int) -> str:
+    seconds = max(0, int(total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
 def make_stream_part_callback(
     *,
     sandbox: Sandbox,
@@ -50,6 +61,7 @@ def make_stream_part_callback(
     last_part_timestamp_ms_ref: list[int | None],
     turn_record: TurnRecord | None,
     session_id: str,
+    run_started_mono: float | None = None,
     stop_at_part_ref: list[int | None] | None = None,
     schedule_commit_evaluation: (
         Callable[[str, int, int], None] | None
@@ -336,10 +348,29 @@ def make_stream_part_callback(
                 )
                 if len(summary_preview) > 120:
                     summary_preview = summary_preview[:120] + "..."
+                elapsed_label = ""
+                if isinstance(run_started_mono, float):
+                    elapsed_seconds = max(
+                        0,
+                        int(time.monotonic() - run_started_mono),
+                    )
+                    elapsed_label = (
+                        f"t+{format_compact_duration(elapsed_seconds)} "
+                    )
+                item_label = (
+                    "msg"
+                    if item_type == "agent_message"
+                    else "cmd"
+                    if item_type == "command_execution"
+                    else "file"
+                    if item_type == "file_change"
+                    else item_type
+                )
                 print(
-                    f"[progress] turn={turn_record.turn} "
+                    f"[part] {elapsed_label}"
+                    f"turn={turn_record.turn} "
                     f"part={absolute_part} "
-                    f"item={item_type} "
+                    f"{item_label} "
                     f"{summary_preview}".rstrip()
                 )
             save_trace_parquet(

@@ -28,6 +28,9 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
 
+# Workspace files: AGENTS.md for agent onboarding
+COPY workspace/AGENTS.md /workspace/AGENTS.md
+
 # ═══════════════════════════════════════════════════════════════════
 # Reference Documentation — baked into /workspace/reference/
 # ═══════════════════════════════════════════════════════════════════
@@ -55,6 +58,10 @@ RUN git clone --depth 1 https://github.com/izik1/gbops.git /tmp/gbops && \
 RUN git clone --depth 1 https://github.com/Gekkio/gb-ctr.git /tmp/gb-ctr && \
     cp /tmp/gb-ctr/opcodes.toml /workspace/reference/ && \
     rm -rf /tmp/gb-ctr
+
+# SameBoy — reference emulator source (C). Read-only reference for understanding
+# hardware behavior. The agent may read this code but MUST NOT link/FFI to it.
+RUN git clone --depth 1 https://github.com/LIJI32/SameBoy.git /workspace/reference/sameboy
 
 # ═══════════════════════════════════════════════════════════════════
 # Test ROM Suites

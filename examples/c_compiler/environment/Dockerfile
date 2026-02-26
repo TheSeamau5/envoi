@@ -26,6 +26,10 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
 
+# Workspace files: AGENTS.md for agent onboarding, lint.sh for structural checks
+COPY workspace/AGENTS.md /workspace/AGENTS.md
+COPY lint.sh /environment/lint.sh
+
 # Bake fixtures into the image to avoid per-run sync costs.
 RUN set -eux; \
     git clone --depth 1 https://github.com/c-testsuite/c-testsuite.git /opt/tests/c-testsuite; \
