@@ -18,6 +18,19 @@ from typing import Any
 from envoi_code.sandbox.base import CommandResult, SandboxConfig
 
 
+def resolve_e2b_max_session_seconds() -> int:
+    raw_value = os.environ.get("E2B_MAX_SESSION_SECONDS", "").strip()
+    if not raw_value:
+        return 3600
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return 3600
+    if parsed <= 0:
+        return 3600
+    return parsed
+
+
 class E2BSandbox:
     """Sandbox implementation backed by E2B.
 
@@ -73,8 +86,17 @@ class E2BSandbox:
             )
 
         resolved_template = config.template or os.environ.get("E2B_TEMPLATE")
-        # E2B Pro caps at 24 h; hobby at 1 h.
-        capped_timeout = min(config.timeout, 86400)
+        # Provider hard cap is plan-dependent (hobby=1h, pro=24h).
+        provider_max = 86400
+        requested_timeout = min(config.timeout, provider_max)
+        plan_max = resolve_e2b_max_session_seconds()
+        capped_timeout = min(requested_timeout, plan_max)
+        if capped_timeout < requested_timeout:
+            builtins.print(
+                "[e2b] reducing sandbox timeout to fit plan cap: "
+                f"requested={requested_timeout}s cap={plan_max}s "
+                f"applied={capped_timeout}s"
+            )
         kwargs: dict[str, Any] = {"timeout": capped_timeout}
         if resolved_template:
             kwargs["template"] = resolved_template

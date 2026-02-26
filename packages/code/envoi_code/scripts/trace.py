@@ -41,6 +41,47 @@ def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
     return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
 
 
+def resolve_positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def normalize_e2b_timeout_for_plan(args: argparse.Namespace) -> None:
+    if getattr(args, "sandbox", None) != "e2b":
+        return
+    requested_timeout = args.timeout_seconds
+    if not isinstance(requested_timeout, int) or requested_timeout <= 0:
+        return
+    shutdown_grace_seconds = resolve_positive_int_env(
+        "SHUTDOWN_GRACE_SECONDS",
+        300,
+    )
+    max_session_seconds = resolve_positive_int_env(
+        "E2B_MAX_SESSION_SECONDS",
+        3600,
+    )
+    max_run_timeout = max(60, max_session_seconds - shutdown_grace_seconds)
+    if requested_timeout <= max_run_timeout:
+        return
+    args.timeout_seconds = max_run_timeout
+    print(
+        "[launcher] sandbox=e2b timeout clamped for plan/session cap: "
+        f"requested={requested_timeout}s "
+        f"grace={shutdown_grace_seconds}s "
+        f"max_session={max_session_seconds}s "
+        f"applied={max_run_timeout}s",
+        flush=True,
+    )
+
+
 def normalize_param_key(flag_name: str) -> str:
     raw = flag_name.removeprefix("--param-").strip()
     if not raw:
@@ -296,6 +337,7 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
 
 def run_command(args: argparse.Namespace) -> None:
     """Execute a trajectory run."""
+    normalize_e2b_timeout_for_plan(args)
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
     bucket = os.environ.get("AWS_S3_BUCKET")
     if not bucket:
