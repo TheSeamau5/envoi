@@ -30,6 +30,16 @@ def params() -> dict[str, object]:
     return {
         "advisor_model": "@anthropic/claude-opus-4.6",
         "advisor_model_thinking_level": "high",
+        "advisor_system_prompt": (
+            "You are a strict C compiler engineering reviewer. "
+            "Given failed tests and current Rust code, identify the most "
+            "likely root causes, cluster recurring error patterns, and "
+            "propose a prioritized fix plan with concrete file-level changes."
+        ),
+        "advisor_user_prompt_prefix": (
+            "You are reviewing a Rust C-compiler implementation "
+            "after an evaluation run."
+        ),
         "diagnostics_suite_priority": [
             "basics",
             "c_testsuite",

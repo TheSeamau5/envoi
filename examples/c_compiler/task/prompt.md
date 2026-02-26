@@ -23,3 +23,51 @@ Testing strategy:
 5. Commit after each meaningful change
 
 Your goal is to pass ALL test suites. Work methodically.
+
+## Recommended Architecture
+
+Structure your compiler as separate modules:
+- `src/main.rs` — CLI entry point, file I/O, pipeline
+- `src/lexer.rs` — tokenization
+- `src/parser.rs` — AST construction
+- `src/codegen.rs` — x86_64 assembly generation
+
+Keep files under 1000 lines. When a module grows too large, split it.
+
+## Debug Artifacts (REQUIRED)
+
+Your compiler MUST write intermediate representations to `./debug_artifacts/`
+during every compilation. This directory is cleared before each test case and
+captured automatically on failure.
+
+Required artifacts:
+- `tokens.txt` — lexer output (one token per line: `<type> <value> <line>:<col>`)
+- `ast.json` — parsed AST as JSON
+- `asm.s` — generated x86_64 assembly
+
+Without these, you must guess where bugs are, which wastes turns.
+
+## Progress Tracking (REQUIRED)
+
+Maintain a `PROGRESS.md` file in your workspace root. Update it after every
+significant change. Structure:
+
+```
+# Progress
+
+## Current Status
+- Tests passing: <suite> X/Y
+- Current focus: <what you're working on>
+
+## What Works
+- <list of working components>
+
+## What I've Tried That Failed
+- [Turn ~N] <description of failed approach>
+
+## Current Plan
+1. <next item>
+2. <next item>
+```
+
+This helps you remember what you've tried across many turns.

@@ -20,10 +20,11 @@ Test suites (progressive difficulty):
   7. acid2/cgb                  — CGB PPU rendering
   8. blargg + mooneye + mealybug + samesuite full sweep
 
-Debug artifact contract (optional, no flags required):
-  - The submitted emulator may write debugging output to ./debug_artifacts/.
+Debug artifact contract (REQUIRED — see task prompt):
+  - The submitted emulator MUST write debugging output to ./debug_artifacts/.
   - This directory is cleared before each test case.
   - Any files written there are captured and returned in structured failure data.
+  - Required: cpu_trace.log, ppu_state.txt (see prompt for format).
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ __all__ = [
 
 @envoi.setup
 async def build_emulator(submission: envoi.Documents) -> None:
+    lint = await envoi.run("chmod +x lint.sh && ./lint.sh", timeout_seconds=30)
+    if lint.exit_code != 0:
+        raise RuntimeError(
+            f"Structural lint failed:\n{lint.stdout}\n{lint.stderr}"
+        )
     build = await envoi.run("chmod +x build.sh && ./build.sh", timeout_seconds=300)
     if build.exit_code != 0:
         raise RuntimeError(f"Build failed (exit {build.exit_code}).\n{build.stderr}")

@@ -1252,9 +1252,47 @@ def build_followup_prompt(
     evaluation_feedback: str | None = None,
     continue_prompt: str = "Continue.",
     include_mcp_status: bool = False,
+    elapsed_seconds: float = 0,
+    timeout_seconds: float = 7200,
+    consecutive_no_progress_turns: int = 0,
 ) -> str:
     """Build the re-injection prompt with current test status."""
     sections: list[str] = [continue_prompt]
+
+    # Time/budget awareness
+    remaining_seconds = max(0, timeout_seconds - elapsed_seconds)
+    remaining_minutes = int(remaining_seconds / 60)
+    if 0 < remaining_minutes < 30:
+        sections.append(
+            f"Time check: ~{remaining_minutes} minutes remaining. "
+            "Prioritize fixing the highest-impact failing tests "
+            "over adding new features."
+        )
+
+    # Plateau detection and approach-switching guidance
+    if consecutive_no_progress_turns >= 5:
+        sections.append(
+            "PLATEAU DETECTED: No progress in "
+            f"{consecutive_no_progress_turns} turns. "
+            "REQUIRED: Before your next code change:\n"
+            "1. Write a minimal reproducer for ONE failing test "
+            "as a local test\n"
+            "2. Run it and examine the debug artifacts\n"
+            "3. Identify the specific bug\n"
+            "4. Fix that one issue and verify locally before committing"
+        )
+    elif consecutive_no_progress_turns >= 3:
+        sections.append(
+            "No new tests have passed in the last "
+            f"{consecutive_no_progress_turns} turns. "
+            "Consider changing your approach:\n"
+            "- Re-read the failing test's expected output carefully\n"
+            "- Check your debug artifacts for the failing case\n"
+            "- If iterating on the same fix, step back and "
+            "reconsider the root cause\n"
+            "- Write a minimal local test to isolate the issue"
+        )
+
     if evaluation_feedback:
         sections.append(
             "End-of-turn evaluation feedback:\n"
@@ -1604,9 +1642,13 @@ def build_advisor_user_prompt(
     selected_failed_tests: list[dict[str, Any]],
     diagnostic_clusters: list[dict[str, Any]],
     code_snapshot: dict[str, Any],
+    user_prompt_prefix: str = (
+        "You are reviewing a Rust C-compiler implementation "
+        "after an evaluation run."
+    ),
 ) -> str:
     lines: list[str] = [
-        "You are reviewing a Rust C-compiler implementation after an evaluation run.",
+        user_prompt_prefix,
         "",
         "Goal task prompt:",
         task_prompt,
@@ -1665,6 +1707,8 @@ async def build_advisor_assessment(
     advisor_model_thinking_level: str,
     advisor_max_output_tokens: int | None,
     failed_tests_limit: int,
+    advisor_system_prompt: str | None = None,
+    advisor_user_prompt_prefix: str | None = None,
 ) -> str:
     payload_for_feedback = enrich_evaluation_payload(
         copy.deepcopy(payload),
@@ -1697,14 +1741,19 @@ async def build_advisor_assessment(
         f"snapshot_files={snapshot_file_count} "
         f"snapshot_chars={snapshot_total_chars}"
     )
-    user_prompt = build_advisor_user_prompt(
+    advisor_user_kwargs: dict[str, Any] = dict(
         task_prompt=task_prompt,
         commit=commit,
         selected_failed_tests=selected_failed_tests,
         diagnostic_clusters=diagnostic_clusters,
         code_snapshot=code_snapshot,
     )
-    system_prompt = (
+    if advisor_user_prompt_prefix is not None:
+        advisor_user_kwargs["user_prompt_prefix"] = (
+            advisor_user_prompt_prefix
+        )
+    user_prompt = build_advisor_user_prompt(**advisor_user_kwargs)
+    system_prompt = advisor_system_prompt or (
         "You are a strict compiler engineering reviewer. "
         "Given failed tests and current Rust code, identify the most likely "
         "root causes, cluster recurring error patterns, and propose a "
@@ -2209,6 +2258,12 @@ async def run_trajectory(
     CURRENT_SUITE_FEEDBACK_PRIORITY = resolve_suite_feedback_priority(
         environment_params.get("diagnostics_suite_priority"),
     )
+    advisor_system_prompt_override = _string_or_none(
+        environment_params.get("advisor_system_prompt"),
+    )
+    advisor_user_prompt_prefix_override = _string_or_none(
+        environment_params.get("advisor_user_prompt_prefix"),
+    )
     task_params_loaded["_eval_test_paths"] = selected_test_paths
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     task_params_loaded["_environment_params"] = environment_params
@@ -2638,6 +2693,8 @@ async def run_trajectory(
         )
         next_turn_feedback_eval_id: str | None = None
         consecutive_turn_failures = 0
+        previous_best_passed = 0
+        consecutive_no_progress_turns = 0
 
         while True:
             update_log_context(turn=turn_count + 1, part=part_count)
@@ -2803,6 +2860,13 @@ async def run_trajectory(
                         )
                         prompt_text = build_followup_prompt(
                             tracker,
+                            elapsed_seconds=(
+                                time.monotonic() - start_time
+                            ),
+                            timeout_seconds=timeout_seconds,
+                            consecutive_no_progress_turns=(
+                                consecutive_no_progress_turns
+                            ),
                         )
                         continue
                 end_reason = "agent_error"
@@ -2945,6 +3009,16 @@ async def run_trajectory(
                             f"passed={turn_end_passed}/{turn_end_total} "
                             f"status_error={turn_end_has_error}"
                         )
+                    # Track plateau: no progress when pass count
+                    # does not exceed previous best
+                    if (
+                        isinstance(turn_end_passed, int)
+                        and turn_end_passed > previous_best_passed
+                    ):
+                        previous_best_passed = turn_end_passed
+                        consecutive_no_progress_turns = 0
+                    else:
+                        consecutive_no_progress_turns += 1
                 else:
                     turn_end_has_error = True
                     print("[eval] turn_end payload missing")
@@ -2981,6 +3055,8 @@ async def run_trajectory(
                             ),
                             advisor_max_output_tokens=advisor_max_output_tokens,
                             failed_tests_limit=failed_tests_feedback_limit,
+                            advisor_system_prompt=advisor_system_prompt_override,
+                            advisor_user_prompt_prefix=advisor_user_prompt_prefix_override,
                         )
                         print(
                             "[advisor] run_success "
@@ -3120,6 +3196,11 @@ async def run_trajectory(
             prompt_text = build_followup_prompt(
                 tracker,
                 evaluation_feedback=turn_end_eval_feedback,
+                elapsed_seconds=time.monotonic() - start_time,
+                timeout_seconds=timeout_seconds,
+                consecutive_no_progress_turns=(
+                    consecutive_no_progress_turns
+                ),
             )
 
         if end_reason == "agent_error":
