@@ -3,6 +3,7 @@
  * Renders commit dots on a curve; clicking a dot selects that commit.
  * Selected dot is larger with dark stroke. Curve is filled up to selection,
  * faded after. Red dots for regressions, gold dots for milestones.
+ * X-axis shows elapsed time labels (minutes or hours).
  *
  * Client component — handles click interaction.
  */
@@ -20,10 +21,10 @@ type ProgressCurveProps = {
   activeSuite: string;
 };
 
-/** Chart layout constants */
-const VIEW_WIDTH = 600;
+/** Chart layout constants — wide margins for axis labels, full-width plot area */
+const VIEW_WIDTH = 1000;
 const VIEW_HEIGHT = 320;
-const MARGIN = { top: 24, right: 42, bottom: 24, left: 38 };
+const MARGIN = { top: 16, right: 48, bottom: 32, left: 52 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
@@ -101,6 +102,62 @@ function getYTicks(yMax: number): number[] {
   return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * yMax));
 }
 
+/** Format minutes as a time label (e.g., "0m", "30m", "1h", "2h 30m") */
+function formatTimeLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (mins === 0) return `${hours}h`;
+  return `${hours}h${mins}m`;
+}
+
+/** Generate sensible X-axis time ticks based on total duration */
+function getXTicks(commits: Commit[]): { minutes: number; commitIndex: number }[] {
+  if (commits.length === 0) return [];
+
+  const lastCommit = commits[commits.length - 1]!;
+  const totalMinutes = lastCommit.minutesElapsed;
+
+  // Choose tick interval based on total duration
+  let intervalMinutes: number;
+  if (totalMinutes <= 60) {
+    intervalMinutes = 10;
+  } else if (totalMinutes <= 180) {
+    intervalMinutes = 30;
+  } else if (totalMinutes <= 360) {
+    intervalMinutes = 60;
+  } else {
+    intervalMinutes = 120;
+  }
+
+  const ticks: { minutes: number; commitIndex: number }[] = [];
+
+  // Always include the start
+  ticks.push({ minutes: 0, commitIndex: 0 });
+
+  // Add intermediate ticks
+  for (let tickMinutes = intervalMinutes; tickMinutes < totalMinutes; tickMinutes += intervalMinutes) {
+    // Find the closest commit to this time
+    let closestIndex = 0;
+    let closestDist = Infinity;
+    for (let idx = 0; idx < commits.length; idx++) {
+      const dist = Math.abs(commits[idx]!.minutesElapsed - tickMinutes);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestIndex = idx;
+      }
+    }
+    ticks.push({ minutes: tickMinutes, commitIndex: closestIndex });
+  }
+
+  // Always include the end
+  if (totalMinutes > 0) {
+    ticks.push({ minutes: totalMinutes, commitIndex: commits.length - 1 });
+  }
+
+  return ticks;
+}
+
 export function ProgressCurve({
   commits,
   selectedIndex,
@@ -109,15 +166,17 @@ export function ProgressCurve({
 }: ProgressCurveProps) {
   const yMax = getYMax(activeSuite);
   const yTicks = getYTicks(yMax);
+  const xTicks = getXTicks(commits);
 
   return (
-    <div className="w-full px-[14px] pt-[10px]">
+    <div className="w-full px-[6px] pt-[10px]">
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         className="w-full"
         style={{ height: 320, fontFamily: T.mono }}
+        preserveAspectRatio="none"
       >
-        {/* Grid lines */}
+        {/* Horizontal grid lines */}
         {yTicks.map((tick) => (
           <line
             key={`y-grid-${tick}`}
@@ -130,12 +189,28 @@ export function ProgressCurve({
           />
         ))}
 
+        {/* Vertical grid lines at time ticks */}
+        {xTicks.map((tick) => {
+          const xPos = toX(tick.commitIndex, commits.length);
+          return (
+            <line
+              key={`x-grid-${tick.minutes}`}
+              x1={xPos}
+              y1={MARGIN.top}
+              x2={xPos}
+              y2={MARGIN.top + PLOT_HEIGHT}
+              stroke={T.borderLight}
+              strokeWidth={0.5}
+            />
+          );
+        })}
+
         {/* Y axis labels — left: absolute count */}
         {yTicks.map((tick) => (
           <text
             key={`y-label-${tick}`}
-            x={MARGIN.left - 6}
-            y={toY(tick, yMax) + 3}
+            x={MARGIN.left - 8}
+            y={toY(tick, yMax) + 3.5}
             textAnchor="end"
             style={{ fontSize: "9px", fill: T.textDim }}
           >
@@ -147,14 +222,30 @@ export function ProgressCurve({
         {yTicks.map((tick) => (
           <text
             key={`y-pct-${tick}`}
-            x={VIEW_WIDTH - MARGIN.right + 6}
-            y={toY(tick, yMax) + 3}
+            x={VIEW_WIDTH - MARGIN.right + 8}
+            y={toY(tick, yMax) + 3.5}
             textAnchor="start"
             style={{ fontSize: "9px", fill: T.textDim }}
           >
             {`${Math.round((tick / yMax) * 100)}%`}
           </text>
         ))}
+
+        {/* X axis labels — time */}
+        {xTicks.map((tick) => {
+          const xPos = toX(tick.commitIndex, commits.length);
+          return (
+            <text
+              key={`x-label-${tick.minutes}`}
+              x={xPos}
+              y={MARGIN.top + PLOT_HEIGHT + 18}
+              textAnchor="middle"
+              style={{ fontSize: "9px", fill: T.textDim }}
+            >
+              {formatTimeLabel(tick.minutes)}
+            </text>
+          );
+        })}
 
         {/* Filled area up to selection */}
         <path
@@ -203,7 +294,7 @@ export function ProgressCurve({
                 ? T.accent
                 : T.textDim;
 
-          const dotRadius = isSelected ? 6 : 4;
+          const dotRadius = isSelected ? 6 : 3.5;
 
           return (
             <circle
@@ -218,7 +309,7 @@ export function ProgressCurve({
               onClick={() => onSelect(dotIndex)}
             >
               <title>
-                {`Turn ${commit.turn}: ${getYValue(commit, activeSuite)} passed (${commit.delta >= 0 ? "+" : ""}${commit.delta})`}
+                {`Turn ${commit.turn} (${formatTimeLabel(commit.minutesElapsed)}): ${getYValue(commit, activeSuite)} passed (${commit.delta >= 0 ? "+" : ""}${commit.delta})`}
               </title>
             </circle>
           );
