@@ -2,15 +2,14 @@
   "pythonVersion": "3.12",
   "venvPath": ".",
   "venv": ".venv",
-  "typeCheckingMode": "basic",
+  "typeCheckingMode": "all",
+  "failOnWarnings": true,
+  "reportUnreachable": "error",
   "include": [
-    "packages",
-    "examples"
+    "packages/envoi/envoi"
   ],
   "extraPaths": [
-    "packages/envoi",
-    "packages/code",
-    "packages/cli"
+    "packages/envoi"
   ],
   "exclude": [
     ".venv",
@@ -22,24 +21,6 @@
   "executionEnvironments": [
     {
       "root": "packages/envoi"
-    },
-    {
-      "root": "packages/code"
-    },
-    {
-      "root": "packages/cli"
-    },
-    {
-      "root": "examples/c_compiler/environment"
-    },
-    {
-      "root": "examples/gameboy_emulator/environment"
-    },
-    {
-      "root": "examples/c_compiler/task"
-    },
-    {
-      "root": "examples/gameboy_emulator/task"
     }
   ]
 }

@@ -28,15 +28,14 @@ select = ["E", "F", "I", "UP", "B"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "basic"
+typeCheckingMode = "all"
+failOnWarnings = true
+reportUnreachable = "error"
 include = [
-    "packages",
-    "examples",
+    "packages/envoi/envoi",
 ]
 extraPaths = [
     "packages/envoi",
-    "packages/code",
-    "packages/cli",
 ]
 exclude = [
     ".venv",
@@ -47,9 +46,6 @@ exclude = [
 ]
 executionEnvironments = [
     { root = "packages/envoi" },
-    { root = "packages/code" },
-    { root = "packages/cli" },
-    { root = "examples" },
 ]
 
 [tool.mypy]

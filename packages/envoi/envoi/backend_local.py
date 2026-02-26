@@ -11,84 +11,59 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Annotated
 
 import uvicorn
 from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
 
 from . import environment
-from .logging import bind_log_context, component_name, log_component_event
+from .logging import bind_log_context, log_event
 from .runtime import load_environment
+from .test_selection import matched_tests
 from .utils import Documents, parse_params, serialize_object, working_dir
 
 WORKER_COMPONENT_DEFAULT = "session_worker"
 
-
-def coerce_path_value(value: str) -> Any:
-    try:
-        return int(value)
-    except ValueError:
-        return value
+TestHandler = Callable[..., Awaitable[object]]
 
 
-def extract_template_params(template_path: str, request_path: str) -> dict[str, Any] | None:
-    if "{" not in template_path or "}" not in template_path:
-        return None
-    if "{" in request_path or "}" in request_path:
-        return None
-
-    pattern_parts: list[str] = []
-    cursor = 0
-    for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template_path):
-        pattern_parts.append(re.escape(template_path[cursor:match.start()]))
-        parameter_name = match.group(1)
-        pattern_parts.append(f"(?P<{parameter_name}>[^/]+)")
-        cursor = match.end()
-    pattern_parts.append(re.escape(template_path[cursor:]))
-
-    pattern = "^" + "".join(pattern_parts) + "$"
-    path_match = re.match(pattern, request_path)
-    if path_match is None:
-        return None
-
-    return {key: coerce_path_value(value) for key, value in path_match.groupdict().items()}
+class BackendLocalArgs(argparse.Namespace):
+    file: str = ""
+    session_dir: str = ""
+    port: int = 0
 
 
-def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    matched: dict[str, tuple[Callable[..., Any], dict[str, Any]]] = {}
-    for test_path, function in environment._test_registry.items():
-        is_template = "{" in test_path and "}" in test_path
+def emit_worker_log(
+    event: str,
+    *,
+    message: str = "",
+    level: str = "info",
+    **fields: object,
+) -> None:
+    _ = log_event(
+        component=WORKER_COMPONENT_DEFAULT,
+        event=event,
+        message=message,
+        level=level,
+        **fields,
+    )
 
-        if is_template:
-            if not path:
-                continue
-            template_params = extract_template_params(test_path, path)
-            if template_params is not None:
-                matched[test_path] = (function, template_params)
-            continue
 
-        if not path:
-            matched[test_path] = (function, {})
-            continue
-
-        if test_path == path or test_path.startswith(path + "/"):
-            matched[test_path] = (function, {})
-
-    return matched
+def bind_worker_context(session_id: str | None) -> None:
+    _ = bind_log_context(
+        component=WORKER_COMPONENT_DEFAULT,
+        session_id=session_id,
+    )
 
 
 def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
-    bind_log_context(
-        component=component_name(WORKER_COMPONENT_DEFAULT),
-        session_id=os.environ.get("ENVOI_LOG_SESSION_ID"),
-    )
-    log_component_event(WORKER_COMPONENT_DEFAULT,
+    bind_worker_context(os.environ.get("ENVOI_LOG_SESSION_ID"))
+    emit_worker_log(
         "worker.app.start",
         module_file=module_file,
         session_dir=session_dir,
@@ -96,16 +71,13 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     load_environment(module_file)
     app = FastAPI(title="envoi session worker")
 
-    @app.post("/setup")
-    async def setup(params: str = Form(default="{}")) -> Any:
+    async def setup_handler(
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         started = time.monotonic()
-        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.setup.start")
+        emit_worker_log("worker.setup.start")
         if environment.setup_fn is None:
-            log_component_event(
-                WORKER_COMPONENT_DEFAULT,
-                "worker.setup.skip",
-                message="no setup fn",
-            )
+            emit_worker_log("worker.setup.skip", message="no setup fn")
             return {"ok": True}
 
         token = working_dir.set(session_dir)
@@ -116,14 +88,14 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 documents,
                 parse_params(params),
             )
-            await environment.setup_fn(**kwargs)
-            log_component_event(WORKER_COMPONENT_DEFAULT,
+            _ = await environment.setup_fn(**kwargs)
+            emit_worker_log(
                 "worker.setup.complete",
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             return {"ok": True}
         except Exception as error:
-            log_component_event(WORKER_COMPONENT_DEFAULT,
+            emit_worker_log(
                 "worker.setup.failed",
                 level="error",
                 error=str(error),
@@ -132,20 +104,23 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
         finally:
             working_dir.reset(token)
 
-    async def run_tests(path: str, params: str) -> Any:
+    async def run_tests(path: str, params: str) -> object:
         started = time.monotonic()
-        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.test.start", path=path or "/")
-        matched = matched_tests(path)
+        emit_worker_log("worker.test.start", path=path or "/")
+        matched = matched_tests(path, environment.test_registry_items())
         if not matched:
-            return JSONResponse(status_code=404, content={"error": f"No tests match: {path}"})
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"No tests match: {path}"},
+            )
 
         parsed_params = parse_params(params)
 
         async def run_one(
             test_path: str,
-            function: Callable[..., Any],
-            path_params: dict[str, Any],
-        ) -> tuple[str, Any]:
+            function: TestHandler,
+            path_params: dict[str, object],
+        ) -> tuple[str, object]:
             token = working_dir.set(session_dir)
             try:
                 kwargs_input = {**parsed_params, **path_params}
@@ -163,7 +138,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 for test_path, (function, path_params) in matched.items()
             ]
         )
-        log_component_event(WORKER_COMPONENT_DEFAULT,
+        emit_worker_log(
             "worker.test.complete",
             path=path or "/",
             matched=len(matched),
@@ -174,39 +149,45 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
             return results[0][1]
         return dict(results)
 
-    @app.post("/test")
-    async def run_all_tests(params: str = Form(default="{}")) -> Any:
+    async def run_all_tests_handler(
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await run_tests("", params)
 
-    @app.post("/test/{path:path}")
-    async def run_test(path: str, params: str = Form(default="{}")) -> Any:
+    async def run_test_handler(
+        path: str,
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await run_tests(path, params)
 
-    @app.delete("/teardown")
-    async def teardown() -> Any:
-        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.teardown.start")
+    async def teardown_handler() -> object:
+        emit_worker_log("worker.teardown.start")
         if environment.teardown_fn is not None:
             token = working_dir.set(session_dir)
             try:
-                await environment.teardown_fn()
+                _ = await environment.teardown_fn()
             finally:
                 working_dir.reset(token)
 
-        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.teardown.complete")
-        asyncio.get_event_loop().call_later(0.1, sys.exit, 0)
+        emit_worker_log("worker.teardown.complete")
+        _ = asyncio.get_event_loop().call_later(0.1, sys.exit, 0)
         return {"ok": True}
 
+    _ = app.post("/setup")(setup_handler)
+    _ = app.post("/test")(run_all_tests_handler)
+    _ = app.post("/test/{path:path}")(run_test_handler)
+    _ = app.delete("/teardown")(teardown_handler)
     return app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m envoi.backend_local")
-    parser.add_argument("--file", required=True)
-    parser.add_argument("--session-dir", required=True)
-    parser.add_argument("--port", type=int, required=True)
-    args = parser.parse_args()
+    _ = parser.add_argument("--file", required=True)
+    _ = parser.add_argument("--session-dir", required=True)
+    _ = parser.add_argument("--port", type=int, required=True)
+    args = parser.parse_args(namespace=BackendLocalArgs())
 
-    log_component_event(WORKER_COMPONENT_DEFAULT,
+    emit_worker_log(
         "worker.start",
         file=args.file,
         session_dir=args.session_dir,

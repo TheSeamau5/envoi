@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import importlib.util
 import os
-import re
 import shutil
 import socket
 import sys
@@ -12,9 +11,9 @@ import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Annotated, TypedDict, cast
 
 import httpx
 import uvicorn
@@ -23,18 +22,62 @@ from fastapi.responses import JSONResponse
 
 from . import environment
 from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
-from .logging import bind_log_context, component_name, log_component_event
-from .utils import Documents, parse_params, serialize_object, working_dir
+from .logging import bind_log_context, log_event
+from .test_selection import matched_tests
+from .utils import (
+    Documents,
+    mapping_from_object,
+    parse_params,
+    serialize_object,
+    working_dir,
+)
 
-sessions: dict[str, dict[str, Any]] = {}
-
-_OPTIONAL_FILE = File(default=None)
 RUNTIME_COMPONENT_DEFAULT = "runtime"
+
+TestHandler = Callable[..., Awaitable[object]]
+
+
+class RuntimeArgs(argparse.Namespace):
+    file: str = ""
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+
+class SessionState(TypedDict):
+    url: str
+    proc: asyncio.subprocess.Process
+    dir: str
+    timeout_seconds: int
+    timeout_task: asyncio.Task[None]
+
+
+sessions: dict[str, SessionState] = {}
+
+
+def emit_runtime_log(
+    event: str,
+    *,
+    message: str = "",
+    level: str = "info",
+    **fields: object,
+) -> None:
+    _ = log_event(
+        component=RUNTIME_COMPONENT_DEFAULT,
+        event=event,
+        message=message,
+        level=level,
+        **fields,
+    )
+
+
+def object_dict(value: object | None) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return mapping_from_object(cast(object, value))
 
 
 def load_environment(module_file: str) -> None:
-    log_component_event(
-        RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "environment.load.start",
         module_file=module_file,
     )
@@ -51,7 +94,12 @@ def load_environment(module_file: str) -> None:
     tests_dir = module_path.parent / "tests"
     if tests_dir.is_dir():
         tests_module = sys.modules.get("tests")
-        tests_module_path = getattr(tests_module, "__file__", None)
+        tests_module_path_obj = getattr(tests_module, "__file__", None)
+        tests_module_path = (
+            tests_module_path_obj
+            if isinstance(tests_module_path_obj, str)
+            else None
+        )
         is_local_tests_module = (
             tests_module_path is not None
             and Path(tests_module_path).resolve().parent == tests_dir
@@ -67,11 +115,11 @@ def load_environment(module_file: str) -> None:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    log_component_event(RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "environment.load.complete",
         module_file=str(module_path),
         has_setup=environment.setup_fn is not None,
-        test_count=len(environment._test_registry),
+        test_count=len(environment.test_registry_items()),
     )
 
 
@@ -79,7 +127,7 @@ async def extract_upload(upload: UploadFile, destination: Path) -> None:
     archive_path = destination / "_upload.tar.gz"
     with archive_path.open("wb") as output_file:
         while chunk := await upload.read(1024 * 1024):
-            output_file.write(chunk)
+            _ = output_file.write(chunk)
 
     with tarfile.open(archive_path, "r:gz") as archive:
         archive.extractall(destination, filter="data")
@@ -87,66 +135,11 @@ async def extract_upload(upload: UploadFile, destination: Path) -> None:
     archive_path.unlink(missing_ok=True)
 
 
-def coerce_path_value(value: str) -> Any:
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
-def extract_template_params(template_path: str, request_path: str) -> dict[str, Any] | None:
-    if "{" not in template_path or "}" not in template_path:
-        return None
-    if "{" in request_path or "}" in request_path:
-        return None
-
-    pattern_parts: list[str] = []
-    cursor = 0
-    for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template_path):
-        pattern_parts.append(re.escape(template_path[cursor:match.start()]))
-        parameter_name = match.group(1)
-        pattern_parts.append(f"(?P<{parameter_name}>[^/]+)")
-        cursor = match.end()
-    pattern_parts.append(re.escape(template_path[cursor:]))
-
-    pattern = "^" + "".join(pattern_parts) + "$"
-    path_match = re.match(pattern, request_path)
-    if path_match is None:
-        return None
-
-    return {key: coerce_path_value(value) for key, value in path_match.groupdict().items()}
-
-
-def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    matched: dict[str, tuple[Callable[..., Any], dict[str, Any]]] = {}
-    for test_path, function in environment._test_registry.items():
-        is_template = "{" in test_path and "}" in test_path
-
-        if is_template:
-            if path == test_path:
-                matched[test_path] = (function, {})
-                continue
-            if not path:
-                continue
-            template_params = extract_template_params(test_path, path)
-            if template_params is not None:
-                matched[test_path] = (function, template_params)
-            continue
-
-        if not path:
-            matched[test_path] = (function, {})
-            continue
-
-        if test_path == path or test_path.startswith(path + "/"):
-            matched[test_path] = (function, {})
-
-    return matched
-
-
 def find_free_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+        address = cast(tuple[str, int], listener.getsockname())
+        return address[1]
 
 
 async def spawn_worker(
@@ -158,9 +151,8 @@ async def spawn_worker(
     worker_log_path = f"/tmp/envoi_worker_{session_id[:8]}_{port}.jsonl"
     worker_env = dict(os.environ)
     worker_env["ENVOI_LOG_PATH"] = worker_log_path
-    worker_env["ENVOI_LOG_COMPONENT"] = "session_worker"
     worker_env["ENVOI_LOG_SESSION_ID"] = session_id
-    log_component_event(RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "worker.spawn.start",
         session_id=session_id,
         port=port,
@@ -189,7 +181,7 @@ async def spawn_worker(
                 stderr_text = (await process.stderr.read()).decode(
                     errors="replace"
                 ).strip()
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "worker.spawn.failed",
                 level="error",
                 session_id=session_id,
@@ -197,15 +189,15 @@ async def spawn_worker(
                 return_code=process.returncode,
                 stderr=stderr_text,
             )
+            exit_reason = stderr_text or f"exit code {process.returncode}"
             raise RuntimeError(
-                "Session worker exited before startup: "
-                f"{stderr_text or f'exit code {process.returncode}'}"
+                f"Session worker exited before startup: {exit_reason}"
             )
 
         try:
             async with httpx.AsyncClient() as client:
-                await client.get(f"{worker_url}/docs", timeout=1.0)
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+                _ = await client.get(f"{worker_url}/docs", timeout=1.0)
+            emit_runtime_log(
                 "worker.spawn.ready",
                 session_id=session_id,
                 port=port,
@@ -219,11 +211,11 @@ async def spawn_worker(
 
     try:
         process.terminate()
-        await process.wait()
+        _ = await process.wait()
     except Exception:
         pass
 
-    log_component_event(RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "worker.spawn.timeout",
         level="error",
         session_id=session_id,
@@ -232,9 +224,10 @@ async def spawn_worker(
     raise RuntimeError("Timed out waiting for session worker startup")
 
 
-def extract_error_message(response: httpx.Response, payload: Any | None) -> str:
-    if isinstance(payload, dict):
-        error_value = payload.get("error")
+def extract_error_message(response: httpx.Response, payload: object | None) -> str:
+    payload_dict = object_dict(payload)
+    if payload_dict is not None:
+        error_value = payload_dict.get("error")
         if isinstance(error_value, str):
             return error_value
         if error_value is not None:
@@ -246,9 +239,9 @@ def extract_error_message(response: httpx.Response, payload: Any | None) -> str:
     return response.reason_phrase or "unknown error"
 
 
-def try_parse_json(response: httpx.Response) -> Any | None:
+def try_parse_json(response: httpx.Response) -> object | None:
     try:
-        return response.json()
+        return cast(object, response.json())
     except ValueError:
         return None
 
@@ -256,7 +249,7 @@ def try_parse_json(response: httpx.Response) -> Any | None:
 async def session_timeout(session_id: str, timeout_seconds: int) -> None:
     await asyncio.sleep(timeout_seconds)
     if session_id in sessions:
-        log_component_event(RUNTIME_COMPONENT_DEFAULT,
+        emit_runtime_log(
             "session.timeout",
             session_id=session_id,
             timeout_seconds=timeout_seconds,
@@ -269,10 +262,10 @@ def reset_session_timeout(session_id: str) -> None:
         return
 
     session_state = sessions[session_id]
-    timeout_task: asyncio.Task[None] = session_state["timeout_task"]
-    timeout_task.cancel()
+    timeout_task = session_state["timeout_task"]
+    _ = timeout_task.cancel()
 
-    timeout_seconds: int = session_state["timeout_seconds"]
+    timeout_seconds = session_state["timeout_seconds"]
     session_state["timeout_task"] = asyncio.create_task(
         session_timeout(session_id, timeout_seconds)
     )
@@ -282,32 +275,30 @@ async def cleanup_session(session_id: str) -> None:
     session_state = sessions.pop(session_id, None)
     if session_state is None:
         return
-    log_component_event(RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "session.cleanup.start",
         session_id=session_id,
-        worker_url=session_state.get("url"),
+        worker_url=session_state["url"],
     )
 
-    timeout_task: asyncio.Task[None] = session_state["timeout_task"]
-    timeout_task.cancel()
+    timeout_task = session_state["timeout_task"]
+    _ = timeout_task.cancel()
 
     try:
         async with httpx.AsyncClient() as client:
-            await client.delete(f"{session_state['url']}/teardown", timeout=30.0)
+            _ = await client.delete(f"{session_state['url']}/teardown", timeout=30.0)
     except Exception:
         pass
 
-    process: asyncio.subprocess.Process | None = session_state.get("proc")
-    if process is not None:
-        try:
-            process.terminate()
-            await process.wait()
-        except Exception:
-            pass
+    process = session_state["proc"]
+    try:
+        process.terminate()
+        _ = await process.wait()
+    except Exception:
+        pass
 
     shutil.rmtree(session_state["dir"], ignore_errors=True)
-    log_component_event(
-        RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "session.cleanup.complete",
         session_id=session_id,
     )
@@ -315,34 +306,36 @@ async def cleanup_session(session_id: str) -> None:
 
 def build_app(module_file: str) -> FastAPI:
     module_path = str(Path(module_file).resolve())
-    bind_log_context(
-        component=component_name(RUNTIME_COMPONENT_DEFAULT),
+    _ = bind_log_context(
+        component=RUNTIME_COMPONENT_DEFAULT,
         module_file=module_path,
     )
     load_environment(module_path)
 
     app = FastAPI(title="envoi runtime")
 
-    @app.get("/schema")
-    async def get_schema() -> dict[str, Any]:
+    async def get_schema_handler() -> dict[str, object]:
         return environment.schema()
 
     async def run_local_tests(
         path: str,
         file: UploadFile | None,
         params: str,
-    ) -> Any:
+    ) -> object:
         started = time.monotonic()
-        log_component_event(RUNTIME_COMPONENT_DEFAULT, "test.local.start", path=path or "/")
+        emit_runtime_log("test.local.start", path=path or "/")
         if environment.setup_fn is not None:
             return JSONResponse(
                 status_code=400,
                 content={"error": "This environment requires a session."},
             )
 
-        matched = matched_tests(path)
+        matched = matched_tests(path, environment.test_registry_items())
         if not matched:
-            return JSONResponse(status_code=404, content={"error": f"No tests match: {path}"})
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"No tests match: {path}"},
+            )
 
         temp_dir = Path(tempfile.mkdtemp(prefix="envoi-test-"))
         try:
@@ -354,9 +347,9 @@ def build_app(module_file: str) -> FastAPI:
 
             async def run_one(
                 test_path: str,
-                function: Callable[..., Any],
-                path_params: dict[str, Any],
-            ) -> tuple[str, Any]:
+                function: TestHandler,
+                path_params: dict[str, object],
+            ) -> tuple[str, object]:
                 token = working_dir.set(str(temp_dir))
                 try:
                     kwargs_input = {**parsed_params, **path_params}
@@ -374,7 +367,7 @@ def build_app(module_file: str) -> FastAPI:
                     for test_path, (function, path_params) in matched.items()
                 ]
             )
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "test.local.complete",
                 path=path or "/",
                 matched=len(matched),
@@ -385,7 +378,7 @@ def build_app(module_file: str) -> FastAPI:
                 return results[0][1]
             return dict(results)
         except Exception as error:
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "test.local.failed",
                 level="error",
                 path=path or "/",
@@ -395,33 +388,30 @@ def build_app(module_file: str) -> FastAPI:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    @app.post("/test")
-    async def run_all_tests(
-        file: UploadFile | None = _OPTIONAL_FILE,
-        params: str = Form(default="{}"),
-    ) -> Any:
+    async def run_all_tests_handler(
+        file: Annotated[UploadFile | None, File()] = None,
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await run_local_tests("", file, params)
 
-    @app.post("/test/{path:path}")
-    async def run_test(
+    async def run_test_handler(
         path: str,
-        file: UploadFile | None = _OPTIONAL_FILE,
-        params: str = Form(default="{}"),
-    ) -> Any:
+        file: Annotated[UploadFile | None, File()] = None,
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await run_local_tests(path, file, params)
 
-    @app.post("/session")
-    async def create_session(
-        file: UploadFile | None = _OPTIONAL_FILE,
-        params: str = Form(default="{}"),
-        timeout: int = Form(default=DEFAULT_SESSION_TIMEOUT_SECONDS),
-    ) -> Any:
+    async def create_session_handler(
+        file: Annotated[UploadFile | None, File()] = None,
+        params: Annotated[str, Form()] = "{}",
+        timeout: Annotated[int, Form()] = DEFAULT_SESSION_TIMEOUT_SECONDS,
+    ) -> object:
         session_id = str(uuid.uuid4())
         session_dir = Path(tempfile.mkdtemp(prefix=f"envoi-session-{session_id[:8]}-"))
         process: asyncio.subprocess.Process | None = None
 
         try:
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "session.create.start",
                 session_id=session_id,
                 timeout_seconds=timeout,
@@ -447,8 +437,9 @@ def build_app(module_file: str) -> FastAPI:
                     timeout=setup_timeout,
                 )
             setup_payload = try_parse_json(setup_response)
+            setup_payload_dict = object_dict(setup_payload)
             if setup_response.is_error or (
-                isinstance(setup_payload, dict) and "error" in setup_payload
+                setup_payload_dict is not None and "error" in setup_payload_dict
             ):
                 raise RuntimeError(extract_error_message(setup_response, setup_payload))
 
@@ -460,17 +451,17 @@ def build_app(module_file: str) -> FastAPI:
                 "timeout_seconds": timeout,
                 "timeout_task": timeout_task,
             }
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "session.create.complete",
                 session_id=session_id,
                 timeout_seconds=timeout,
                 setup_duration_ms=int((time.monotonic() - started) * 1000),
                 worker_url=worker_url,
-                worker_pid=process.pid if process is not None else None,
+                worker_pid=process.pid,
             )
             return {"session_id": session_id, "timeout": timeout}
         except Exception as error:
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "session.create.failed",
                 level="error",
                 session_id=session_id,
@@ -479,13 +470,13 @@ def build_app(module_file: str) -> FastAPI:
             if process is not None:
                 try:
                     process.terminate()
-                    await process.wait()
+                    _ = await process.wait()
                 except Exception:
                     pass
             shutil.rmtree(session_dir, ignore_errors=True)
             return JSONResponse(status_code=500, content={"error": str(error)})
 
-    async def proxy_session_tests(session_id: str, path: str, params: str) -> Any:
+    async def proxy_session_tests(session_id: str, path: str, params: str) -> object:
         if session_id not in sessions:
             return JSONResponse(status_code=404, content={"error": "Unknown session"})
 
@@ -493,7 +484,9 @@ def build_app(module_file: str) -> FastAPI:
         reset_session_timeout(session_id)
 
         request_url = (
-            f"{session_state['url']}/test" if not path else f"{session_state['url']}/test/{path}"
+            f"{session_state['url']}/test"
+            if not path
+            else f"{session_state['url']}/test/{path}"
         )
         request_timeout = max(
             30.0,
@@ -501,7 +494,7 @@ def build_app(module_file: str) -> FastAPI:
             + 30.0,
         )
         started = time.monotonic()
-        log_component_event(RUNTIME_COMPONENT_DEFAULT,
+        emit_runtime_log(
             "session.test.start",
             session_id=session_id,
             path=path or "/",
@@ -517,7 +510,7 @@ def build_app(module_file: str) -> FastAPI:
                     timeout=request_timeout,
                 )
         except Exception as error:
-            log_component_event(RUNTIME_COMPONENT_DEFAULT,
+            emit_runtime_log(
                 "session.test.unavailable",
                 level="error",
                 session_id=session_id,
@@ -530,7 +523,7 @@ def build_app(module_file: str) -> FastAPI:
             )
 
         payload = try_parse_json(response)
-        log_component_event(RUNTIME_COMPONENT_DEFAULT,
+        emit_runtime_log(
             "session.test.response",
             session_id=session_id,
             path=path or "/",
@@ -539,8 +532,9 @@ def build_app(module_file: str) -> FastAPI:
             has_payload=isinstance(payload, dict | list),
         )
         if response.is_error:
-            if isinstance(payload, dict):
-                return JSONResponse(status_code=response.status_code, content=payload)
+            payload_dict = object_dict(payload)
+            if payload_dict is not None:
+                return JSONResponse(status_code=response.status_code, content=payload_dict)
             return JSONResponse(
                 status_code=response.status_code,
                 content={"error": extract_error_message(response, payload)},
@@ -550,40 +544,45 @@ def build_app(module_file: str) -> FastAPI:
             return response.text
         return payload
 
-    @app.post("/session/{session_id}/test")
-    async def run_all_session_tests(
+    async def run_all_session_tests_handler(
         session_id: str,
-        params: str = Form(default="{}"),
-    ) -> Any:
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await proxy_session_tests(session_id, "", params)
 
-    @app.post("/session/{session_id}/test/{path:path}")
-    async def run_session_test(
+    async def run_session_test_handler(
         session_id: str,
         path: str,
-        params: str = Form(default="{}"),
-    ) -> Any:
+        params: Annotated[str, Form()] = "{}",
+    ) -> object:
         return await proxy_session_tests(session_id, path, params)
 
-    @app.delete("/session/{session_id}")
-    async def close_session(session_id: str) -> Any:
+    async def close_session_handler(session_id: str) -> object:
         if session_id not in sessions:
             return JSONResponse(status_code=404, content={"error": "Unknown session"})
 
         await cleanup_session(session_id)
         return {"status": "closed"}
 
+    _ = app.get("/schema")(get_schema_handler)
+    _ = app.post("/test")(run_all_tests_handler)
+    _ = app.post("/test/{path:path}")(run_test_handler)
+    _ = app.post("/session")(create_session_handler)
+    _ = app.post("/session/{session_id}/test")(run_all_session_tests_handler)
+    _ = app.post("/session/{session_id}/test/{path:path}")(run_session_test_handler)
+    _ = app.delete("/session/{session_id}")(close_session_handler)
+
     return app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m envoi.runtime")
-    parser.add_argument("--file", required=True, help="Path to the environment Python file")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
+    _ = parser.add_argument("--file", required=True, help="Path to the environment Python file")
+    _ = parser.add_argument("--host", default="0.0.0.0")
+    _ = parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args(namespace=RuntimeArgs())
 
-    log_component_event(RUNTIME_COMPONENT_DEFAULT,
+    emit_runtime_log(
         "runtime.start",
         file=args.file,
         host=args.host,

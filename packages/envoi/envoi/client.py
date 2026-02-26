@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from types import TracebackType
+from typing import cast
 
 import httpx
 
@@ -9,30 +10,35 @@ from .constants import (
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     DEFAULT_SESSION_TIMEOUT_SECONDS,
 )
-from .utils import (
-    build_request_kwargs,
-    to_jsonable,
-)
+from .utils import build_request_kwargs, mapping_from_object, to_jsonable
 
 
-def parse_json_response(response: httpx.Response) -> Any | None:
+def parse_json_response(response: httpx.Response) -> object | None:
     try:
-        return response.json()
+        return cast(object, response.json())
     except ValueError:
         return None
 
 
-def response_error_message(response: httpx.Response, payload: Any | None) -> str:
-    if isinstance(payload, dict):
-        error_value = payload.get("error")
+def object_dict(value: object | None) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return mapping_from_object(cast(object, value))
+
+
+def response_error_message(response: httpx.Response, payload: object | None) -> str:
+    payload_dict = object_dict(payload)
+    if payload_dict is not None:
+        error_value = payload_dict.get("error")
         if isinstance(error_value, str):
             return error_value
 
-        if isinstance(error_value, dict):
-            message = error_value.get("message")
+        error_mapping = object_dict(error_value)
+        if error_mapping is not None:
+            message = error_mapping.get("message")
             if isinstance(message, str):
                 return message
-            return json.dumps(error_value, ensure_ascii=False)
+            return json.dumps(error_mapping, ensure_ascii=False)
 
         if error_value is not None:
             return str(error_value)
@@ -44,8 +50,9 @@ def response_error_message(response: httpx.Response, payload: Any | None) -> str
     return response.reason_phrase or "unknown error"
 
 
-def raise_for_response_error(response: httpx.Response, payload: Any | None) -> None:
-    has_payload_error = isinstance(payload, dict) and "error" in payload
+def raise_for_response_error(response: httpx.Response, payload: object | None) -> None:
+    payload_dict = object_dict(payload)
+    has_payload_error = payload_dict is not None and "error" in payload_dict
     if response.is_error or has_payload_error:
         message = response_error_message(response, payload)
         raise RuntimeError(
@@ -53,20 +60,23 @@ def raise_for_response_error(response: httpx.Response, payload: Any | None) -> N
         )
 
 
-def schema_test_names(schema: dict[str, Any]) -> list[str]:
+def schema_test_names(schema: dict[str, object]) -> list[str]:
     tests = schema.get("tests", [])
     if not isinstance(tests, list):
         return []
+    test_items = cast(list[object], tests)
 
     names: list[str] = []
-    for item in tests:
+    for item in test_items:
         if isinstance(item, str):
             names.append(item)
             continue
-        if isinstance(item, dict):
-            name_value = item.get("name")
-            if isinstance(name_value, str):
-                names.append(name_value)
+        item_dict = object_dict(item)
+        if item_dict is None:
+            continue
+        name_value = item_dict.get("name")
+        if isinstance(name_value, str):
+            names.append(name_value)
     return names
 
 
@@ -74,12 +84,12 @@ class Client:
     def __init__(
         self,
         url: str,
-        schema: dict[str, Any],
+        schema: dict[str, object],
         http_client: httpx.AsyncClient,
     ) -> None:
-        self.base_url = url.rstrip("/")
-        self.schema = schema
-        self.http_client = http_client
+        self.base_url: str = url.rstrip("/")
+        self.schema: dict[str, object] = schema
+        self.http_client: httpx.AsyncClient = http_client
 
     @property
     def tests(self) -> list[str]:
@@ -87,8 +97,8 @@ class Client:
 
     @property
     def has_setup(self) -> bool:
-        capabilities = self.schema.get("capabilities")
-        if not isinstance(capabilities, dict):
+        capabilities = object_dict(self.schema.get("capabilities"))
+        if capabilities is None:
             raise ValueError("Invalid envoi schema: missing capabilities")
         requires_session = capabilities.get("requires_session")
         if not isinstance(requires_session, bool):
@@ -97,7 +107,7 @@ class Client:
             )
         return requires_session
 
-    async def test(self, name: str = "", **kwargs: Any) -> Any:
+    async def test(self, name: str = "", **kwargs: object) -> object:
         if self.has_setup:
             raise RuntimeError("This environment requires a session.")
 
@@ -113,7 +123,7 @@ class Client:
         return payload
 
     async def session(
-        self, timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS, **kwargs: Any
+        self, timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS, **kwargs: object
     ) -> Session:
         request_kwargs = build_request_kwargs(kwargs)
         request_kwargs["data"]["timeout"] = str(timeout_seconds)
@@ -123,15 +133,24 @@ class Client:
         )
         session_payload = parse_json_response(response)
         raise_for_response_error(response, session_payload)
-        if not isinstance(session_payload, dict):
+        session_mapping = object_dict(session_payload)
+        if session_mapping is None:
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"
             )
 
+        session_id = session_mapping.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(
+                f"Request failed ({response.status_code}): invalid session id"
+            )
+        timeout_raw = session_mapping.get("timeout")
+        timeout_value = timeout_raw if isinstance(timeout_raw, int) else timeout_seconds
+
         return Session(
             client=self,
-            session_id=session_payload["session_id"],
-            timeout_seconds=session_payload.get("timeout", timeout_seconds),
+            session_id=session_id,
+            timeout_seconds=timeout_value,
         )
 
     async def close(self) -> None:
@@ -140,7 +159,13 @@ class Client:
     async def __aenter__(self) -> Client:
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
         await self.close()
 
 
@@ -152,12 +177,12 @@ class Session:
         timeout_seconds: int,
         close_client_on_close: bool = False,
     ) -> None:
-        self.client = client
-        self.session_id = session_id
-        self.timeout_seconds = timeout_seconds
-        self.close_client_on_close = close_client_on_close
+        self.client: Client = client
+        self.session_id: str = session_id
+        self.timeout_seconds: int = timeout_seconds
+        self.close_client_on_close: bool = close_client_on_close
 
-    async def test(self, name: str = "", **kwargs: Any) -> Any:
+    async def test(self, name: str = "", **kwargs: object) -> object:
         endpoint = (
             f"{self.client.base_url}/session/{self.session_id}/test"
             if not name
@@ -191,7 +216,13 @@ class Session:
     async def __aenter__(self) -> Session:
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
         await self.close()
 
 
@@ -203,14 +234,15 @@ async def connect(
         response = await http_client.get(f"{url.rstrip('/')}/schema")
         payload = parse_json_response(response)
         raise_for_response_error(response, payload)
-        if not isinstance(payload, dict):
+        schema_payload = object_dict(payload)
+        if schema_payload is None:
             raise RuntimeError(
                 f"Request failed ({response.status_code}): invalid JSON response body"
             )
     except Exception:
         await http_client.aclose()
         raise
-    return Client(url=url, schema=payload, http_client=http_client)
+    return Client(url=url, schema=schema_payload, http_client=http_client)
 
 
 async def connect_session(
@@ -218,7 +250,7 @@ async def connect_session(
     *,
     connect_timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS,
     session_timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS,
-    **kwargs: Any,
+    **kwargs: object,
 ) -> Session:
     envoi_client = await connect(url, timeout_seconds=connect_timeout_seconds)
     try:

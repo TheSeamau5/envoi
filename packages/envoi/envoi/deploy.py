@@ -3,9 +3,26 @@ from __future__ import annotations
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from .constants import DEFAULT_IMAGE_NAME, DEFAULT_PORT
+
+
+class DeployResult(TypedDict):
+    container_id: str | None
+    container_name: str | None
+    image: str
+    url: str
+
+
+class DeployArgs(argparse.Namespace):
+    path: str = "."
+    module: str | None = None
+    port: int = DEFAULT_PORT
+    image: str = DEFAULT_IMAGE_NAME
+    name: str | None = None
+    no_build: bool = False
+    foreground: bool = False
 
 
 def deploy(
@@ -17,7 +34,7 @@ def deploy(
     container_name: str | None = None,
     build: bool = True,
     detach: bool = True,
-) -> dict[str, Any]:
+) -> DeployResult:
     target_path = Path(path).resolve()
     if not target_path.exists():
         raise FileNotFoundError(f"Environment path not found: {target_path}")
@@ -60,7 +77,7 @@ def deploy(
             "url": runtime_url,
         }
 
-    run_command_checked(run_command)
+    _ = run_command_checked(run_command)
     return {
         "container_id": None,
         "container_name": container_name,
@@ -81,7 +98,7 @@ def build_runtime_image(project_root: Path, image_name: str, environment_dir: Pa
             str(custom_dockerfile),
             str(project_root),
         ]
-        run_command_checked(build_command)
+        _ = run_command_checked(build_command)
         return
 
     base_dockerfile = project_root / "packages" / "envoi" / "envoi" / "Dockerfile.base"
@@ -92,7 +109,7 @@ def build_runtime_image(project_root: Path, image_name: str, environment_dir: Pa
     build_command.extend(["-t", image_name])
     build_command.extend(["-f", str(base_dockerfile)])
     build_command.append(str(project_root))
-    run_command_checked(build_command)
+    _ = run_command_checked(build_command)
 
 
 def run_command_checked(
@@ -108,25 +125,25 @@ def run_command_checked(
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m envoi.deploy")
-    parser.add_argument(
+    _ = parser.add_argument(
         "--path",
         default=".",
         help="Path to environment folder or environment Python file (default: .)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--module",
         default=None,
         help=(
-            "When --path is a folder, Python module filename to run"
-            " (for example: polish_notation.py)"
+            "When --path is a folder, Python module filename to run "
+            "(for example: polish_notation.py)"
         ),
     )
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--image", default=DEFAULT_IMAGE_NAME)
-    parser.add_argument("--name", default=None)
-    parser.add_argument("--no-build", action="store_true")
-    parser.add_argument("--foreground", action="store_true")
-    args = parser.parse_args()
+    _ = parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    _ = parser.add_argument("--image", default=DEFAULT_IMAGE_NAME)
+    _ = parser.add_argument("--name", default=None)
+    _ = parser.add_argument("--no-build", action="store_true")
+    _ = parser.add_argument("--foreground", action="store_true")
+    args = parser.parse_args(namespace=DeployArgs())
 
     result = deploy(
         path=args.path,
@@ -176,14 +193,13 @@ def resolve_environment_target(
 
     if not candidates:
         raise ValueError(
-            "No Python environment module found in folder. "
-            "Pass --module <filename.py>."
+            "No Python environment module found in folder. Pass --module <filename.py>."
         )
 
+    candidate_list = ", ".join(candidates)
     raise ValueError(
-        "Multiple Python modules found in folder. "
-        "Pass --module <filename.py>. "
-        f"Candidates: {', '.join(candidates)}"
+        "Multiple Python modules found in folder. Pass --module <filename.py>. "
+        + f"Candidates: {candidate_list}"
     )
 
 
