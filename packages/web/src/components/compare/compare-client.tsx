@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   GitCompareArrows,
   Settings2,
@@ -60,6 +60,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   const [activeTab, setActiveTab] = useState<CompareTab>("curves");
   const [sortBy, setSortBy] = useState<SortKey>("score");
   const [modelFilter, setModelFilter] = useState<string>("all");
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const focusedRowRef = useRef<HTMLDivElement>(null);
 
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
@@ -107,6 +110,55 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     const models = new Set(allTraces.map((t) => t.model));
     return [...models];
   }, [allTraces]);
+
+  /** Clamp focused index when filtered list changes */
+  useEffect(() => {
+    if (focusedIndex >= sortedTraces.length) {
+      setFocusedIndex(Math.max(0, sortedTraces.length - 1));
+    }
+  }, [sortedTraces.length, focusedIndex]);
+
+  /** Scroll focused row into view */
+  useEffect(() => {
+    focusedRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [focusedIndex]);
+
+  /** Keyboard handler for sidebar navigation */
+  const handleSidebarKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      switch (event.key) {
+        case "ArrowUp":
+        case "k":
+          event.preventDefault();
+          setFocusedIndex((prev) => Math.max(0, prev - 1));
+          break;
+        case "ArrowDown":
+        case "j":
+          event.preventDefault();
+          setFocusedIndex((prev) => Math.min(sortedTraces.length - 1, prev + 1));
+          break;
+        case " ":
+        case "Enter": {
+          event.preventDefault();
+          const focused = sortedTraces[focusedIndex];
+          if (focused) toggleTrace(focused.id);
+          break;
+        }
+        case "Home":
+          event.preventDefault();
+          setFocusedIndex(0);
+          break;
+        case "End":
+          event.preventDefault();
+          setFocusedIndex(Math.max(0, sortedTraces.length - 1));
+          break;
+        case "Escape":
+          (event.target as HTMLElement).blur();
+          break;
+      }
+    },
+    [sortedTraces, focusedIndex],
+  );
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -176,7 +228,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       {mode === "traces" ? (
         <div className="flex flex-1 overflow-hidden">
           {/* Trace selection sidebar */}
-          <div className="flex w-[280px] shrink-0 flex-col border-r border-envoi-border">
+          <div
+            ref={sidebarRef}
+            className="flex w-[280px] shrink-0 flex-col border-r border-envoi-border outline-none"
+            tabIndex={0}
+            onKeyDown={handleSidebarKeyDown}
+          >
             {/* Sidebar header with sort + model filter */}
             <div className="flex items-center gap-2 border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
               <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
@@ -252,9 +309,10 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
             {/* Trace list */}
             <div className="flex-1 overflow-y-auto">
-              {sortedTraces.map((trace) => {
+              {sortedTraces.map((trace, traceIndex) => {
                 const selIndex = getSelectionIndex(trace.id);
                 const isSelected = selIndex >= 0;
+                const isFocused = traceIndex === focusedIndex;
                 const color = isSelected
                   ? TRACE_COLORS[selIndex % TRACE_COLORS.length]!
                   : undefined;
@@ -262,6 +320,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 return (
                   <div
                     key={trace.id}
+                    ref={isFocused ? focusedRowRef : undefined}
                     className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
                     style={{
                       borderLeft: isSelected
@@ -269,8 +328,13 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                         : "3px solid transparent",
                       background: isSelected ? color!.fill : undefined,
                       cursor: "pointer",
+                      outline: isFocused ? `2px solid ${T.accent}` : "none",
+                      outlineOffset: -2,
                     }}
-                    onClick={() => toggleTrace(trace.id)}
+                    onClick={() => {
+                      setFocusedIndex(traceIndex);
+                      toggleTrace(trace.id);
+                    }}
                   >
                     {/* Checkbox */}
                     <span

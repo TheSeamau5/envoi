@@ -41,6 +41,18 @@ export type Step = {
   index: number;
   durationMs?: number;
   tokensUsed?: number;
+  /** JSON string of tool arguments (tool_call, mcp_call, file_read, file_write) */
+  toolInput?: string;
+  /** Tool response text */
+  toolOutput?: string;
+  /** Whether this step resulted in an error */
+  isError?: boolean;
+  /** Error details when isError is true */
+  errorMessage?: string;
+  /** Full reasoning/thinking trace (reasoning steps) */
+  reasoningContent?: string;
+  /** Agent's plan text (reasoning steps that contain a plan) */
+  planContent?: string;
 };
 
 /** A file that was modified in a commit */

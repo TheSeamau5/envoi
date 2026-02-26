@@ -6,6 +6,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
+import { Providers } from "@/components/providers";
 import { Sidebar } from "@/components/sidebar";
 import { BottomBar } from "@/components/bottom-bar";
 
@@ -31,13 +32,15 @@ export default function RootLayout({
   return (
     <html lang="en" className={monoFont.variable}>
       <body className="font-mono antialiased">
-        <div className="flex h-screen overflow-hidden">
-          <Sidebar />
-          <div className="flex flex-1 flex-col overflow-hidden">
-            {children}
-            <BottomBar />
+        <Providers>
+          <div className="flex h-screen overflow-hidden">
+            <Sidebar />
+            <div className="flex flex-1 flex-col overflow-hidden">
+              {children}
+              <BottomBar />
+            </div>
           </div>
-        </div>
+        </Providers>
       </body>
     </html>
   );

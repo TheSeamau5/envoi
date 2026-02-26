@@ -105,62 +105,193 @@ function buildCodeEvolution(numCommits: number, rng: SeededRng): CodeSnapshot[] 
   return snapshots;
 }
 
+/** Code snippet lines for mock file_read output */
+const CODE_LINES = [
+  "fn main() {",
+  "    let input = std::env::args().nth(1).unwrap();",
+  "    let tokens = lexer::tokenize(&input);",
+  "    let ast = parser::parse(&tokens)?;",
+  "    let ir = codegen::lower(&ast);",
+  "    codegen::emit_x86_64(&ir, &mut output);",
+  "    match token {",
+  "        Token::Ident(name) => resolve_symbol(name),",
+  "        Token::IntLit(val) => emit_immediate(val),",
+  "        _ => return Err(\"unexpected token\"),",
+  "    }",
+  "    let aligned = (stack_depth + 15) & !15;",
+  "    emit_sub_rsp(aligned - stack_depth);",
+  "    emit_call(func_label);",
+  "    emit_add_rsp(aligned - stack_depth);",
+] as const;
+
+/** Reasoning paragraph templates for multi-paragraph thinking traces */
+const REASONING_PARAGRAPHS = [
+  "Looking at the error output, the generated assembly is missing the proper stack alignment before the function call. The x86_64 ABI requires 16-byte stack alignment at the point of a CALL instruction.",
+  "I need to track the current stack depth through the code generator, insert alignment padding before each call, and remove the padding after the call returns. This is a fundamental issue.",
+  "The failing test case calls a variadic function (printf), which is particularly sensitive to stack alignment on x86_64. The System V ABI mandates that AL contains the number of vector registers used.",
+  "Tracing through the generated code: we push rbp (8 bytes), then allocate local variables. If locals use an odd number of 8-byte slots, the stack will be misaligned at the next call site.",
+  "The type checker is not propagating const qualifiers through pointer dereferences. This causes the codegen to emit unnecessary loads and stores, which in turn breaks the alias analysis.",
+  "I should check if the register allocator is spilling correctly around function calls. The caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11) need to be preserved if they hold live values.",
+  "The issue might be in how we handle struct returns. The ABI says structs larger than 16 bytes are returned via a hidden pointer parameter, which shifts all other arguments by one register.",
+  "Let me review the calling convention: integer/pointer args go in rdi, rsi, rdx, rcx, r8, r9 in order. Floating point args go in xmm0-xmm7. Additional args go on the stack right-to-left.",
+] as const;
+
+/** Plan templates for reasoning steps */
+const PLAN_TEMPLATES = [
+  "1. Fix stack alignment tracking in codegen.rs\n2. Add padding insertion before CALL instructions\n3. Update register allocator to account for alignment slots\n4. Re-run basics and wacct suites to verify\n5. Check for regressions in c_testsuite",
+  "1. Implement const qualifier propagation in type checker\n2. Update AST to carry const info through pointer types\n3. Fix codegen to respect const for alias analysis\n4. Run full test suite",
+  "1. Add struct return ABI handling for types > 16 bytes\n2. Implement hidden pointer parameter insertion\n3. Update calling convention logic for shifted arguments\n4. Test with struct-heavy test cases\n5. Verify no regressions in basic function calls",
+  "1. Review current register allocation strategy\n2. Implement caller-save spill around call sites\n3. Add callee-save register restore in function epilogue\n4. Run torture tests to verify correctness",
+  "1. Parse switch statement syntax\n2. Implement jump table generation for dense cases\n3. Add fallthrough semantics\n4. Handle default case\n5. Test with basics and wacct suites",
+] as const;
+
+/** Build output templates */
+const BUILD_OUTPUTS = [
+  "   Compiling cc v0.1.0 (/workspace)\n    Finished dev [unoptimized + debuginfo] target(s) in 2.34s",
+  "   Compiling cc v0.1.0 (/workspace)\nwarning: unused variable `temp_reg` in codegen.rs:142\n    Finished dev [unoptimized + debuginfo] target(s) in 1.87s",
+  "   Compiling cc v0.1.0 (/workspace)\n    Finished dev [unoptimized + debuginfo] target(s) in 3.12s\n\nRunning target/debug/cc",
+] as const;
+
+/** Build error templates */
+const BUILD_ERRORS = [
+  "error[E0308]: mismatched types\n  --> src/codegen.rs:89:20\n   |\n89 |     let offset: u64 = calculate_offset(node);\n   |                 ^^^ expected `u64`, found `i64`",
+  "error[E0502]: cannot borrow `self.registers` as mutable\n  --> src/regalloc.rs:45:9\n   |\n44 |     let current = &self.registers[idx];\n45 |     self.registers.push(new_reg);\n   |     ^^^^^^^^^^^^^^ cannot borrow as mutable",
+  "error: linking failed with exit code 1\nnote: /usr/bin/ld: undefined reference to `__stack_chk_fail'\ncollect2: error: ld returned 1 exit status",
+] as const;
+
 /** Generate steps (agent actions) for a single commit */
 function generateSteps(rng: SeededRng, phase: number): Step[] {
   const numSteps = 3 + Math.floor(rng.next() * 12);
   const steps: Step[] = [];
+  const stageLabel = phase < 0.3 ? "lexer/parser" : phase < 0.6 ? "type checker" : "code generation";
 
   for (let stepIdx = 0; stepIdx < numSteps; stepIdx++) {
     const roll = rng.next();
-    let type: Step["type"];
-    let summary: string;
-    let detail: string;
 
     if (stepIdx === 0) {
-      type = "reasoning";
-      summary = rng.pick(REASONING_SUMMARIES);
-      detail = `${summary}\n\nLet me trace through the failing test case step by step...\n\nThe issue appears to be in the ${phase < 0.3 ? "lexer/parser" : phase < 0.6 ? "type checker" : "code generation"} stage.`;
+      // First step is always reasoning with full thinking trace
+      const summary = rng.pick(REASONING_SUMMARIES);
+      const numParagraphs = 2 + Math.floor(rng.next() * 3);
+      const paragraphs = Array.from({ length: numParagraphs }, () => rng.pick(REASONING_PARAGRAPHS));
+      const reasoningContent = `${summary}\n\nLet me trace through the failing test case step by step...\n\nThe issue appears to be in the ${stageLabel} stage.\n\n${paragraphs.join("\n\n")}`;
+      const hasPlan = rng.next() < 0.4;
+      const planContent = hasPlan ? rng.pick(PLAN_TEMPLATES) : undefined;
+
+      steps.push({
+        type: "reasoning",
+        summary,
+        detail: `${summary}\n\nLet me trace through the failing test case step by step...\n\nThe issue appears to be in the ${stageLabel} stage.`,
+        index: stepIdx,
+        durationMs: rng.nextInt(500, 30000),
+        tokensUsed: rng.nextInt(20000, 80000),
+        reasoningContent,
+        planContent,
+      });
     } else if (roll < 0.25) {
-      type = "reasoning";
-      summary = rng.pick(REASONING_SECONDARY);
-      detail = summary;
+      // Secondary reasoning
+      const summary = rng.pick(REASONING_SECONDARY);
+      const paragraph = rng.pick(REASONING_PARAGRAPHS);
+      steps.push({
+        type: "reasoning",
+        summary,
+        detail: summary,
+        index: stepIdx,
+        durationMs: rng.nextInt(500, 15000),
+        tokensUsed: rng.nextInt(5000, 40000),
+        reasoningContent: `${summary}\n\n${paragraph}`,
+      });
     } else if (roll < 0.45) {
-      type = "file_read";
+      // File read
       const file = rng.pick(SOURCE_FILES);
-      summary = `Read ${file}`;
-      detail = summary;
+      const numLines = rng.nextInt(5, 15);
+      const codeSnippet = Array.from({ length: numLines }, () => rng.pick(CODE_LINES)).join("\n");
+      steps.push({
+        type: "file_read",
+        summary: `Read ${file}`,
+        detail: `Read ${file}`,
+        index: stepIdx,
+        durationMs: rng.nextInt(100, 2000),
+        tokensUsed: rng.nextInt(2000, 10000),
+        toolInput: JSON.stringify({ path: file, lines: `1-${numLines * 10}` }, undefined, 2),
+        toolOutput: `// ${file}\n${codeSnippet}`,
+      });
     } else if (roll < 0.65) {
-      type = "file_write";
+      // File write
       const file = rng.pick(SOURCE_FILES);
       const lineCount = Math.floor(rng.next() * 30) + 3;
-      summary = `Edit ${file} (+${lineCount} lines)`;
-      detail = summary;
+      steps.push({
+        type: "file_write",
+        summary: `Edit ${file} (+${lineCount} lines)`,
+        detail: `Edit ${file} (+${lineCount} lines)`,
+        index: stepIdx,
+        durationMs: rng.nextInt(200, 5000),
+        tokensUsed: rng.nextInt(3000, 20000),
+        toolInput: JSON.stringify({ path: file, operation: "insert", startLine: rng.nextInt(10, 200), lineCount }, undefined, 2),
+        toolOutput: `Successfully wrote ${lineCount} lines to ${file}`,
+      });
     } else if (roll < 0.8) {
-      type = "tool_call";
-      summary = rng.pick(TOOL_CALLS);
-      detail = summary;
+      // Tool call (e.g., cargo build)
+      const summary = rng.pick(TOOL_CALLS);
+      const isToolError = rng.next() < 0.15;
+      const toolOutput = isToolError ? rng.pick(BUILD_ERRORS) : rng.pick(BUILD_OUTPUTS);
+      steps.push({
+        type: "tool_call",
+        summary,
+        detail: summary,
+        index: stepIdx,
+        durationMs: rng.nextInt(1000, 30000),
+        tokensUsed: rng.nextInt(5000, 30000),
+        toolInput: JSON.stringify({ command: summary, cwd: "/workspace", timeout: rng.nextInt(10, 60) * 1000 }, undefined, 2),
+        toolOutput,
+        isError: isToolError,
+        errorMessage: isToolError ? toolOutput.split("\n")[0] : undefined,
+      });
     } else if (roll < 0.9) {
-      type = "test_run";
-      summary = `Run ${rng.pick(TEST_SUITE_NAMES)} suite`;
-      detail = summary;
+      // Test run
+      const suiteName = rng.pick(TEST_SUITE_NAMES);
+      const totalTests = rng.nextInt(10, 200);
+      const passed = rng.nextInt(Math.floor(totalTests * 0.5), totalTests);
+      const failed = totalTests - passed;
+      const isTestError = failed > totalTests * 0.3;
+      const failedLines = failed > 0
+        ? `\n\nFailed tests:\n${Array.from({ length: Math.min(failed, 5) }, () => `  FAIL: test_${rng.nextInt(1, 500).toString().padStart(3, "0")} — ${rng.pick(ERROR_MESSAGES)}`).join("\n")}`
+        : "";
+      steps.push({
+        type: "test_run",
+        summary: `Run ${suiteName} suite`,
+        detail: `Run ${suiteName} suite`,
+        index: stepIdx,
+        durationMs: rng.nextInt(2000, 60000),
+        tokensUsed: rng.nextInt(1000, 5000),
+        toolInput: JSON.stringify({ suite: suiteName, filter: "*" }, undefined, 2),
+        toolOutput: `Running ${suiteName} suite...\n\n${passed} passed, ${failed} failed, 0 skipped${failedLines}`,
+        isError: isTestError,
+        errorMessage: isTestError ? `${failed}/${totalTests} tests failed` : undefined,
+      });
     } else {
-      type = "mcp_call";
+      // MCP call
       const suite = rng.pick(TEST_SUITE_NAMES);
-      summary =
-        suite === "wacct"
-          ? `envoi.test(wacct/ch_${rng.nextInt(1, 20)})`
-          : `envoi.test(${suite})`;
-      detail = summary;
+      const summary = suite === "wacct"
+        ? `envoi.test(wacct/ch_${rng.nextInt(1, 20)})`
+        : `envoi.test(${suite})`;
+      const passed = rng.nextInt(0, 50);
+      const failed = rng.nextInt(0, 10);
+      const isMcpError = rng.next() < 0.1;
+      steps.push({
+        type: "mcp_call",
+        summary,
+        detail: summary,
+        index: stepIdx,
+        durationMs: rng.nextInt(3000, 45000),
+        tokensUsed: rng.nextInt(2000, 15000),
+        toolInput: JSON.stringify({ server: "envoi", tool: "test", args: { suite, timeout: 30000 } }, undefined, 2),
+        toolOutput: isMcpError
+          ? `Error: MCP server timeout after 30s\nThe test execution exceeded the maximum allowed time.`
+          : `Test results for ${suite}:\n  Passed: ${passed}\n  Failed: ${failed}\n  Total: ${passed + failed}`,
+        isError: isMcpError,
+        errorMessage: isMcpError ? "MCP server timeout after 30s" : undefined,
+      });
     }
-
-    steps.push({
-      type,
-      summary,
-      detail,
-      index: stepIdx,
-      durationMs: rng.nextInt(500, 30000),
-      tokensUsed: rng.nextInt(5000, 80000),
-    });
   }
 
   return steps;

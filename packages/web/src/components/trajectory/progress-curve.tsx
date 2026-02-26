@@ -22,8 +22,8 @@ type ProgressCurveProps = {
 
 /** Chart layout constants */
 const VIEW_WIDTH = 600;
-const VIEW_HEIGHT = 160;
-const MARGIN = { top: 14, right: 42, bottom: 14, left: 38 };
+const VIEW_HEIGHT = 320;
+const MARGIN = { top: 24, right: 42, bottom: 24, left: 38 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
@@ -115,7 +115,7 @@ export function ProgressCurve({
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         className="w-full"
-        style={{ height: 160, fontFamily: T.mono }}
+        style={{ height: 320, fontFamily: T.mono }}
       >
         {/* Grid lines */}
         {yTicks.map((tick) => (
@@ -137,7 +137,7 @@ export function ProgressCurve({
             x={MARGIN.left - 6}
             y={toY(tick, yMax) + 3}
             textAnchor="end"
-            style={{ fontSize: "8px", fill: T.textDim }}
+            style={{ fontSize: "9px", fill: T.textDim }}
           >
             {tick}
           </text>
@@ -150,7 +150,7 @@ export function ProgressCurve({
             x={VIEW_WIDTH - MARGIN.right + 6}
             y={toY(tick, yMax) + 3}
             textAnchor="start"
-            style={{ fontSize: "8px", fill: T.textDim }}
+            style={{ fontSize: "9px", fill: T.textDim }}
           >
             {`${Math.round((tick / yMax) * 100)}%`}
           </text>
@@ -203,7 +203,7 @@ export function ProgressCurve({
                 ? T.accent
                 : T.textDim;
 
-          const dotRadius = isSelected ? 5 : 3;
+          const dotRadius = isSelected ? 6 : 4;
 
           return (
             <circle

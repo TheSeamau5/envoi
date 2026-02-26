@@ -57,3 +57,11 @@ This file contains all rules, conventions, and architectural context for AI agen
 - ALL CAPS section headers (10px, letter-spacing 0.06em)
 - Information-dense, power-user focused
 - Bottom status bar with green dot
+
+## localStorage & UI Persistence
+
+16. Use `usePersistedState` from `src/lib/storage.ts` for all localStorage access — never call `localStorage` directly.
+17. All keys are auto-prefixed with `envoi:`. Use descriptive kebab-case key names (e.g., `"sidebar-collapsed"`, `"divider-position"`).
+18. The hook handles SSR, invalid JSON, schema changes, and quota errors. Always provide a sensible default value.
+19. Never crash on bad/missing/outdated localStorage data — always fall back to defaults.
+20. Validate stored values against current valid options before using them.

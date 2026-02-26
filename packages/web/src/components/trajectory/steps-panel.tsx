@@ -1,6 +1,12 @@
 /**
- * Steps panel with feedback banner and step list.
+ * Steps panel with feedback banner and expandable step list.
  * Client component — renders steps with stagger animation on commit change.
+ *
+ * All steps are expandable. Expanded content varies by type:
+ * - reasoning: THINKING section + optional PLAN section
+ * - tool_call / mcp_call: INPUT (JSON) + OUTPUT (text, red if error)
+ * - file_read / file_write: INPUT (path JSON) + OUTPUT (code/confirmation)
+ * - test_run: RESULTS section with pass/fail summary
  *
  * Step type icons and colors:
  * - REASONING: Diamond, #f97316
@@ -24,6 +30,9 @@ import {
   CheckCircle2,
   AlertTriangle,
   Minus,
+  ChevronRight,
+  ChevronDown,
+  AlertCircle,
 } from "lucide-react";
 import type { Commit, Step } from "@/lib/types";
 import { T } from "@/lib/tokens";
@@ -45,22 +54,178 @@ const STEP_CONFIG: Record<
   mcp_call: { icon: Hexagon, color: "#c026a3", label: "MCP" },
 };
 
+/** Section label used in expanded content */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
+      {children}
+    </span>
+  );
+}
+
+/** Monospace content box for tool input/output */
+function MonoBox({
+  children,
+  isError,
+  maxHeight,
+}: {
+  children: React.ReactNode;
+  isError?: boolean;
+  maxHeight?: number;
+}) {
+  return (
+    <div
+      className="overflow-auto rounded-[4px] border px-[10px] py-[8px] text-[10px] leading-[15px]"
+      style={{
+        maxHeight: maxHeight ?? 240,
+        fontFamily: T.mono,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        background: isError ? T.redBg : T.surface,
+        borderColor: isError ? "rgba(239,68,68,0.2)" : T.borderLight,
+        color: isError ? T.redDark : T.text,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Expanded content for reasoning steps */
+function ReasoningExpanded({ step }: { step: Step }) {
+  return (
+    <div className="mt-[8px] flex flex-col gap-[8px]">
+      {step.reasoningContent && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Thinking</SectionLabel>
+          <MonoBox maxHeight={300}>{step.reasoningContent}</MonoBox>
+        </div>
+      )}
+      {step.planContent && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Plan</SectionLabel>
+          <MonoBox maxHeight={200}>{step.planContent}</MonoBox>
+        </div>
+      )}
+      {!step.reasoningContent && !step.planContent && step.detail && (
+        <div className="text-[10px] leading-[15px] text-envoi-text-muted">
+          {step.detail}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Expanded content for tool_call / mcp_call steps */
+function ToolExpanded({ step }: { step: Step }) {
+  return (
+    <div className="mt-[8px] flex flex-col gap-[8px]">
+      {step.toolInput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Input</SectionLabel>
+          <MonoBox>{step.toolInput}</MonoBox>
+        </div>
+      )}
+      {step.toolOutput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Output</SectionLabel>
+          <MonoBox isError={step.isError}>{step.toolOutput}</MonoBox>
+        </div>
+      )}
+      {step.isError && step.errorMessage && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Error</SectionLabel>
+          <MonoBox isError>{step.errorMessage}</MonoBox>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Expanded content for file_read / file_write steps */
+function FileExpanded({ step }: { step: Step }) {
+  return (
+    <div className="mt-[8px] flex flex-col gap-[8px]">
+      {step.toolInput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Input</SectionLabel>
+          <MonoBox>{step.toolInput}</MonoBox>
+        </div>
+      )}
+      {step.toolOutput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Output</SectionLabel>
+          <MonoBox>{step.toolOutput}</MonoBox>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Expanded content for test_run steps */
+function TestExpanded({ step }: { step: Step }) {
+  return (
+    <div className="mt-[8px] flex flex-col gap-[8px]">
+      {step.toolInput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Command</SectionLabel>
+          <MonoBox>{step.toolInput}</MonoBox>
+        </div>
+      )}
+      {step.toolOutput && (
+        <div className="flex flex-col gap-[4px]">
+          <SectionLabel>Results</SectionLabel>
+          <MonoBox isError={step.isError}>{step.toolOutput}</MonoBox>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Pick the right expanded content for a step type */
+function ExpandedContent({ step }: { step: Step }) {
+  switch (step.type) {
+    case "reasoning":
+      return <ReasoningExpanded step={step} />;
+    case "tool_call":
+    case "mcp_call":
+      return <ToolExpanded step={step} />;
+    case "file_read":
+    case "file_write":
+      return <FileExpanded step={step} />;
+    case "test_run":
+      return <TestExpanded step={step} />;
+    default:
+      return undefined;
+  }
+}
+
+/** Check whether a step has expandable content */
+function hasExpandableContent(step: Step): boolean {
+  return !!(
+    step.toolInput ||
+    step.toolOutput ||
+    step.reasoningContent ||
+    step.planContent ||
+    step.errorMessage ||
+    (step.detail && step.detail.length > step.summary.length)
+  );
+}
+
 /** Individual step row */
 function StepRow({
   step,
   stepIndex,
-  isFirstReasoning,
 }: {
   step: Step;
   stepIndex: number;
-  isFirstReasoning: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const config = STEP_CONFIG[step.type];
   const StepIcon = config.icon;
+  const expandable = hasExpandableContent(step);
 
-  const hasExpandableDetail =
-    isFirstReasoning && step.detail.length > step.summary.length;
+  const ChevronIcon = expanded ? ChevronDown : ChevronRight;
 
   return (
     <div
@@ -70,7 +235,20 @@ function StepRow({
         animationDelay: `${stepIndex * 40}ms`,
       }}
     >
-      <div className="flex items-start gap-[10px]">
+      {/* Clickable header */}
+      <div
+        className={`flex items-start gap-[10px] ${expandable ? "cursor-pointer" : ""}`}
+        onClick={expandable ? () => setExpanded((prev) => !prev) : undefined}
+      >
+        {/* Expand chevron */}
+        <div className="flex w-[14px] shrink-0 items-center pt-[6px]">
+          {expandable ? (
+            <ChevronIcon size={12} className="text-envoi-text-dim" />
+          ) : (
+            <div className="w-[12px]" />
+          )}
+        </div>
+
         {/* Icon in colored square */}
         <div
           className="flex shrink-0 items-center justify-center rounded"
@@ -85,7 +263,7 @@ function StepRow({
 
         {/* Content */}
         <div className="min-w-0 flex-1">
-          {/* Type label + step counter */}
+          {/* Type label + step counter + error dot */}
           <div className="flex items-center gap-[6px]">
             <span
               className="font-semibold tracking-[0.06em]"
@@ -96,6 +274,9 @@ function StepRow({
             <span className="text-[9px] text-envoi-text-dim">
               #{step.index + 1}
             </span>
+            {step.isError && (
+              <AlertCircle size={10} style={{ color: T.redDark }} />
+            )}
           </div>
 
           {/* Summary */}
@@ -103,41 +284,26 @@ function StepRow({
             {step.summary}
           </div>
 
-          {/* Expandable detail for first reasoning step */}
-          {hasExpandableDetail && (
-            <div className="mt-[6px]">
-              <button
-                onClick={() => setExpanded((prev) => !prev)}
-                className="text-[9px] font-medium text-envoi-accent hover:underline"
-              >
-                {expanded ? "Show less" : "Show more"}
-              </button>
-              {expanded && (
-                <div className="relative mt-[4px]">
-                  <div className="text-[10px] leading-[15px] text-envoi-text-muted">
-                    {step.detail}
-                  </div>
-                </div>
+          {/* Metadata line */}
+          {(step.durationMs !== undefined || step.tokensUsed !== undefined) && (
+            <div className="mt-[2px] flex items-center gap-[8px] text-[9px] text-envoi-text-dim">
+              {step.durationMs !== undefined && (
+                <span>{step.durationMs}ms</span>
               )}
-              {!expanded && (
-                <div className="relative mt-[4px] max-h-[36px] overflow-hidden">
-                  <div className="text-[10px] leading-[15px] text-envoi-text-muted">
-                    {step.detail}
-                  </div>
-                  {/* CSS mask fade */}
-                  <div
-                    className="pointer-events-none absolute inset-0"
-                    style={{
-                      background:
-                        "linear-gradient(to bottom, transparent 0%, white 90%)",
-                    }}
-                  />
-                </div>
+              {step.tokensUsed !== undefined && (
+                <span>{step.tokensUsed.toLocaleString()} tokens</span>
               )}
             </div>
           )}
         </div>
       </div>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div className="ml-[50px]">
+          <ExpandedContent step={step} />
+        </div>
+      )}
     </div>
   );
 }
@@ -204,9 +370,6 @@ export function StepsPanel({ commit }: StepsPanelProps) {
     prevCommitIndex.current = commit.index;
   }, [commit.index]);
 
-  /** Track if we've seen the first reasoning step */
-  let firstReasoningSeen = false;
-
   return (
     <div ref={containerRef} className="flex flex-1 flex-col overflow-y-auto">
       {/* Inline keyframes for stagger animation */}
@@ -227,21 +390,13 @@ export function StepsPanel({ commit }: StepsPanelProps) {
 
       {/* Step list */}
       <div key={commit.index}>
-        {commit.steps.map((step, stepIndex) => {
-          const isFirstReasoning =
-            step.type === "reasoning" && !firstReasoningSeen;
-          if (step.type === "reasoning" && !firstReasoningSeen) {
-            firstReasoningSeen = true;
-          }
-          return (
-            <StepRow
-              key={`${commit.index}-${step.index}`}
-              step={step}
-              stepIndex={stepIndex}
-              isFirstReasoning={isFirstReasoning}
-            />
-          );
-        })}
+        {commit.steps.map((step, stepIndex) => (
+          <StepRow
+            key={`${commit.index}-${step.index}`}
+            step={step}
+            stepIndex={stepIndex}
+          />
+        ))}
       </div>
     </div>
   );

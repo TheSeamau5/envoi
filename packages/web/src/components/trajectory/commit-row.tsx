@@ -13,7 +13,6 @@ import { Star, TrendingDown } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
@@ -89,8 +88,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite }: CommitR
       </div>
 
       {/* Mini suite bars */}
-      <TooltipProvider>
-        <div className="flex flex-1 items-center gap-[6px]">
+      <div className="flex flex-1 items-center gap-[6px]">
           {suitesToShow.map((suite) => {
             const passed = commit.suiteState[suite.name] ?? 0;
             const ratio = passed / suite.total;
@@ -119,8 +117,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite }: CommitR
               </Tooltip>
             );
           })}
-        </div>
-      </TooltipProvider>
+      </div>
 
       {/* Feedback badges */}
       <div className="flex items-center gap-[6px]">
