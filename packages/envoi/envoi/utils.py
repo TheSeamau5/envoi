@@ -9,11 +9,10 @@ import time
 import tomllib
 from collections.abc import Iterable
 from contextvars import ContextVar
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .logging import log_event
 
@@ -73,12 +72,11 @@ class Documents:
         return f"Documents(paths={self.paths!r})"
 
 
-@dataclass
-class RunResult:
+class RunResult(BaseModel):
     stdout: str
     stderr: str
     exit_code: int
-    stdout_bytes: bytes = field(default=b"", repr=False)
+    stdout_bytes: bytes = Field(default=b"", repr=False)
 
 
 working_dir: ContextVar[str] = ContextVar("envoi_working_dir")

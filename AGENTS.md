@@ -138,6 +138,7 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 
 - Never use `# noqa` comments. Fix the underlying issue instead.
 - No leading-underscore function names. All functions are plain public names.
+- Do not use `@dataclass` for internal schemas/state containers. Use `pydantic.BaseModel` instead.
 
 ## Schema Policy
 

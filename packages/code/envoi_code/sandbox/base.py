@@ -10,21 +10,21 @@ Also defines CommandResult, SandboxConfig, and SandboxImageRequirements.
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class CommandResult:
+class CommandResult(BaseModel):
     """Result of running a command inside a sandbox."""
 
     exit_code: int
     stdout: str
     stderr: str
     duration_ms: int = 0
+
+    model_config = {"frozen": True}
 
     def unpack(self) -> tuple[int, str, str]:
         """Return (exit_code, stdout, stderr) for backward-compatible destructuring."""

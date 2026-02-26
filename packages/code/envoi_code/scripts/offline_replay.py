@@ -20,7 +20,6 @@ import socket
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +28,7 @@ from urllib.parse import urlparse
 import boto3
 import envoi
 import httpx
+from pydantic import BaseModel
 
 from envoi_code.utils.trace_parquet import parquet_to_trace_dict
 
@@ -50,10 +50,11 @@ HEAVY_TEST_ROOTS: dict[str, str] = {
 DEFAULT_TASK_FIXTURES_ROOT = Path("/opt/tests")
 
 
-@dataclass
-class RuntimeHandle:
+class RuntimeHandle(BaseModel):
     process: subprocess.Popen[str]
     url: str
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 def now_iso() -> str:

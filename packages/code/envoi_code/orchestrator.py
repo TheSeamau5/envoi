@@ -47,6 +47,7 @@ from envoi.logging import (
     set_log_callback,
     update_log_context,
 )
+from pydantic import BaseModel
 
 from envoi_code.agents.base import Agent, AgentFatalError, AgentSetupContext
 from envoi_code.agents.codex import CodexAgent
@@ -2133,47 +2134,139 @@ def build_turn_end_eval_event(
     )
 
 
-async def run_trajectory(
-    agent: str = DEFAULT_AGENT,
-    model: str | None = None,
-    max_parts: int | None = None,
-    max_turns: int | None = None,
-    test: list[str] | None = None,
-    test_timeout_seconds: int | None = None,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
-    timeout_seconds: int = 7200,
-    trajectory_id: str | None = None,
-    codex_auth_json_b64: str | None = None,
-    resume: bool = RESUME_FROM_S3,
-    sandbox_provider: str = "modal",
-    task_dir: str = "",
-    environment_dir: str = "",
-    raw_params: dict[str, Any] | None = None,
-    sandbox_cpu: float | None = None,
-    sandbox_memory_mb: int | None = None,
-) -> str:
-    global CURRENT_SUITE_FEEDBACK_PRIORITY
-    if trajectory_id is None:
-        trajectory_id = str(uuid.uuid4())
-    structured_logs: list[dict[str, Any]] = []
-    log_callback_token: Any = None
-    log_context_token: Any = None
-    logs_flush_task: asyncio.Task[None] | None = None
-    logs_flush_wakeup: asyncio.Event | None = None
-    logs_flush_stop: asyncio.Event | None = None
+RunStopReason = Literal[
+    "solved",
+    "part_limit",
+    "timeout",
+    "agent_error",
+    "envoi_error",
+]
+
+EnvironmentFiles = (
+    tuple[
+        dict[str, str],
+        dict[str, str],
+        dict[str, str],
+        dict[str, str],
+    ]
+    | None
+)
+
+
+class TurnEndEvaluationOutcome(BaseModel):
+    feedback: str
+    payload: dict[str, Any] | None
+    passed: int | None
+    total: int | None
+    has_error: bool
+    no_tests_detected: bool
+
+
+class TurnLoopResult(BaseModel):
+    session_id: str
+    prompt_text: str
+    turn_count: int
+    part_count: int
+    latest_git_commit: str | None
+    end_reason: RunStopReason
+    evaluator: EvaluationScheduler
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class TrajectoryExecutionResult(BaseModel):
+    sandbox: Sandbox
+    agent_trace: AgentTrace
+    agent_backend: Agent
+    evaluator: EvaluationScheduler
+    session_id: str
+    prompt_text: str
+    turn_count: int
+    part_count: int
+    latest_git_commit: str | None
+    end_reason: RunStopReason
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class TrajectoryPreparedContext(BaseModel):
+    max_parts: int | None
+    max_turns: int | None
+    selected_test_paths: list[str]
+    agent_name: str
+    task_path: Path
+    env_path: Path
+    environment: str
+    agent_cls: type
+    resolved_model: str
+    credentials: Any
+    prompt: str
+    task_params_loaded: dict[str, Any]
+    effective_resolved_env_params: ResolvedParams
+    normalized_advisor_model: str | None
+    normalized_advisor_thinking_level: str
+    advisor_max_output_tokens: int | None
+    failed_tests_feedback_limit: int
+    advisor_system_prompt_override: str | None
+    advisor_user_prompt_prefix_override: str | None
+    dockerfile_rel_path: str
+    docker_build_args: dict[str, str]
+    effective_sandbox_cpu: float | int | None
+    effective_sandbox_memory_mb: float | int | None
+    run_metadata: dict[str, Any]
+    env_files: EnvironmentFiles
+    existing_trace: AgentTrace | None
+    trace_s3_uri: str
+    bundle_s3_uri: str
+    logs_s3_uri: str
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class LogsRuntime(BaseModel):
+    records: list[dict[str, Any]]
+    flush: Callable[..., Awaitable[None]]
+    capture: Callable[[dict[str, Any]], None]
+    task: asyncio.Task[None]
+    wakeup: asyncio.Event
+    stop: asyncio.Event
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+def normalize_run_stop_reason(
+    stop_reason: str | None,
+) -> RunStopReason:
+    if stop_reason == "solved":
+        return "solved"
+    if stop_reason == "part_limit":
+        return "part_limit"
+    if stop_reason == "timeout":
+        return "timeout"
+    if stop_reason == "envoi_error":
+        return "envoi_error"
+    return "agent_error"
+
+
+def start_logs_runtime(
+    trajectory_id: str,
+) -> LogsRuntime:
+    records: list[dict[str, Any]] = []
     logs_flush_lock = asyncio.Lock()
     last_logs_flush_count = 0
     last_logs_flush_mono = time.monotonic()
+    wakeup = asyncio.Event()
+    stop = asyncio.Event()
 
-    async def flush_logs(
+    async def flush(
         *,
         force: bool = False,
     ) -> None:
         nonlocal last_logs_flush_count, last_logs_flush_mono
-        if not structured_logs:
+        if not records:
             return
         async with logs_flush_lock:
-            total_count = len(structured_logs)
+            total_count = len(records)
             if total_count == 0:
                 return
             new_records = total_count - last_logs_flush_count
@@ -2189,7 +2282,7 @@ async def run_trajectory(
                 )
             ):
                 return
-            snapshot = list(structured_logs)
+            snapshot = list(records)
             await asyncio.to_thread(
                 save_logs_parquet,
                 trajectory_id,
@@ -2198,26 +2291,84 @@ async def run_trajectory(
             last_logs_flush_count = len(snapshot)
             last_logs_flush_mono = time.monotonic()
 
-    def capture_structured_log(record: dict[str, Any]) -> None:
+    def capture(record: dict[str, Any]) -> None:
         if not isinstance(record, dict):
             return
         normalized = dict(record)
         normalized.setdefault("trajectory_id", trajectory_id)
         normalized.setdefault("source", "orchestrator")
-        structured_logs.append(normalized)
-        if logs_flush_wakeup is None:
-            return
+        records.append(normalized)
         level_value = normalized.get("level")
         level = (
             level_value.lower()
             if isinstance(level_value, str)
             else ""
         )
-        new_records = len(structured_logs) - last_logs_flush_count
+        new_records = len(records) - last_logs_flush_count
         if level in {"error", "warning"} or new_records >= LOGS_FLUSH_BATCH_SIZE:
-            logs_flush_wakeup.set()
-    max_parts = normalize_positive_limit(max_parts)
-    max_turns = normalize_positive_limit(max_turns)
+            wakeup.set()
+
+    async def periodic_loop() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    wakeup.wait(),
+                    timeout=LOGS_FLUSH_INTERVAL_SECONDS,
+                )
+            except TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                break
+            finally:
+                wakeup.clear()
+            try:
+                await flush(force=False)
+            except Exception as log_flush_error:
+                print(
+                    "[logs] periodic flush failed: "
+                    f"{log_flush_error}"
+                )
+        try:
+            await flush(force=True)
+        except Exception as log_flush_error:
+            print(
+                "[logs] final periodic flush failed: "
+                f"{log_flush_error}"
+            )
+
+    task = asyncio.create_task(periodic_loop())
+    return LogsRuntime(
+        records=records,
+        flush=flush,
+        capture=capture,
+        task=task,
+        wakeup=wakeup,
+        stop=stop,
+    )
+
+
+async def prepare_trajectory_context(
+    *,
+    trajectory_id: str,
+    agent: str,
+    model: str | None,
+    max_parts: int | None,
+    max_turns: int | None,
+    test: list[str] | None,
+    test_timeout_seconds: int | None,
+    codex_auth_json_b64: str | None,
+    resume: bool,
+    sandbox_provider: str,
+    task_dir: str,
+    environment_dir: str,
+    raw_params: dict[str, Any] | None,
+    sandbox_cpu: float | None,
+    sandbox_memory_mb: int | None,
+    timeout_seconds: int,
+) -> TrajectoryPreparedContext:
+    global CURRENT_SUITE_FEEDBACK_PRIORITY
+    normalized_max_parts = normalize_positive_limit(max_parts)
+    normalized_max_turns = normalize_positive_limit(max_turns)
     if timeout_seconds <= 0:
         raise ValueError("--timeout-seconds must be > 0")
     if test_timeout_seconds is not None and test_timeout_seconds <= 0:
@@ -2247,6 +2398,7 @@ async def run_trajectory(
     )
     prompt = resolved_task.prompt
     task_params_loaded = dict(resolved_task.task_params)
+
     environment_params_module = load_environment_params_module(env_path)
     environment_params = await load_environment_params_from_module(
         environment_params_module,
@@ -2269,6 +2421,7 @@ async def run_trajectory(
     )
     if resolved_env_params is not None and resolved_env_params.task_overrides:
         task_params_loaded.update(resolved_env_params.task_overrides)
+
     advisor_model_from_env = _string_or_none(
         environment_params.get("advisor_model"),
     )
@@ -2298,9 +2451,11 @@ async def run_trajectory(
     advisor_user_prompt_prefix_override = _string_or_none(
         environment_params.get("advisor_user_prompt_prefix"),
     )
+
     task_params_loaded["_eval_test_paths"] = selected_test_paths
     task_params_loaded["_eval_test_timeout_seconds"] = test_timeout_seconds
     task_params_loaded["_environment_params"] = environment_params
+
     effective_resolved_env_params = resolved_env_params or ResolvedParams()
     resolved_docker_plan = effective_resolved_env_params.docker
     dockerfile_rel_path = (
@@ -2313,6 +2468,7 @@ async def run_trajectory(
         if resolved_docker_plan is not None
         else {}
     )
+
     if sandbox_provider == "e2b":
         if docker_build_args:
             ignored_arg_keys = ", ".join(sorted(docker_build_args.keys()))
@@ -2358,6 +2514,7 @@ async def run_trajectory(
             )
         effective_sandbox_cpu = None
         effective_sandbox_memory_mb = None
+
     run_metadata: dict[str, Any] = {
         "raw_params": raw_params_map,
         "resolved_task": {
@@ -2385,56 +2542,1426 @@ async def run_trajectory(
             "starting new trace object"
         )
         existing_trace = None
-    trace_s3_uri = artifact_uri(trajectory_id, "trace.parquet")
-    bundle_s3_uri = artifact_uri(trajectory_id, "repo.bundle")
-    logs_s3_uri = artifact_uri(trajectory_id, "logs.parquet")
-    log_callback_token = set_log_callback(capture_structured_log)
+
+    return TrajectoryPreparedContext(
+        max_parts=normalized_max_parts,
+        max_turns=normalized_max_turns,
+        selected_test_paths=selected_test_paths,
+        agent_name=agent_name,
+        task_path=task_path,
+        env_path=env_path,
+        environment=environment,
+        agent_cls=agent_cls,
+        resolved_model=resolved_model,
+        credentials=credentials,
+        prompt=prompt,
+        task_params_loaded=task_params_loaded,
+        effective_resolved_env_params=effective_resolved_env_params,
+        normalized_advisor_model=normalized_advisor_model,
+        normalized_advisor_thinking_level=normalized_advisor_thinking_level,
+        advisor_max_output_tokens=advisor_max_output_tokens,
+        failed_tests_feedback_limit=failed_tests_feedback_limit,
+        advisor_system_prompt_override=advisor_system_prompt_override,
+        advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
+        dockerfile_rel_path=dockerfile_rel_path,
+        docker_build_args=docker_build_args,
+        effective_sandbox_cpu=effective_sandbox_cpu,
+        effective_sandbox_memory_mb=effective_sandbox_memory_mb,
+        run_metadata=run_metadata,
+        env_files=env_files,
+        existing_trace=existing_trace,
+        trace_s3_uri=artifact_uri(trajectory_id, "trace.parquet"),
+        bundle_s3_uri=artifact_uri(trajectory_id, "repo.bundle"),
+        logs_s3_uri=artifact_uri(trajectory_id, "logs.parquet"),
+    )
+
+
+async def discover_required_test_paths(
+    sandbox: Sandbox,
+    *,
+    selected_test_paths: list[str],
+) -> list[str]:
+    required_test_paths: list[str] = []
+    schema_available = False
+    schema_result = await sandbox.run(
+        "curl -sf http://localhost:8000/schema",
+        quiet=True,
+        timeout=30,
+    )
+    if schema_result.exit_code == 0 and schema_result.stdout.strip():
+        try:
+            schema = json.loads(schema_result.stdout)
+            required_test_paths = extract_leaf_paths(schema)
+            schema_available = True
+            print(
+                f"[schema] discovered {len(required_test_paths)} test paths"
+            )
+        except (json.JSONDecodeError, KeyError) as parse_error:
+            print(f"[schema] parse error: {parse_error}")
+    else:
+        print(
+            "[schema] /schema not available; "
+            "cannot verify test inventory"
+        )
+
+    if not schema_available:
+        raise RuntimeError(
+            "Environment schema is unavailable. "
+            "Aborting because test inventory cannot be verified."
+        )
+    if not required_test_paths:
+        raise RuntimeError(
+            "Environment schema reported zero tests. "
+            "Aborting run."
+        )
+
+    if selected_test_paths and required_test_paths:
+        discovered = set(required_test_paths)
+        invalid_paths: list[str] = []
+        for path in selected_test_paths:
+            if path in discovered:
+                continue
+            has_child = any(
+                candidate.startswith(path + "/")
+                for candidate in required_test_paths
+            )
+            if not has_child:
+                invalid_paths.append(path)
+        if invalid_paths:
+            available_preview = ", ".join(required_test_paths[:20])
+            raise ValueError(
+                "Unknown --test path(s): "
+                + ", ".join(invalid_paths)
+                + ". Available paths include: "
+                + available_preview
+            )
+
+    return required_test_paths
+
+
+def resolve_turn_start_stop_reason(
+    *,
+    part_count: int,
+    turn_count: int,
+    max_parts: int | None,
+    max_turns: int | None,
+    elapsed_seconds: float,
+    timeout_seconds: int,
+) -> RunStopReason | None:
+    if (
+        isinstance(max_parts, int)
+        and max_parts > 0
+        and part_count >= max_parts
+    ):
+        return "part_limit"
+    if max_turns is not None and turn_count >= max_turns:
+        print(
+            "[progress] reached turn limit "
+            f"({turn_count}/{max_turns})"
+        )
+        return "part_limit"
+    if elapsed_seconds > timeout_seconds:
+        return "timeout"
+    return None
+
+
+async def run_turn_end_evaluation_cycle(
+    *,
+    sandbox: Sandbox,
+    selected_test_paths: list[str],
+    test_timeout_seconds: int | None,
+    failed_tests_feedback_limit: int,
+    normalized_advisor_model: str | None,
+    normalized_advisor_thinking_level: str,
+    advisor_max_output_tokens: int | None,
+    prompt: str,
+    git_commit: str | None,
+    turn_count: int,
+    previous_turn_end_tests: list[EvalTestResult] | None,
+    advisor_system_prompt_override: str | None,
+    advisor_user_prompt_prefix_override: str | None,
+) -> TurnEndEvaluationOutcome:
+    turn_end_eval_payload: dict[str, Any] | None = None
+    turn_end_eval_payload_body: dict[str, Any] | None = None
+    turn_end_feedback = ""
+    turn_end_passed: int | None = None
+    turn_end_total: int | None = None
+    turn_end_has_error = True
+    turn_end_no_tests_detected = False
+    advisor_assessment: str | None = None
+    try:
+        turn_end_eval_payload = await run_workspace_evaluation(
+            sandbox=sandbox,
+            test_paths=selected_test_paths,
+            timeout_seconds=test_timeout_seconds,
+        )
+        payload = turn_end_eval_payload.get("payload")
+        if isinstance(payload, dict):
+            turn_end_eval_payload_body = payload
+            turn_end_passed = int(payload.get("passed", 0) or 0)
+            turn_end_total = int(payload.get("total", 0) or 0)
+            turn_end_error = payload.get("error")
+            turn_end_has_error = bool(
+                isinstance(turn_end_error, str)
+                and turn_end_error.strip()
+            )
+            turn_end_no_tests_detected = (
+                turn_end_total == 0
+                and turn_end_passed == 0
+            )
+            if turn_end_no_tests_detected:
+                if not turn_end_has_error:
+                    turn_end_has_error = True
+                    payload["error"] = (
+                        "Turn-end evaluation returned zero tests; "
+                        "aborting run."
+                    )
+                print(
+                    "[eval] turn_end status=no_tests "
+                    f"status_error={turn_end_has_error}"
+                )
+            else:
+                print(
+                    "[eval] turn_end "
+                    f"passed={turn_end_passed}/{turn_end_total} "
+                    f"status_error={turn_end_has_error}"
+                )
+        else:
+            turn_end_has_error = True
+            print("[eval] turn_end payload missing")
+
+        if (
+            normalized_advisor_model is not None
+            and isinstance(turn_end_eval_payload_body, dict)
+            and not turn_end_no_tests_detected
+            and not (
+                isinstance(turn_end_passed, int)
+                and isinstance(turn_end_total, int)
+                and turn_end_total > 0
+                and turn_end_passed == turn_end_total
+                and not turn_end_has_error
+            )
+        ):
+            advisor_started_at = time.monotonic()
+            print(
+                "[advisor] run_start "
+                f"model={normalized_advisor_model} "
+                f"thinking={normalized_advisor_thinking_level} "
+                f"commit={(git_commit or 'unknown')[:12]} "
+                f"turn={turn_count} "
+                f"failed_tests_limit={failed_tests_feedback_limit}"
+            )
+            try:
+                advisor_assessment = await build_advisor_assessment(
+                    sandbox=sandbox,
+                    task_prompt=prompt,
+                    commit=git_commit,
+                    payload=turn_end_eval_payload_body,
+                    advisor_model=normalized_advisor_model,
+                    advisor_model_thinking_level=(
+                        normalized_advisor_thinking_level
+                    ),
+                    advisor_max_output_tokens=advisor_max_output_tokens,
+                    failed_tests_limit=failed_tests_feedback_limit,
+                    advisor_system_prompt=advisor_system_prompt_override,
+                    advisor_user_prompt_prefix=advisor_user_prompt_prefix_override,
+                )
+                print(
+                    "[advisor] run_success "
+                    f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
+                    f"assessment_chars={len(advisor_assessment)}"
+                )
+            except Exception as advisor_error:
+                error_message = str(advisor_error).strip() or repr(advisor_error)
+                advisor_assessment = (
+                    "External assessment unavailable: "
+                    + error_message
+                )
+                print(
+                    "[advisor] failed: "
+                    f"type={type(advisor_error).__name__} "
+                    f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
+                    f"error={error_message}"
+                )
+                print(
+                    "[advisor] failed_traceback:\n"
+                    + traceback.format_exc().strip()
+                )
+        elif normalized_advisor_model is not None:
+            if not isinstance(turn_end_eval_payload_body, dict):
+                print("[advisor] skipped reason=turn_end_payload_missing")
+            elif turn_end_no_tests_detected:
+                print("[advisor] skipped reason=no_tests")
+            else:
+                print(
+                    "[advisor] skipped reason=all_tests_passing "
+                    f"passed={turn_end_passed} total={turn_end_total} "
+                    f"status_error={turn_end_has_error}"
+                )
+
+        turn_end_feedback = format_turn_end_evaluation_feedback(
+            turn_end_eval_payload,
+            failed_tests_limit=failed_tests_feedback_limit,
+            advisor_assessment=advisor_assessment,
+            previous_turn_end_tests=previous_turn_end_tests,
+        )
+    except Exception as turn_end_eval_error:
+        turn_end_feedback = (
+            "Turn-end full evaluation failed:\n"
+            + str(turn_end_eval_error)
+        )
+        turn_end_has_error = True
+        print(
+            "[eval] turn_end failed: "
+            f"{turn_end_eval_error}"
+        )
+
+    return TurnEndEvaluationOutcome(
+        feedback=turn_end_feedback,
+        payload=turn_end_eval_payload,
+        passed=turn_end_passed,
+        total=turn_end_total,
+        has_error=turn_end_has_error,
+        no_tests_detected=turn_end_no_tests_detected,
+    )
+
+
+def append_turn_end_event(
+    *,
+    agent_trace: AgentTrace,
+    turn_record: TurnRecord,
+    turn_count: int,
+    part_count: int,
+    git_commit: str | None,
+    eval_payload: dict[str, Any] | None,
+    eval_feedback: str,
+    previous_turn_end_tests: list[EvalTestResult] | None,
+) -> tuple[EvalEvent | None, list[EvalTestResult] | None]:
+    turn_eval_part = (
+        turn_record.part_end
+        if (
+            isinstance(turn_record.part_end, int)
+            and turn_record.part_end > 0
+        )
+        else part_count
+    )
+    if turn_eval_part <= 0:
+        return None, previous_turn_end_tests
+
+    turn_end_event = build_turn_end_eval_event(
+        turn=turn_count,
+        part=turn_eval_part,
+        commit=git_commit,
+        run_payload=eval_payload,
+        error=(
+            eval_feedback
+            if eval_payload is None
+            else None
+        ),
+    )
+    append_eval_event_delta(agent_trace, turn_end_event)
+    updated_previous_tests = previous_turn_end_tests
+    if turn_end_event.status == "completed" and turn_end_event.tests:
+        updated_previous_tests = list(turn_end_event.tests)
+    return turn_end_event, updated_previous_tests
+
+
+def print_turn_end_summary(
+    *,
+    turn_count: int,
+    part_count: int,
+    max_parts: int | None,
+    max_turns: int | None,
+    elapsed_after_turn: float,
+    git_commit: str | None,
+    new_parts: int,
+    turn_end_passed: int | None,
+    turn_end_total: int | None,
+    turn_end_has_error: bool,
+    new_envoi_calls_count: int,
+    observed_parts: int,
+    streamed_parts: int,
+) -> None:
+    eval_label = format_turn_eval_label(
+        passed=turn_end_passed,
+        total=turn_end_total,
+        has_error=turn_end_has_error,
+    )
+    part_counter_label = format_progress_counter(
+        name="part",
+        current=part_count,
+        limit=max_parts,
+    )
+    turn_counter_label = format_progress_counter(
+        name="turn",
+        current=turn_count,
+        limit=max_turns,
+    )
+    commit_label = (
+        git_commit[:10]
+        if isinstance(git_commit, str) and git_commit
+        else "none"
+    )
+    print(
+        f"[turn] end "
+        f"{turn_counter_label} "
+        f"{part_counter_label} "
+        f"elapsed={format_compact_duration(elapsed_after_turn)} "
+        f"commit={commit_label} "
+        f"parts_delta=+{new_parts} "
+        f"eval={eval_label} "
+        f"calls={new_envoi_calls_count} "
+        f"observed_parts={observed_parts} "
+        f"streamed_parts={streamed_parts}"
+    )
+
+
+async def run_turn_loop(
+    *,
+    sandbox: Sandbox,
+    agent_backend: Agent,
+    agent_trace: AgentTrace,
+    trajectory_id: str,
+    session_id: str,
+    agent_name: str,
+    resolved_model: str,
+    environment: str,
+    task_params_loaded: dict[str, Any],
+    prompt: str,
+    required_test_paths: list[str],
+    selected_test_paths: list[str],
+    test_timeout_seconds: int | None,
+    max_parts: int | None,
+    max_turns: int | None,
+    timeout_seconds: int,
+    message_timeout_seconds: int,
+    start_time: float,
+    initial_turn_count: int,
+    initial_part_count: int,
+    initial_git_commit: str | None,
+    failed_tests_feedback_limit: int,
+    normalized_advisor_model: str | None,
+    normalized_advisor_thinking_level: str,
+    advisor_max_output_tokens: int | None,
+    advisor_system_prompt_override: str | None,
+    advisor_user_prompt_prefix_override: str | None,
+    flush_logs: Callable[..., Awaitable[None]],
+) -> TurnLoopResult:
+    turn_count = initial_turn_count
+    part_count = initial_part_count
+    latest_git_commit = initial_git_commit
+    end_reason: RunStopReason = "agent_error"
+
+    tracker = SolveTracker(required_test_paths)
+    for part_record in agent_trace.parts:
+        tracker.update(list(part_record.envoi_calls))
+    previous_turn_end_tests = find_latest_completed_turn_end_tests(
+        agent_trace,
+    )
+
+    winner_stop_part_ref: list[int | None] = [None]
+
+    def winner_latched() -> bool:
+        return isinstance(winner_stop_part_ref[0], int)
+
+    def latch_winner(
+        commit: str,
+        evaluation: EvaluationRecord,
+        *,
+        source: str,
+    ) -> bool:
+        winner_part = winner_part_number(evaluation)
+        if winner_part is None:
+            return False
+        current = winner_stop_part_ref[0]
+        if isinstance(current, int) and current <= winner_part:
+            return False
+        winner_stop_part_ref[0] = winner_part
+        print(
+            "[eval] latched first winner "
+            f"source={source} commit={commit[:10]} "
+            f"part={winner_part} "
+            f"score={evaluation.passed}/{evaluation.total}"
+        )
+        return True
+
+    async def on_async_winner(
+        commit: str,
+        evaluation: EvaluationRecord,
+    ) -> None:
+        did_latch = latch_winner(
+            commit,
+            evaluation,
+            source="commit_async",
+        )
+        if not did_latch:
+            return
+        try:
+            await sandbox.run(
+                "pkill -f '/sandbox/codex_client.py chat-stream' "
+                "> /dev/null 2>&1 || true\n"
+                "pkill -f '/sandbox/opencode_agent.py chat-stream' "
+                "> /dev/null 2>&1 || true",
+                quiet=True,
+                timeout=10,
+            )
+        except Exception as kill_error:
+            print(
+                "[eval] winner interrupt failed: "
+                f"{kill_error}"
+            )
+
+    evaluator = EvaluationScheduler(
+        sandbox=sandbox,
+        agent_trace=agent_trace,
+        trajectory_id=trajectory_id,
+        environment=environment,
+        task_params=task_params_loaded,
+        test_paths=selected_test_paths,
+        test_timeout_seconds=test_timeout_seconds,
+        should_stop=winner_latched,
+        on_winner=on_async_winner,
+    )
+
+    existing_winner = first_winning_commit(agent_trace.evaluations)
+    if existing_winner is not None:
+        existing_winner_commit, existing_winner_eval = existing_winner
+        latch_winner(
+            existing_winner_commit,
+            existing_winner_eval,
+            source="resume",
+        )
+
+    async def stop_for_winner(
+        *,
+        detection_point: str,
+    ) -> bool:
+        nonlocal part_count, turn_count, end_reason, latest_git_commit
+        winner = first_winning_commit(agent_trace.evaluations)
+        if winner is None:
+            return False
+        winner_commit, winner_eval = winner
+        latest_git_commit = winner_commit
+        latch_winner(
+            winner_commit,
+            winner_eval,
+            source=detection_point,
+        )
+        winner_part = apply_winning_projection(
+            agent_trace,
+            winner_commit=winner_commit,
+            winner_eval=winner_eval,
+        )
+        if isinstance(winner_part, int):
+            part_count = winner_part
+            turn_count = get_trace_last_turn(agent_trace)
+        save_trace_parquet(
+            trajectory_id,
+            agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
+        await checkout_workspace_commit(
+            sandbox,
+            winner_commit,
+        )
+        print(
+            f"[eval] winner detected {detection_point} "
+            f"commit={winner_commit[:10]} "
+            f"part={winner_eval.part} "
+            f"score={winner_eval.passed}/{winner_eval.total}"
+        )
+        end_reason = "solved"
+        return True
+
+    prompt_text = (
+        prompt if part_count == 0
+        else build_followup_prompt(tracker)
+    )
+    next_turn_feedback_eval_id: str | None = None
+    consecutive_turn_failures = 0
+    previous_best_passed = 0
+    consecutive_no_progress_turns = 0
+
+    while True:
+        update_log_context(turn=turn_count + 1, part=part_count)
+        if await stop_for_winner(
+            detection_point="before turn start",
+        ):
+            break
+
+        elapsed = time.monotonic() - start_time
+        turn_start_stop_reason = resolve_turn_start_stop_reason(
+            part_count=part_count,
+            turn_count=turn_count,
+            max_parts=max_parts,
+            max_turns=max_turns,
+            elapsed_seconds=elapsed,
+            timeout_seconds=timeout_seconds,
+        )
+        if turn_start_stop_reason is not None:
+            end_reason = turn_start_stop_reason
+            break
+
+        remaining_run_seconds = timeout_seconds - elapsed
+        remaining_parts_budget = (
+            max(1, max_parts - part_count)
+            if isinstance(max_parts, int)
+            and max_parts > 0
+            else 0
+        )
+        remaining_parts_for_timeout = (
+            remaining_parts_budget
+            if remaining_parts_budget > 0
+            else max(1, int(remaining_run_seconds // 60))
+        )
+        turn_timeout_seconds = agent_backend.compute_turn_timeout(
+            remaining_parts=remaining_parts_for_timeout,
+            remaining_run_seconds=remaining_run_seconds,
+            message_timeout_seconds=message_timeout_seconds,
+        )
+
+        part_counter_label = format_progress_counter(
+            name="part",
+            current=part_count,
+            limit=max_parts,
+        )
+        elapsed_label = format_compact_duration(elapsed)
+        remaining_label = format_compact_duration(
+            max(0, remaining_run_seconds)
+        )
+        builtins.print(
+            "\n"
+            f"[turn] start "
+            f"turn={turn_count + 1} "
+            f"{part_counter_label} "
+            f"elapsed={elapsed_label} "
+            f"remaining={remaining_label} "
+            f"timeout={turn_timeout_seconds}s",
+            flush=True,
+        )
+
+        turn_started_at = datetime.now(UTC).isoformat()
+        previous_part_count = part_count
+        streamed_parts = 0
+        observed_parts = 0
+        git_commit = await get_git_commit(sandbox)
+        if isinstance(git_commit, str) and git_commit:
+            latest_git_commit = git_commit
+
+        turn_count += 1
+        turn_record = TurnRecord(
+            trajectory_id=trajectory_id,
+            session_id=session_id,
+            agent=agent_name,
+            turn=turn_count,
+            part_start=None,
+            part_end=None,
+            timestamp=turn_started_at,
+            agent_model=resolved_model,
+            prompt=prompt_text,
+            git_commit=git_commit,
+            repo_checkpoint=None,
+            feedback_eval_id=next_turn_feedback_eval_id,
+            parts=[],
+        )
+        agent_trace.turns.append(turn_record)
+
+        stream_part_counter: list[int] = [part_count]
+        stream_git_commit_ref: list[str | None] = [git_commit]
+        stream_last_part_ts_ref: list[int | None] = [None]
+        stream_part_cb = make_stream_part_callback(
+            sandbox=sandbox,
+            trajectory_id=trajectory_id,
+            agent_trace=agent_trace,
+            tracker=tracker,
+            environment=environment,
+            task_params=task_params_loaded,
+            agent_name=agent_name,
+            resolved_model=resolved_model,
+            effective_max_parts=max_parts,
+            part_counter=stream_part_counter,
+            git_commit_ref=stream_git_commit_ref,
+            last_part_timestamp_ms_ref=stream_last_part_ts_ref,
+            turn_record=turn_record,
+            session_id=session_id,
+            run_started_mono=start_time,
+            stop_at_part_ref=winner_stop_part_ref,
+            schedule_commit_evaluation=evaluator.schedule,
+        )
+
+        try:
+            turn_outcome = await agent_backend.run_turn(
+                prompt_text=prompt_text,
+                timeout=turn_timeout_seconds,
+                current_turn=turn_count,
+                remaining_parts_budget=remaining_parts_budget,
+                global_part_count=part_count,
+                global_max_parts=max_parts or 0,
+                global_max_turns=max_turns or 0,
+                global_elapsed_seconds=int(max(0, elapsed)),
+                on_stream_part=stream_part_cb,
+            )
+        except AgentFatalError as fatal_error:
+            stop_reason = normalize_run_stop_reason(
+                fatal_error.stop_reason,
+            )
+            print(
+                "[run] fatal agent stop: "
+                f"{fatal_error} reason={stop_reason}"
+            )
+            end_reason = stop_reason
+            break
+
+        part_count = stream_part_counter[0]
+        git_commit = stream_git_commit_ref[0]
+        if isinstance(git_commit, str) and git_commit:
+            latest_git_commit = git_commit
+        update_log_context(part=part_count, git_commit=git_commit)
+
+        if turn_outcome is None:
+            if await stop_for_winner(
+                detection_point="after interrupted turn",
+            ):
+                break
+            if not turn_record.parts:
+                agent_trace.turns.pop()
+            consecutive_turn_failures += 1
+            print(
+                "[progress] no response from agent "
+                f"(recovery {consecutive_turn_failures}"
+                f"/{TURN_RECOVERY_RETRIES})"
+            )
+            await dump_sandbox_logs(
+                sandbox,
+                agent=agent_backend,
+            )
+            if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
+                recovered_session_id = await agent_backend.recover_session(
+                    trajectory_id,
+                    consecutive_turn_failures,
+                )
+                if recovered_session_id:
+                    session_id = recovered_session_id
+                    agent_trace.session_id = recovered_session_id
+                    save_trace_parquet(
+                        trajectory_id,
+                        agent_trace,
+                        environment=environment,
+                        task_params=task_params_loaded,
+                    )
+                    prompt_text = build_followup_prompt(
+                        tracker,
+                        elapsed_seconds=time.monotonic() - start_time,
+                        timeout_seconds=timeout_seconds,
+                        consecutive_no_progress_turns=(
+                            consecutive_no_progress_turns
+                        ),
+                    )
+                    continue
+            end_reason = "agent_error"
+            break
+
+        consecutive_turn_failures = 0
+        agent_backend.on_turn_complete(turn_outcome)
+
+        response = turn_outcome.response
+        session_id = turn_outcome.session_id
+        if agent_trace.session_id != session_id:
+            agent_trace.session_id = session_id
+        update_log_context(session_id=session_id)
+
+        info = response.get("info", {})
+        parts = response.get("parts", [])
+        response_message_id = info.get("id")
+        print(
+            f"[progress] response "
+            f"id={response_message_id} "
+            f"parts={len(parts)}"
+        )
+
+        session_ids = turn_outcome.session_ids
+        session_objects = turn_outcome.session_objects
+        new_messages = turn_outcome.new_messages
+        print(f"[progress] new_messages={len(new_messages)}")
+        turn_record.session_ids = session_ids
+        turn_record.session_objects = session_objects
+        turn_record.new_messages = new_messages
+        turn_record.token_usage = extract_turn_token_usage(
+            response,
+            new_messages,
+        )
+
+        new_envoi_calls: list[EnvoiCall] = []
+        for msg in new_messages:
+            msg_parts = msg.get("parts", [])
+            if isinstance(msg_parts, list):
+                new_envoi_calls.extend(
+                    extract_envoi_calls(msg_parts),
+                )
+
+        tracker.update(new_envoi_calls)
+
+        stream_meta = (
+            response.get("_stream", {})
+            if isinstance(response, dict)
+            else {}
+        )
+        stream_meta_obj = (
+            stream_meta
+            if isinstance(stream_meta, dict)
+            else {}
+        )
+        streamed_parts = int(
+            stream_meta_obj.get(
+                "meaningful_parts_seen",
+                0,
+            )
+            or 0
+        )
+        observed_parts = count_meaningful_parts(new_messages)
+
+        new_parts = part_count - previous_part_count
+        for record in turn_record.parts:
+            record.session_id = session_id
+        if turn_record.parts:
+            last_part_record = turn_record.parts[-1]
+            existing_keys = {
+                tracker.call_key(call)
+                for call in last_part_record.envoi_calls
+            }
+            for call in new_envoi_calls:
+                key = tracker.call_key(call)
+                if key not in existing_keys:
+                    last_part_record.envoi_calls.append(call)
+                    existing_keys.add(key)
+            last_part_record.testing_state = tracker.snapshot()
+            if turn_record.git_commit is None:
+                turn_record.git_commit = last_part_record.git_commit
+        else:
+            turn_record.git_commit = git_commit
+        turn_record.session_id = session_id
+
+        save_trace_parquet(
+            trajectory_id,
+            agent_trace,
+            environment=environment,
+            task_params=task_params_loaded,
+        )
+        if await stop_for_winner(
+            detection_point="after turn",
+        ):
+            break
+
+        turn_end_result = await run_turn_end_evaluation_cycle(
+            sandbox=sandbox,
+            selected_test_paths=selected_test_paths,
+            test_timeout_seconds=test_timeout_seconds,
+            failed_tests_feedback_limit=failed_tests_feedback_limit,
+            normalized_advisor_model=normalized_advisor_model,
+            normalized_advisor_thinking_level=normalized_advisor_thinking_level,
+            advisor_max_output_tokens=advisor_max_output_tokens,
+            prompt=prompt,
+            git_commit=git_commit,
+            turn_count=turn_count,
+            previous_turn_end_tests=previous_turn_end_tests,
+            advisor_system_prompt_override=advisor_system_prompt_override,
+            advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
+        )
+
+        if (
+            isinstance(turn_end_result.passed, int)
+            and turn_end_result.passed > previous_best_passed
+        ):
+            previous_best_passed = turn_end_result.passed
+            consecutive_no_progress_turns = 0
+        else:
+            consecutive_no_progress_turns += 1
+
+        turn_end_event, previous_turn_end_tests = append_turn_end_event(
+            agent_trace=agent_trace,
+            turn_record=turn_record,
+            turn_count=turn_count,
+            part_count=part_count,
+            git_commit=git_commit,
+            eval_payload=turn_end_result.payload,
+            eval_feedback=turn_end_result.feedback,
+            previous_turn_end_tests=previous_turn_end_tests,
+        )
+        if turn_end_event is not None:
+            save_trace_parquet(
+                trajectory_id,
+                agent_trace,
+                environment=environment,
+                task_params=task_params_loaded,
+            )
+
+        print_turn_end_summary(
+            turn_count=turn_count,
+            part_count=part_count,
+            max_parts=max_parts,
+            max_turns=max_turns,
+            elapsed_after_turn=time.monotonic() - start_time,
+            git_commit=git_commit,
+            new_parts=new_parts,
+            turn_end_passed=turn_end_result.passed,
+            turn_end_total=turn_end_result.total,
+            turn_end_has_error=turn_end_result.has_error,
+            new_envoi_calls_count=len(new_envoi_calls),
+            observed_parts=observed_parts,
+            streamed_parts=streamed_parts,
+        )
+        await flush_logs(force=True)
+
+        if turn_end_result.no_tests_detected:
+            print(
+                "[run] stopping: evaluation returned zero tests"
+            )
+            end_reason = "envoi_error"
+            break
+        if (
+            isinstance(turn_end_result.passed, int)
+            and isinstance(turn_end_result.total, int)
+            and turn_end_result.total > 0
+            and turn_end_result.passed == turn_end_result.total
+            and not turn_end_result.has_error
+        ):
+            end_reason = "solved"
+            break
+        if (
+            isinstance(max_parts, int)
+            and max_parts > 0
+            and part_count >= max_parts
+        ):
+            end_reason = "part_limit"
+            break
+
+        next_turn_feedback_eval_id = (
+            turn_end_event.eval_id
+            if turn_end_event is not None
+            else None
+        )
+        prompt_text = build_followup_prompt(
+            tracker,
+            evaluation_feedback=turn_end_result.feedback,
+            elapsed_seconds=time.monotonic() - start_time,
+            timeout_seconds=timeout_seconds,
+            consecutive_no_progress_turns=consecutive_no_progress_turns,
+        )
+
+    if end_reason == "agent_error":
+        end_reason = "part_limit"
+
+    return TurnLoopResult(
+        session_id=session_id,
+        prompt_text=prompt_text,
+        turn_count=turn_count,
+        part_count=part_count,
+        latest_git_commit=latest_git_commit,
+        end_reason=end_reason,
+        evaluator=evaluator,
+    )
+
+
+async def execute_trajectory_main(
+    *,
+    trajectory_id: str,
+    sandbox_provider: str,
+    timeout_seconds: int,
+    agent_cls: type,
+    env_path: Path,
+    dockerfile_rel_path: str,
+    docker_build_args: dict[str, str],
+    effective_sandbox_cpu: float | int | None,
+    effective_sandbox_memory_mb: int | float | None,
+    task_path: Path,
+    resolved_model: str,
+    credentials: Any,
+    env_files: EnvironmentFiles,
+    runtime_env: dict[str, str],
+    existing_trace: AgentTrace | None,
+    run_metadata: dict[str, Any],
+    environment: str,
+    task_params_loaded: dict[str, Any],
+    agent_name: str,
+    prompt: str,
+    selected_test_paths: list[str],
+    test_timeout_seconds: int | None,
+    max_parts: int | None,
+    max_turns: int | None,
+    message_timeout_seconds: int,
+    failed_tests_feedback_limit: int,
+    normalized_advisor_model: str | None,
+    normalized_advisor_thinking_level: str,
+    advisor_max_output_tokens: int | None,
+    advisor_system_prompt_override: str | None,
+    advisor_user_prompt_prefix_override: str | None,
+    flush_logs: Callable[..., Awaitable[None]],
+) -> TrajectoryExecutionResult:
+    sandbox_timeout_seconds = timeout_seconds + SHUTDOWN_GRACE_SECONDS
+    config = SandboxConfig(
+        timeout=sandbox_timeout_seconds,
+        image_requirements=agent_cls.image_requirements(),
+        environment_dockerfile=str(env_path / dockerfile_rel_path),
+        environment_docker_context_dir=str(env_path),
+        environment_docker_build_args=docker_build_args,
+        cpu=(
+            float(effective_sandbox_cpu)
+            if effective_sandbox_cpu is not None
+            else None
+        ),
+        memory_mb=(
+            int(effective_sandbox_memory_mb)
+            if effective_sandbox_memory_mb is not None
+            else None
+        ),
+    )
+    sandbox = await create_sandbox(sandbox_provider, config)
+    start_time = time.monotonic()
+
+    agent_backend = agent_cls()
+    mcp_server_content, mcp_source = load_optional_mcp_server(
+        task_path,
+        env_path,
+    )
+    mcp_enabled = bool(mcp_server_content.strip())
+    if mcp_enabled:
+        print(f"[mcp] enabled from {mcp_source}")
+    else:
+        print("[mcp] disabled (no mcp_server.py in task/env)")
+    setup_context = AgentSetupContext(
+        model=resolved_model,
+        credentials=credentials,
+        env_files=env_files,
+        mcp_server_content=mcp_server_content,
+        mcp_enabled=mcp_enabled,
+        workspace_gitignore=WORKSPACE_GITIGNORE,
+        runtime_env=runtime_env,
+    )
+    await agent_backend.setup(sandbox, setup_context)
+
+    latest_git_commit: str | None = None
+    resume_commit = (
+        get_trace_latest_commit(existing_trace)
+        if existing_trace
+        else None
+    )
+    if (
+        existing_trace is not None
+        and isinstance(resume_commit, str)
+        and resume_commit
+    ):
+        await restore_workspace_from_bundle(
+            sandbox=sandbox,
+            trajectory_id=trajectory_id,
+            commit=resume_commit,
+        )
+        latest_git_commit = resume_commit
+
+    session_id = await agent_backend.create_session(trajectory_id)
+    if not session_id:
+        raise RuntimeError(
+            f"Failed to create session for agent={agent_name}",
+        )
+    update_log_context(session_id=session_id)
+
+    if existing_trace is not None:
+        agent_trace = existing_trace
+        agent_trace.session_id = session_id
+        agent_trace.agent = agent_name
+        agent_trace.agent_model = resolved_model
+        agent_trace.run_metadata = run_metadata
+        agent_trace.session_end = None
+        initial_part_count = get_trace_last_part(agent_trace)
+        initial_turn_count = get_trace_last_turn(agent_trace)
+        trace_latest_commit = get_trace_latest_commit(agent_trace)
+        if isinstance(trace_latest_commit, str) and trace_latest_commit:
+            latest_git_commit = trace_latest_commit
+        print(
+            f"[resume] continuing from part={initial_part_count} "
+            f"turn={initial_turn_count}"
+        )
+    else:
+        initial_part_count = 0
+        initial_turn_count = 0
+        agent_trace = AgentTrace(
+            trajectory_id=trajectory_id,
+            session_id=session_id,
+            agent=agent_name,
+            agent_model=resolved_model,
+            started_at=datetime.now(UTC).isoformat(),
+            run_metadata=run_metadata,
+        )
+
+    save_trace_parquet(
+        trajectory_id,
+        agent_trace,
+        environment=environment,
+        task_params=task_params_loaded,
+    )
+
+    required_test_paths = await discover_required_test_paths(
+        sandbox,
+        selected_test_paths=selected_test_paths,
+    )
+    loop_result = await run_turn_loop(
+        sandbox=sandbox,
+        agent_backend=agent_backend,
+        agent_trace=agent_trace,
+        trajectory_id=trajectory_id,
+        session_id=session_id,
+        agent_name=agent_name,
+        resolved_model=resolved_model,
+        environment=environment,
+        task_params_loaded=task_params_loaded,
+        prompt=prompt,
+        required_test_paths=required_test_paths,
+        selected_test_paths=selected_test_paths,
+        test_timeout_seconds=test_timeout_seconds,
+        max_parts=max_parts,
+        max_turns=max_turns,
+        timeout_seconds=timeout_seconds,
+        message_timeout_seconds=message_timeout_seconds,
+        start_time=start_time,
+        initial_turn_count=initial_turn_count,
+        initial_part_count=initial_part_count,
+        initial_git_commit=latest_git_commit,
+        failed_tests_feedback_limit=failed_tests_feedback_limit,
+        normalized_advisor_model=normalized_advisor_model,
+        normalized_advisor_thinking_level=normalized_advisor_thinking_level,
+        advisor_max_output_tokens=advisor_max_output_tokens,
+        advisor_system_prompt_override=advisor_system_prompt_override,
+        advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
+        flush_logs=flush_logs,
+    )
+
+    return TrajectoryExecutionResult(
+        sandbox=sandbox,
+        agent_trace=agent_trace,
+        agent_backend=agent_backend,
+        evaluator=loop_result.evaluator,
+        session_id=loop_result.session_id,
+        prompt_text=loop_result.prompt_text,
+        turn_count=loop_result.turn_count,
+        part_count=loop_result.part_count,
+        latest_git_commit=loop_result.latest_git_commit,
+        end_reason=loop_result.end_reason,
+    )
+
+
+async def handle_trajectory_exception(
+    *,
+    error: Exception,
+    sandbox: Sandbox | None,
+    agent_backend: Agent | None,
+    agent_trace: AgentTrace | None,
+    session_id: str,
+    trajectory_id: str,
+    turn_count: int,
+    part_count: int,
+    agent_name: str,
+    resolved_model: str,
+    prompt_text: str,
+    environment: str,
+    task_params_loaded: dict[str, Any],
+) -> RunStopReason:
+    print(f"[error] {type(error).__name__}: {error}")
+    print(traceback.format_exc())
+    if sandbox is not None and agent_backend is not None:
+        await dump_sandbox_logs(
+            sandbox,
+            agent=agent_backend,
+        )
+
+    error_text = str(error).lower()
+    end_reason: RunStopReason
+    if (
+        "schema" in error_text
+        and ("test" in error_text or "zero tests" in error_text)
+    ):
+        end_reason = "envoi_error"
+    elif "zero tests" in error_text:
+        end_reason = "envoi_error"
+    else:
+        end_reason = "agent_error"
+
+    try:
+        if (
+            agent_trace is not None
+            and agent_backend is not None
+            and session_id
+        ):
+            crash_messages = await agent_backend.collect_crash_messages(
+                session_id,
+            )
+            if crash_messages:
+                crash_record = TurnRecord(
+                    trajectory_id=trajectory_id,
+                    session_id=session_id,
+                    agent=agent_name,
+                    turn=turn_count + 1,
+                    part_start=part_count + 1,
+                    part_end=part_count,
+                    timestamp=datetime.now(UTC).isoformat(),
+                    agent_model=resolved_model,
+                    prompt=prompt_text or "",
+                    git_commit=(
+                        await get_git_commit(sandbox)
+                        if sandbox
+                        else None
+                    ),
+                    parts=[],
+                )
+                agent_trace.turns.append(crash_record)
+                save_trace_parquet(
+                    trajectory_id,
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
+                )
+                print(
+                    f"[error] saved {len(crash_messages)} "
+                    "new messages before crash"
+                )
+    except Exception:
+        print("[error] could not save crash messages")
+    return end_reason
+
+
+async def finalize_trajectory_run(
+    *,
+    trajectory_id: str,
+    sandbox: Sandbox | None,
+    agent_trace: AgentTrace | None,
+    evaluator: EvaluationScheduler | None,
+    part_count: int,
+    turn_count: int,
+    end_reason: RunStopReason,
+    latest_git_commit: str | None,
+    environment: str,
+    task_params_loaded: dict[str, Any],
+    structured_logs: list[dict[str, Any]],
+    flush_logs: Callable[..., Awaitable[None]],
+    logs_flush_task: asyncio.Task[None] | None,
+    logs_flush_wakeup: asyncio.Event | None,
+    logs_flush_stop: asyncio.Event | None,
+    log_callback_token: Any,
+    log_context_token: Any,
+) -> tuple[int, int, RunStopReason, str | None]:
+    if logs_flush_stop is not None:
+        logs_flush_stop.set()
+    if logs_flush_wakeup is not None:
+        logs_flush_wakeup.set()
+    if logs_flush_task is not None:
+        try:
+            await logs_flush_task
+        except Exception:
+            pass
+
+    if agent_trace is not None:
+        trace_part_count = get_trace_last_part(agent_trace)
+        trace_turn_count = get_trace_last_turn(agent_trace)
+        if trace_part_count > part_count or trace_turn_count > turn_count:
+            print(
+                "[end] syncing counters from trace "
+                f"(parts {part_count}->{trace_part_count}, "
+                f"turns {turn_count}->{trace_turn_count})"
+            )
+        part_count = max(part_count, trace_part_count)
+        turn_count = max(turn_count, trace_turn_count)
+
+    if evaluator is not None:
+        try:
+            if EVALUATOR_DRAIN_TIMEOUT_SECONDS > 0:
+                await asyncio.wait_for(
+                    evaluator.wait(),
+                    timeout=EVALUATOR_DRAIN_TIMEOUT_SECONDS,
+                )
+            else:
+                await evaluator.wait()
+        except TimeoutError:
+            print(
+                "[eval] shutdown drain timed out after "
+                f"{EVALUATOR_DRAIN_TIMEOUT_SECONDS}s; "
+                "cancelling pending evaluations"
+            )
+            try:
+                await evaluator.cancel_pending(
+                    reason=(
+                        "Cancelled during shutdown: "
+                        "evaluation drain timed out"
+                    ),
+                )
+            except Exception:
+                pass
+        except Exception as drain_error:
+            print(f"[eval] shutdown drain failed: {drain_error}")
+            try:
+                await evaluator.cancel_pending(
+                    reason=(
+                        "Cancelled during shutdown: "
+                        "evaluation drain failed"
+                    ),
+                )
+            except Exception:
+                pass
+
+    logs_parquet_uri = artifact_uri(trajectory_id, "logs.parquet")
+    if sandbox is not None and agent_trace is not None:
+        try:
+            winner = first_winning_commit(agent_trace.evaluations)
+            if winner is not None:
+                winner_commit, winner_eval = winner
+                winner_part = apply_winning_projection(
+                    agent_trace,
+                    winner_commit=winner_commit,
+                    winner_eval=winner_eval,
+                )
+                if isinstance(winner_part, int):
+                    part_count = winner_part
+                    turn_count = get_trace_last_turn(agent_trace)
+                latest_git_commit = winner_commit
+                save_trace_parquet(
+                    trajectory_id,
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
+                )
+                checked_out = await checkout_workspace_commit(
+                    sandbox,
+                    winner_commit,
+                )
+                if checked_out:
+                    print(
+                        "[eval] final winner "
+                        f"commit={winner_commit[:10]} "
+                        f"part={winner_eval.part} "
+                        f"score={winner_eval.passed}/{winner_eval.total}"
+                    )
+                    end_reason = "solved"
+        except Exception as winner_finalize_error:
+            print(
+                "[eval] final winner projection failed: "
+                f"{winner_finalize_error}"
+            )
+
+        try:
+            sandbox_logs = await collect_sandbox_structured_logs(sandbox)
+            if sandbox_logs:
+                structured_logs.extend(sandbox_logs)
+        except Exception as log_error:
+            print(f"[logs] failed collecting sandbox logs: {log_error}")
+
+        try:
+            await flush_logs(force=True)
+        except Exception as flush_error:
+            print(f"[logs] pre-end flush failed: {flush_error}")
+
+        try:
+            await end_session(
+                sandbox,
+                agent_trace,
+                part_count,
+                turn_count,
+                end_reason,
+                environment=environment,
+                task_params=task_params_loaded,
+                logs_parquet_uri=logs_parquet_uri,
+                final_commit_hint=latest_git_commit,
+            )
+        except Exception as end_err:
+            print(
+                "[error] failed to finalize session: "
+                f"{end_err}"
+            )
+
+    if sandbox is not None:
+        try:
+            await sandbox.terminate()
+        except Exception:
+            pass
+
+    if (sandbox is None or agent_trace is None) and structured_logs:
+        try:
+            await flush_logs(force=True)
+        except Exception as log_save_error:
+            print(f"[logs] failed saving logs.parquet: {log_save_error}")
+    try:
+        await flush_logs(force=True)
+    except Exception as log_save_error:
+        print(f"[logs] final flush failed: {log_save_error}")
+    if log_callback_token is not None:
+        reset_log_callback(log_callback_token)
+    if log_context_token is not None:
+        reset_log_context(log_context_token)
+
+    return part_count, turn_count, end_reason, latest_git_commit
+
+
+# Guardrail: keep orchestration functions phase-oriented and
+# below complexity thresholds by extracting helper functions
+# rather than extending `run_trajectory`.
+async def run_trajectory(
+    agent: str = DEFAULT_AGENT,
+    model: str | None = None,
+    max_parts: int | None = None,
+    max_turns: int | None = None,
+    test: list[str] | None = None,
+    test_timeout_seconds: int | None = None,
+    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    timeout_seconds: int = 7200,
+    trajectory_id: str | None = None,
+    codex_auth_json_b64: str | None = None,
+    resume: bool = RESUME_FROM_S3,
+    sandbox_provider: str = "modal",
+    task_dir: str = "",
+    environment_dir: str = "",
+    raw_params: dict[str, Any] | None = None,
+    sandbox_cpu: float | None = None,
+    sandbox_memory_mb: int | None = None,
+) -> str:
+    if trajectory_id is None:
+        trajectory_id = str(uuid.uuid4())
+    prepared = await prepare_trajectory_context(
+        trajectory_id=trajectory_id,
+        agent=agent,
+        model=model,
+        max_parts=max_parts,
+        max_turns=max_turns,
+        test=test,
+        test_timeout_seconds=test_timeout_seconds,
+        codex_auth_json_b64=codex_auth_json_b64,
+        resume=resume,
+        sandbox_provider=sandbox_provider,
+        task_dir=task_dir,
+        environment_dir=environment_dir,
+        raw_params=raw_params,
+        sandbox_cpu=sandbox_cpu,
+        sandbox_memory_mb=sandbox_memory_mb,
+        timeout_seconds=timeout_seconds,
+    )
+    logs_runtime = start_logs_runtime(trajectory_id)
+    log_callback_token = set_log_callback(logs_runtime.capture)
     log_context_token = bind_log_context(
         component="orchestrator",
         trajectory_id=trajectory_id,
         source="orchestrator",
     )
-
-    logs_flush_wakeup = asyncio.Event()
-    logs_flush_stop = asyncio.Event()
-
-    async def periodic_logs_flush_loop() -> None:
-        assert logs_flush_wakeup is not None
-        assert logs_flush_stop is not None
-        while not logs_flush_stop.is_set():
-            try:
-                await asyncio.wait_for(
-                    logs_flush_wakeup.wait(),
-                    timeout=LOGS_FLUSH_INTERVAL_SECONDS,
-                )
-            except TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                break
-            finally:
-                logs_flush_wakeup.clear()
-            try:
-                await flush_logs(force=False)
-            except Exception as log_flush_error:
-                print(
-                    "[logs] periodic flush failed: "
-                    f"{log_flush_error}"
-                )
-        try:
-            await flush_logs(force=True)
-        except Exception as log_flush_error:
-            print(
-                "[logs] final periodic flush failed: "
-                f"{log_flush_error}"
-            )
-
-    logs_flush_task = asyncio.create_task(
-        periodic_logs_flush_loop(),
+    part_limit_label = (
+        str(prepared.max_parts)
+        if prepared.max_parts is not None
+        else "none"
     )
-
-    part_limit_label = str(max_parts) if max_parts is not None else "none"
-    turn_limit_label = str(max_turns) if max_turns is not None else "none"
-    test_selector = ",".join(selected_test_paths) if selected_test_paths else "all"
+    turn_limit_label = (
+        str(prepared.max_turns)
+        if prepared.max_turns is not None
+        else "none"
+    )
+    test_selector = (
+        ",".join(prepared.selected_test_paths)
+        if prepared.selected_test_paths
+        else "all"
+    )
     test_timeout_label = (
         f"{test_timeout_seconds}s"
         if isinstance(test_timeout_seconds, int)
@@ -2444,8 +3971,8 @@ async def run_trajectory(
         "[run] start "
         f"trajectory_id={trajectory_id} "
         f"sandbox={sandbox_provider} "
-        f"agent={agent_name} "
-        f"model={resolved_model}"
+        f"agent={prepared.agent_name} "
+        f"model={prepared.resolved_model}"
     )
     print(
         "[run] limits "
@@ -2458,26 +3985,31 @@ async def run_trajectory(
         f"tests={test_selector} "
         f"test_timeout={test_timeout_label} "
         f"eval_concurrency={EVALUATION_CONCURRENCY} "
-        f"advisor_model={normalized_advisor_model or 'none'} "
-        f"advisor_thinking={normalized_advisor_thinking_level} "
-        f"advisor_max_tokens={advisor_max_output_tokens or 'default'} "
+        f"advisor_model={prepared.normalized_advisor_model or 'none'} "
+        f"advisor_thinking={prepared.normalized_advisor_thinking_level} "
+        f"advisor_max_tokens={prepared.advisor_max_output_tokens or 'default'} "
         "suite_priority="
         f"{format_suite_feedback_priority(CURRENT_SUITE_FEEDBACK_PRIORITY)} "
-        f"failed_tests_limit={failed_tests_feedback_limit}"
+        f"failed_tests_limit={prepared.failed_tests_feedback_limit}"
     )
     print(
         "[run] io "
-        f"task={task_path} env={env_path} "
-        f"trace={trace_s3_uri} "
-        f"bundle={bundle_s3_uri} "
-        f"logs={logs_s3_uri}"
+        f"task={prepared.task_path} env={prepared.env_path} "
+        f"trace={prepared.trace_s3_uri} "
+        f"bundle={prepared.bundle_s3_uri} "
+        f"logs={prepared.logs_s3_uri}"
     )
-    if existing_trace is not None:
+    if prepared.existing_trace is not None:
         print(
             f"[resume] found existing trace: "
-            f"parts={len(existing_trace.parts)} "
-            f"turns={len(existing_trace.turns)}"
+            f"parts={len(prepared.existing_trace.parts)} "
+            f"turns={len(prepared.existing_trace.turns)}"
         )
+
+    agent_name = prepared.agent_name
+    resolved_model = prepared.resolved_model
+    environment = prepared.environment
+    task_params_loaded = prepared.task_params_loaded
 
     sandbox: Sandbox | None = None
     agent_trace: AgentTrace | None = None
@@ -2488,858 +4020,54 @@ async def run_trajectory(
     turn_count = 0
     part_count = 0
     latest_git_commit: str | None = None
-    end_reason: str = "agent_error"
+    end_reason: RunStopReason = "agent_error"
     interrupted_by_signal = False
 
     try:
-        # --- Create sandbox ---
-        sandbox_timeout_seconds = timeout_seconds + SHUTDOWN_GRACE_SECONDS
-        config = SandboxConfig(
-            timeout=sandbox_timeout_seconds,
-            image_requirements=agent_cls.image_requirements(),
-            environment_dockerfile=str(env_path / dockerfile_rel_path),
-            environment_docker_context_dir=str(env_path),
-            environment_docker_build_args=docker_build_args,
-            cpu=float(effective_sandbox_cpu) if effective_sandbox_cpu is not None else None,
-            memory_mb=(
-                int(effective_sandbox_memory_mb)
-                if effective_sandbox_memory_mb is not None
-                else None
-            ),
-        )
-        sandbox = await create_sandbox(sandbox_provider, config)
-        start_time = time.monotonic()
-
-        # --- Agent setup (one call, no branching) ---
-        agent_backend = agent_cls()
-        assert agent_backend is not None
-        mcp_server_content, mcp_source = load_optional_mcp_server(
-            task_path,
-            env_path,
-        )
-        mcp_enabled = bool(mcp_server_content.strip())
-        if mcp_enabled:
-            print(f"[mcp] enabled from {mcp_source}")
-        else:
-            print("[mcp] disabled (no mcp_server.py in task/env)")
-        ctx = AgentSetupContext(
-            model=resolved_model,
-            credentials=credentials,
-            env_files=env_files,
-            mcp_server_content=mcp_server_content,
-            mcp_enabled=mcp_enabled,
-            workspace_gitignore=WORKSPACE_GITIGNORE,
-            runtime_env=effective_resolved_env_params.runtime_env,
-        )
-        await agent_backend.setup(sandbox, ctx)
-
-        resume_commit = (
-            get_trace_latest_commit(existing_trace)
-            if existing_trace
-            else None
-        )
-        if (
-            existing_trace is not None
-            and isinstance(resume_commit, str)
-            and resume_commit
-        ):
-            await restore_workspace_from_bundle(
-                sandbox=sandbox,
-                trajectory_id=trajectory_id,
-                commit=resume_commit,
-            )
-            latest_git_commit = resume_commit
-
-        # --- Create session ---
-        session_id = await agent_backend.create_session(
-            trajectory_id,
-        )
-        if not session_id:
-            raise RuntimeError(
-                f"Failed to create session for agent={agent_name}",
-            )
-        update_log_context(session_id=session_id)
-
-        if existing_trace is not None:
-            agent_trace = existing_trace
-            agent_trace.session_id = session_id
-            agent_trace.agent = agent_name
-            agent_trace.agent_model = resolved_model
-            agent_trace.run_metadata = run_metadata
-            agent_trace.session_end = None
-            part_count = get_trace_last_part(agent_trace)
-            turn_count = get_trace_last_turn(agent_trace)
-            trace_latest_commit = get_trace_latest_commit(agent_trace)
-            if isinstance(trace_latest_commit, str) and trace_latest_commit:
-                latest_git_commit = trace_latest_commit
-            print(
-                f"[resume] continuing from part={part_count} "
-                f"turn={turn_count}"
-            )
-        else:
-            agent_trace = AgentTrace(
-                trajectory_id=trajectory_id,
-                session_id=session_id,
-                agent=agent_name,
-                agent_model=resolved_model,
-                started_at=datetime.now(UTC).isoformat(),
-                run_metadata=run_metadata,
-            )
-        save_trace_parquet(
-            trajectory_id, agent_trace,
-            environment=environment,
-            task_params=task_params_loaded,
-        )
-
-        # --- Discover test paths from envoi /schema ---
-        required_test_paths: list[str] = []
-        schema_available = False
-        schema_result = await sandbox.run(
-            "curl -sf http://localhost:8000/schema",
-            quiet=True, timeout=30,
-        )
-        if (
-            schema_result.exit_code == 0
-            and schema_result.stdout.strip()
-        ):
-            try:
-                schema = json.loads(schema_result.stdout)
-                required_test_paths = extract_leaf_paths(schema)
-                schema_available = True
-                print(
-                    f"[schema] discovered "
-                    f"{len(required_test_paths)} test paths"
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"[schema] parse error: {e}")
-        else:
-            print(
-                "[schema] /schema not available; "
-                "cannot verify test inventory"
-            )
-
-        if not schema_available:
-            raise RuntimeError(
-                "Environment schema is unavailable. "
-                "Aborting because test inventory cannot be verified."
-            )
-        if not required_test_paths:
-            raise RuntimeError(
-                "Environment schema reported zero tests. "
-                "Aborting run."
-            )
-
-        if selected_test_paths and required_test_paths:
-            discovered = set(required_test_paths)
-            invalid_paths: list[str] = []
-            for path in selected_test_paths:
-                if path in discovered:
-                    continue
-                has_child = any(
-                    candidate.startswith(path + "/")
-                    for candidate in required_test_paths
-                )
-                if not has_child:
-                    invalid_paths.append(path)
-            if invalid_paths:
-                available_preview = ", ".join(required_test_paths[:20])
-                raise ValueError(
-                    "Unknown --test path(s): "
-                    + ", ".join(invalid_paths)
-                    + ". Available paths include: "
-                    + available_preview
-                )
-
-        # --- Main loop ---
-        tracker = SolveTracker(required_test_paths)
-        for part_record in agent_trace.parts:
-            tracker.update(list(part_record.envoi_calls))
-        previous_turn_end_tests = (
-            find_latest_completed_turn_end_tests(agent_trace)
-        )
-
-        winner_stop_part_ref: list[int | None] = [None]
-
-        def winner_latched() -> bool:
-            return isinstance(winner_stop_part_ref[0], int)
-
-        def latch_winner(
-            commit: str,
-            evaluation: EvaluationRecord,
-            *,
-            source: str,
-        ) -> bool:
-            winner_part = winner_part_number(evaluation)
-            if winner_part is None:
-                return False
-            current = winner_stop_part_ref[0]
-            if isinstance(current, int) and current <= winner_part:
-                return False
-            winner_stop_part_ref[0] = winner_part
-            print(
-                "[eval] latched first winner "
-                f"source={source} commit={commit[:10]} "
-                f"part={winner_part} "
-                f"score={evaluation.passed}/{evaluation.total}"
-            )
-            return True
-
-        async def on_async_winner(
-            commit: str,
-            evaluation: EvaluationRecord,
-        ) -> None:
-            did_latch = latch_winner(
-                commit, evaluation, source="commit_async",
-            )
-            if not did_latch:
-                return
-            # Best-effort: interrupt in-flight turn command so solved runs stop fast.
-            try:
-                await sandbox.run(
-                    "pkill -f '/sandbox/codex_client.py chat-stream' "
-                    "> /dev/null 2>&1 || true\n"
-                    "pkill -f '/sandbox/opencode_agent.py chat-stream' "
-                    "> /dev/null 2>&1 || true",
-                    quiet=True,
-                    timeout=10,
-                )
-            except Exception as kill_error:
-                print(
-                    "[eval] winner interrupt failed: "
-                    f"{kill_error}"
-                )
-
-        evaluator = EvaluationScheduler(
-            sandbox=sandbox,
-            agent_trace=agent_trace,
+        execution_result = await execute_trajectory_main(
             trajectory_id=trajectory_id,
-            environment=environment,
-            task_params=task_params_loaded,
-            test_paths=selected_test_paths,
+            sandbox_provider=sandbox_provider,
+            timeout_seconds=timeout_seconds,
+            agent_cls=prepared.agent_cls,
+            env_path=prepared.env_path,
+            dockerfile_rel_path=prepared.dockerfile_rel_path,
+            docker_build_args=prepared.docker_build_args,
+            effective_sandbox_cpu=prepared.effective_sandbox_cpu,
+            effective_sandbox_memory_mb=prepared.effective_sandbox_memory_mb,
+            task_path=prepared.task_path,
+            resolved_model=prepared.resolved_model,
+            credentials=prepared.credentials,
+            env_files=prepared.env_files,
+            runtime_env=prepared.effective_resolved_env_params.runtime_env,
+            existing_trace=prepared.existing_trace,
+            run_metadata=prepared.run_metadata,
+            environment=prepared.environment,
+            task_params_loaded=prepared.task_params_loaded,
+            agent_name=prepared.agent_name,
+            prompt=prepared.prompt,
+            selected_test_paths=prepared.selected_test_paths,
             test_timeout_seconds=test_timeout_seconds,
-            should_stop=winner_latched,
-            on_winner=on_async_winner,
+            max_parts=prepared.max_parts,
+            max_turns=prepared.max_turns,
+            message_timeout_seconds=message_timeout_seconds,
+            failed_tests_feedback_limit=prepared.failed_tests_feedback_limit,
+            normalized_advisor_model=prepared.normalized_advisor_model,
+            normalized_advisor_thinking_level=prepared.normalized_advisor_thinking_level,
+            advisor_max_output_tokens=prepared.advisor_max_output_tokens,
+            advisor_system_prompt_override=prepared.advisor_system_prompt_override,
+            advisor_user_prompt_prefix_override=prepared.advisor_user_prompt_prefix_override,
+            flush_logs=logs_runtime.flush,
         )
-
-        existing_winner = first_winning_commit(agent_trace.evaluations)
-        if existing_winner is not None:
-            existing_winner_commit, existing_winner_eval = existing_winner
-            latch_winner(
-                existing_winner_commit,
-                existing_winner_eval,
-                source="resume",
-            )
-
-        async def stop_for_winner(
-            *,
-            detection_point: str,
-        ) -> bool:
-            nonlocal part_count, turn_count, end_reason, latest_git_commit
-            winner = first_winning_commit(agent_trace.evaluations)
-            if winner is None:
-                return False
-            winner_commit, winner_eval = winner
-            latest_git_commit = winner_commit
-            latch_winner(
-                winner_commit,
-                winner_eval,
-                source=detection_point,
-            )
-            winner_part = apply_winning_projection(
-                agent_trace,
-                winner_commit=winner_commit,
-                winner_eval=winner_eval,
-            )
-            if isinstance(winner_part, int):
-                part_count = winner_part
-                turn_count = get_trace_last_turn(agent_trace)
-            save_trace_parquet(
-                trajectory_id, agent_trace,
-                environment=environment,
-                task_params=task_params_loaded,
-            )
-            await checkout_workspace_commit(
-                sandbox,
-                winner_commit,
-            )
-            print(
-                f"[eval] winner detected {detection_point} "
-                f"commit={winner_commit[:10]} "
-                f"part={winner_eval.part} "
-                f"score={winner_eval.passed}/{winner_eval.total}"
-            )
-            end_reason = "solved"
-            return True
-
-        prompt_text = (
-            prompt if part_count == 0
-            else build_followup_prompt(tracker)
-        )
-        next_turn_feedback_eval_id: str | None = None
-        consecutive_turn_failures = 0
-        previous_best_passed = 0
-        consecutive_no_progress_turns = 0
-
-        while True:
-            update_log_context(turn=turn_count + 1, part=part_count)
-            if await stop_for_winner(
-                detection_point="before turn start",
-            ):
-                break
-            if (
-                isinstance(max_parts, int)
-                and max_parts > 0
-                and part_count >= max_parts
-            ):
-                end_reason = "part_limit"
-                break
-            if max_turns is not None and turn_count >= max_turns:
-                print(
-                    "[progress] reached turn limit "
-                    f"({turn_count}/{max_turns})"
-                )
-                end_reason = "part_limit"
-                break
-            elapsed = time.monotonic() - start_time
-            if elapsed > timeout_seconds:
-                end_reason = "timeout"
-                break
-            remaining_run_seconds = timeout_seconds - elapsed
-            remaining_parts_budget = (
-                max(1, max_parts - part_count)
-                if isinstance(max_parts, int)
-                and max_parts > 0
-                else 0
-            )
-            remaining_parts_for_timeout = (
-                remaining_parts_budget
-                if remaining_parts_budget > 0
-                else max(1, int(remaining_run_seconds // 60))
-            )
-
-            # Agent decides its own timeout (no branching)
-            turn_timeout_seconds = agent_backend.compute_turn_timeout(
-                remaining_parts=remaining_parts_for_timeout,
-                remaining_run_seconds=remaining_run_seconds,
-                message_timeout_seconds=message_timeout_seconds,
-            )
-
-            part_counter_label = format_progress_counter(
-                name="part",
-                current=part_count,
-                limit=max_parts,
-            )
-            turn_counter_label = format_progress_counter(
-                name="turn",
-                current=turn_count + 1,
-                limit=max_turns,
-            )
-            elapsed_label = format_compact_duration(elapsed)
-            remaining_label = format_compact_duration(
-                max(0, remaining_run_seconds)
-            )
-            builtins.print(
-                "\n"
-                f"[turn] start "
-                f"turn={turn_count + 1} "
-                f"{part_counter_label} "
-                f"elapsed={elapsed_label} "
-                f"remaining={remaining_label} "
-                f"timeout={turn_timeout_seconds}s",
-                flush=True,
-            )
-
-            turn_started_at = datetime.now(UTC).isoformat()
-            previous_part_count = part_count
-            streamed_parts = 0
-            observed_parts = 0
-            git_commit = await get_git_commit(sandbox)
-            if isinstance(git_commit, str) and git_commit:
-                latest_git_commit = git_commit
-
-            turn_count += 1
-            turn_record = TurnRecord(
-                trajectory_id=trajectory_id,
-                session_id=session_id,
-                agent=agent_name,
-                turn=turn_count,
-                part_start=None,
-                part_end=None,
-                timestamp=turn_started_at,
-                agent_model=resolved_model,
-                prompt=prompt_text,
-                git_commit=git_commit,
-                repo_checkpoint=None,
-                feedback_eval_id=next_turn_feedback_eval_id,
-                parts=[],
-            )
-            agent_trace.turns.append(turn_record)
-
-            stream_part_counter: list[int] = [part_count]
-            stream_git_commit_ref: list[str | None] = [git_commit]
-            stream_last_part_ts_ref: list[int | None] = [None]
-            stream_part_cb = make_stream_part_callback(
-                sandbox=sandbox,
-                trajectory_id=trajectory_id,
-                agent_trace=agent_trace,
-                tracker=tracker,
-                environment=environment,
-                task_params=task_params_loaded,
-                agent_name=agent_name,
-                resolved_model=resolved_model,
-                effective_max_parts=max_parts,
-                part_counter=stream_part_counter,
-                git_commit_ref=stream_git_commit_ref,
-                last_part_timestamp_ms_ref=stream_last_part_ts_ref,
-                turn_record=turn_record,
-                session_id=session_id,
-                run_started_mono=start_time,
-                stop_at_part_ref=winner_stop_part_ref,
-                schedule_commit_evaluation=evaluator.schedule,
-            )
-
-            try:
-                turn_outcome = await agent_backend.run_turn(
-                    prompt_text=prompt_text,
-                    timeout=turn_timeout_seconds,
-                    current_turn=turn_count,
-                    remaining_parts_budget=remaining_parts_budget,
-                    global_part_count=part_count,
-                    global_max_parts=max_parts or 0,
-                    global_max_turns=max_turns or 0,
-                    global_elapsed_seconds=int(max(0, elapsed)),
-                    on_stream_part=stream_part_cb,
-                )
-            except AgentFatalError as fatal_error:
-                stop_reason = (
-                    fatal_error.stop_reason
-                    if fatal_error.stop_reason in {
-                        "part_limit",
-                        "timeout",
-                        "agent_error",
-                        "envoi_error",
-                        "solved",
-                    }
-                    else "agent_error"
-                )
-                print(
-                    "[run] fatal agent stop: "
-                    f"{fatal_error} reason={stop_reason}"
-                )
-                end_reason = stop_reason
-                break
-            part_count = stream_part_counter[0]
-            git_commit = stream_git_commit_ref[0]
-            if isinstance(git_commit, str) and git_commit:
-                latest_git_commit = git_commit
-            update_log_context(part=part_count, git_commit=git_commit)
-
-            if turn_outcome is None:
-                if await stop_for_winner(
-                    detection_point="after interrupted turn",
-                ):
-                    break
-                if turn_record is not None and not turn_record.parts:
-                    agent_trace.turns.pop()
-                consecutive_turn_failures += 1
-                print(
-                    "[progress] no response from agent "
-                    f"(recovery {consecutive_turn_failures}"
-                    f"/{TURN_RECOVERY_RETRIES})"
-                )
-                await dump_sandbox_logs(
-                    sandbox, agent=agent_backend,
-                )
-                if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
-                    recovered_session_id = (
-                        await agent_backend.recover_session(
-                            trajectory_id,
-                            consecutive_turn_failures,
-                        )
-                    )
-                    if recovered_session_id:
-                        session_id = recovered_session_id
-                        agent_trace.session_id = (
-                            recovered_session_id
-                        )
-                        save_trace_parquet(
-                            trajectory_id, agent_trace,
-                            environment=environment,
-                            task_params=task_params_loaded,
-                        )
-                        prompt_text = build_followup_prompt(
-                            tracker,
-                            elapsed_seconds=(
-                                time.monotonic() - start_time
-                            ),
-                            timeout_seconds=timeout_seconds,
-                            consecutive_no_progress_turns=(
-                                consecutive_no_progress_turns
-                            ),
-                        )
-                        continue
-                end_reason = "agent_error"
-                break
-            consecutive_turn_failures = 0
-            agent_backend.on_turn_complete(turn_outcome)
-
-            response = turn_outcome.response
-            session_id = turn_outcome.session_id
-            if agent_trace.session_id != session_id:
-                agent_trace.session_id = session_id
-            update_log_context(session_id=session_id)
-
-            info = response.get("info", {})
-            parts = response.get("parts", [])
-            response_message_id = info.get("id")
-            print(
-                f"[progress] response "
-                f"id={response_message_id} "
-                f"parts={len(parts)}"
-            )
-
-            session_ids = turn_outcome.session_ids
-            session_objects = turn_outcome.session_objects
-            new_messages = turn_outcome.new_messages
-            print(f"[progress] new_messages={len(new_messages)}")
-            if turn_record is not None:
-                turn_record.session_ids = session_ids
-                turn_record.session_objects = session_objects
-                turn_record.new_messages = new_messages
-                turn_record.token_usage = (
-                    extract_turn_token_usage(
-                        response, new_messages,
-                    )
-                )
-
-            new_envoi_calls: list[EnvoiCall] = []
-            for msg in new_messages:
-                msg_parts = msg.get("parts", [])
-                if isinstance(msg_parts, list):
-                    new_envoi_calls.extend(
-                        extract_envoi_calls(msg_parts),
-                    )
-
-            tracker.update(new_envoi_calls)
-
-            stream_meta = (
-                response.get("_stream", {})
-                if isinstance(response, dict)
-                else {}
-            )
-            stream_meta_obj = (
-                stream_meta
-                if isinstance(stream_meta, dict)
-                else {}
-            )
-            streamed_parts = int(
-                stream_meta_obj.get(
-                    "meaningful_parts_seen", 0,
-                )
-                or 0
-            )
-            observed_parts = count_meaningful_parts(
-                new_messages,
-            )
-
-            new_parts = part_count - previous_part_count
-            if turn_record is not None:
-                turn_record.session_id = session_id
-                for record in turn_record.parts:
-                    record.session_id = session_id
-                if turn_record.parts:
-                    last_part_record = turn_record.parts[-1]
-                    existing_keys = {
-                        tracker.call_key(call)
-                        for call in last_part_record.envoi_calls
-                    }
-                    for call in new_envoi_calls:
-                        key = tracker.call_key(call)
-                        if key not in existing_keys:
-                            last_part_record.envoi_calls.append(
-                                call,
-                            )
-                            existing_keys.add(key)
-                    last_part_record.testing_state = (
-                        tracker.snapshot()
-                    )
-                    if turn_record.git_commit is None:
-                        turn_record.git_commit = (
-                            last_part_record.git_commit
-                        )
-                else:
-                    turn_record.git_commit = git_commit
-            save_trace_parquet(
-                trajectory_id, agent_trace,
-                environment=environment,
-                task_params=task_params_loaded,
-            )
-            if await stop_for_winner(
-                detection_point="after turn",
-            ):
-                break
-            turn_end_eval_feedback = ""
-            turn_end_passed: int | None = None
-            turn_end_total: int | None = None
-            turn_end_has_error = True
-            turn_end_eval_payload: dict[str, Any] | None = None
-            turn_end_eval_payload_body: dict[str, Any] | None = None
-            advisor_assessment: str | None = None
-            turn_end_event: EvalEvent | None = None
-            turn_end_no_tests_detected = False
-            try:
-                turn_end_eval_payload = await run_workspace_evaluation(
-                    sandbox=sandbox,
-                    test_paths=selected_test_paths,
-                    timeout_seconds=test_timeout_seconds,
-                )
-                payload = turn_end_eval_payload.get("payload")
-                if isinstance(payload, dict):
-                    turn_end_eval_payload_body = payload
-                    turn_end_passed = int(
-                        payload.get("passed", 0) or 0,
-                    )
-                    turn_end_total = int(
-                        payload.get("total", 0) or 0,
-                    )
-                    turn_end_error = payload.get("error")
-                    turn_end_has_error = bool(
-                        isinstance(turn_end_error, str)
-                        and turn_end_error.strip()
-                    )
-                    turn_end_no_tests_detected = (
-                        turn_end_total == 0
-                        and turn_end_passed == 0
-                    )
-                    if turn_end_no_tests_detected:
-                        if not turn_end_has_error:
-                            turn_end_has_error = True
-                            payload["error"] = (
-                                "Turn-end evaluation returned zero tests; "
-                                "aborting run."
-                            )
-                        print(
-                            "[eval] turn_end status=no_tests "
-                            f"status_error={turn_end_has_error}"
-                        )
-                    else:
-                        print(
-                            "[eval] turn_end "
-                            f"passed={turn_end_passed}/{turn_end_total} "
-                            f"status_error={turn_end_has_error}"
-                        )
-                    # Track plateau: no progress when pass count
-                    # does not exceed previous best
-                    if (
-                        isinstance(turn_end_passed, int)
-                        and turn_end_passed > previous_best_passed
-                    ):
-                        previous_best_passed = turn_end_passed
-                        consecutive_no_progress_turns = 0
-                    else:
-                        consecutive_no_progress_turns += 1
-                else:
-                    turn_end_has_error = True
-                    print("[eval] turn_end payload missing")
-
-                if (
-                    normalized_advisor_model is not None
-                    and isinstance(turn_end_eval_payload_body, dict)
-                    and not turn_end_no_tests_detected
-                    and not (
-                        isinstance(turn_end_passed, int)
-                        and isinstance(turn_end_total, int)
-                        and turn_end_total > 0
-                        and turn_end_passed == turn_end_total
-                        and not turn_end_has_error
-                    )
-                ):
-                    advisor_started_at = time.monotonic()
-                    print(
-                        "[advisor] run_start "
-                        f"model={normalized_advisor_model} "
-                        f"thinking={normalized_advisor_thinking_level} "
-                        f"commit={(git_commit or 'unknown')[:12]} "
-                        f"turn={turn_count} "
-                        f"failed_tests_limit={failed_tests_feedback_limit}"
-                    )
-                    try:
-                        advisor_assessment = await build_advisor_assessment(
-                            sandbox=sandbox,
-                            task_prompt=prompt,
-                            commit=git_commit,
-                            payload=turn_end_eval_payload_body,
-                            advisor_model=normalized_advisor_model,
-                            advisor_model_thinking_level=(
-                                normalized_advisor_thinking_level
-                            ),
-                            advisor_max_output_tokens=advisor_max_output_tokens,
-                            failed_tests_limit=failed_tests_feedback_limit,
-                            advisor_system_prompt=advisor_system_prompt_override,
-                            advisor_user_prompt_prefix=advisor_user_prompt_prefix_override,
-                        )
-                        print(
-                            "[advisor] run_success "
-                            f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
-                            f"assessment_chars={len(advisor_assessment)}"
-                        )
-                    except Exception as advisor_error:
-                        error_message = str(advisor_error).strip() or repr(advisor_error)
-                        advisor_assessment = (
-                            "External assessment unavailable: "
-                            + error_message
-                        )
-                        print(
-                            "[advisor] failed: "
-                            f"type={type(advisor_error).__name__} "
-                            f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
-                            f"error={error_message}"
-                        )
-                        print(
-                            "[advisor] failed_traceback:\n"
-                            + traceback.format_exc().strip()
-                        )
-                elif normalized_advisor_model is not None:
-                    if not isinstance(turn_end_eval_payload_body, dict):
-                        print("[advisor] skipped reason=turn_end_payload_missing")
-                    elif turn_end_no_tests_detected:
-                        print("[advisor] skipped reason=no_tests")
-                    else:
-                        print(
-                            "[advisor] skipped reason=all_tests_passing "
-                            f"passed={turn_end_passed} total={turn_end_total} "
-                            f"status_error={turn_end_has_error}"
-                        )
-
-                turn_end_eval_feedback = (
-                    format_turn_end_evaluation_feedback(
-                        turn_end_eval_payload,
-                        failed_tests_limit=failed_tests_feedback_limit,
-                        advisor_assessment=advisor_assessment,
-                        previous_turn_end_tests=previous_turn_end_tests,
-                    )
-                )
-            except Exception as turn_end_eval_error:
-                turn_end_eval_feedback = (
-                    "Turn-end full evaluation failed:\n"
-                    + str(turn_end_eval_error)
-                )
-                turn_end_has_error = True
-                print(
-                    "[eval] turn_end failed: "
-                    f"{turn_end_eval_error}"
-                )
-
-            turn_eval_part = (
-                turn_record.part_end
-                if (
-                    isinstance(turn_record.part_end, int)
-                    and turn_record.part_end > 0
-                )
-                else part_count
-            )
-            if turn_eval_part > 0:
-                turn_end_event = build_turn_end_eval_event(
-                    turn=turn_count,
-                    part=turn_eval_part,
-                    commit=git_commit,
-                    run_payload=turn_end_eval_payload,
-                    error=(
-                        turn_end_eval_feedback
-                        if turn_end_eval_payload is None
-                        else None
-                    ),
-                )
-                append_eval_event_delta(
-                    agent_trace,
-                    turn_end_event,
-                )
-                save_trace_parquet(
-                    trajectory_id,
-                    agent_trace,
-                    environment=environment,
-                    task_params=task_params_loaded,
-                )
-                if turn_end_event.status == "completed" and turn_end_event.tests:
-                    previous_turn_end_tests = list(turn_end_event.tests)
-
-            eval_label = format_turn_eval_label(
-                passed=turn_end_passed,
-                total=turn_end_total,
-                has_error=turn_end_has_error,
-            )
-            part_counter_label = format_progress_counter(
-                name="part",
-                current=part_count,
-                limit=max_parts,
-            )
-            turn_counter_label = format_progress_counter(
-                name="turn",
-                current=turn_count,
-                limit=max_turns,
-            )
-            elapsed_after_turn = time.monotonic() - start_time
-            commit_label = (
-                git_commit[:10]
-                if isinstance(git_commit, str) and git_commit
-                else "none"
-            )
-            print(
-                f"[turn] end "
-                f"{turn_counter_label} "
-                f"{part_counter_label} "
-                f"elapsed={format_compact_duration(elapsed_after_turn)} "
-                f"commit={commit_label} "
-                f"parts_delta=+{new_parts} "
-                f"eval={eval_label} "
-                f"calls={len(new_envoi_calls)} "
-                f"observed_parts={observed_parts} "
-                f"streamed_parts={streamed_parts}"
-            )
-            await flush_logs(force=True)
-
-            if turn_end_no_tests_detected:
-                print(
-                    "[run] stopping: evaluation returned zero tests"
-                )
-                end_reason = "envoi_error"
-                break
-
-            if (
-                isinstance(turn_end_passed, int)
-                and isinstance(turn_end_total, int)
-                and turn_end_total > 0
-                and turn_end_passed == turn_end_total
-                and not turn_end_has_error
-            ):
-                end_reason = "solved"
-                break
-
-            if (
-                isinstance(max_parts, int)
-                and max_parts > 0
-                and part_count >= max_parts
-            ):
-                end_reason = "part_limit"
-                break
-
-            next_turn_feedback_eval_id = (
-                turn_end_event.eval_id
-                if turn_end_event is not None
-                else None
-            )
-            prompt_text = build_followup_prompt(
-                tracker,
-                evaluation_feedback=turn_end_eval_feedback,
-                elapsed_seconds=time.monotonic() - start_time,
-                timeout_seconds=timeout_seconds,
-                consecutive_no_progress_turns=(
-                    consecutive_no_progress_turns
-                ),
-            )
-
-        if end_reason == "agent_error":
-            end_reason = "part_limit"
+        sandbox = execution_result.sandbox
+        agent_trace = execution_result.agent_trace
+        agent_backend = execution_result.agent_backend
+        evaluator = execution_result.evaluator
+        session_id = execution_result.session_id
+        prompt_text = execution_result.prompt_text
+        turn_count = execution_result.turn_count
+        part_count = execution_result.part_count
+        latest_git_commit = execution_result.latest_git_commit
+        end_reason = execution_result.end_reason
 
     except asyncio.CancelledError:
         interrupted_by_signal = True
@@ -3347,16 +4075,8 @@ async def run_trajectory(
         print("[run] interrupt received; finalizing and terminating sandbox")
 
     except AgentFatalError as fatal_error:
-        stop_reason = (
-            fatal_error.stop_reason
-            if fatal_error.stop_reason in {
-                "part_limit",
-                "timeout",
-                "agent_error",
-                "envoi_error",
-                "solved",
-            }
-            else "agent_error"
+        stop_reason = normalize_run_stop_reason(
+            fatal_error.stop_reason,
         )
         print(
             "[run] fatal agent stop: "
@@ -3365,209 +4085,47 @@ async def run_trajectory(
         end_reason = stop_reason
 
     except Exception as exc:
-        print(f"[error] {type(exc).__name__}: {exc}")
-        print(traceback.format_exc())
-        if sandbox and agent_backend:
-            await dump_sandbox_logs(
-                sandbox, agent=agent_backend,
-            )
-        error_text = str(exc).lower()
-        if (
-            "schema" in error_text
-            and ("test" in error_text or "zero tests" in error_text)
-        ):
-            end_reason = "envoi_error"
-        elif "zero tests" in error_text:
-            end_reason = "envoi_error"
-        else:
-            end_reason = "agent_error"
-        # Crash recovery via protocol (no name checks)
-        try:
-            if (
-                agent_trace is not None
-                and agent_backend is not None
-                and session_id
-            ):
-                crash_messages = (
-                    await agent_backend.collect_crash_messages(
-                        session_id,
-                    )
-                )
-                if crash_messages:
-                    crash_record = TurnRecord(
-                        trajectory_id=trajectory_id,
-                        session_id=session_id,
-                        agent=agent_name,
-                        turn=turn_count + 1,
-                        part_start=part_count + 1,
-                        part_end=part_count,
-                        timestamp=datetime.now(UTC).isoformat(),
-                        agent_model=resolved_model,
-                        prompt=prompt_text or "",
-                        git_commit=(
-                            await get_git_commit(sandbox)
-                            if sandbox
-                            else None
-                        ),
-                        parts=[],
-                    )
-                    agent_trace.turns.append(crash_record)
-                    save_trace_parquet(
-                        trajectory_id, agent_trace,
-                        environment=environment,
-                        task_params=task_params_loaded,
-                    )
-                    print(
-                        f"[error] saved {len(crash_messages)} "
-                        "new messages before crash"
-                    )
-        except Exception:
-            print("[error] could not save crash messages")
+        end_reason = await handle_trajectory_exception(
+            error=exc,
+            sandbox=sandbox,
+            agent_backend=agent_backend,
+            agent_trace=agent_trace,
+            session_id=session_id,
+            trajectory_id=trajectory_id,
+            turn_count=turn_count,
+            part_count=part_count,
+            agent_name=agent_name,
+            resolved_model=resolved_model,
+            prompt_text=prompt_text,
+            environment=environment,
+            task_params_loaded=task_params_loaded,
+        )
 
     finally:
-        if logs_flush_stop is not None:
-            logs_flush_stop.set()
-        if logs_flush_wakeup is not None:
-            logs_flush_wakeup.set()
-        if logs_flush_task is not None:
-            try:
-                await logs_flush_task
-            except Exception:
-                pass
-        if agent_trace is not None:
-            trace_part_count = get_trace_last_part(agent_trace)
-            trace_turn_count = get_trace_last_turn(agent_trace)
-            if trace_part_count > part_count or trace_turn_count > turn_count:
-                print(
-                    "[end] syncing counters from trace "
-                    f"(parts {part_count}->{trace_part_count}, "
-                    f"turns {turn_count}->{trace_turn_count})"
-                )
-            part_count = max(part_count, trace_part_count)
-            turn_count = max(turn_count, trace_turn_count)
-        if evaluator is not None:
-            try:
-                if EVALUATOR_DRAIN_TIMEOUT_SECONDS > 0:
-                    await asyncio.wait_for(
-                        evaluator.wait(),
-                        timeout=EVALUATOR_DRAIN_TIMEOUT_SECONDS,
-                    )
-                else:
-                    await evaluator.wait()
-            except TimeoutError:
-                print(
-                    "[eval] shutdown drain timed out after "
-                    f"{EVALUATOR_DRAIN_TIMEOUT_SECONDS}s; "
-                    "cancelling pending evaluations"
-                )
-                try:
-                    await evaluator.cancel_pending(
-                        reason=(
-                            "Cancelled during shutdown: "
-                            "evaluation drain timed out"
-                        ),
-                    )
-                except Exception:
-                    pass
-            except Exception as drain_error:
-                print(f"[eval] shutdown drain failed: {drain_error}")
-                try:
-                    await evaluator.cancel_pending(
-                        reason=(
-                            "Cancelled during shutdown: "
-                            "evaluation drain failed"
-                        ),
-                    )
-                except Exception:
-                    pass
-        logs_parquet_uri = artifact_uri(trajectory_id, "logs.parquet")
-        if sandbox is not None and agent_trace is not None:
-            try:
-                winner = first_winning_commit(agent_trace.evaluations)
-                if winner is not None:
-                    winner_commit, winner_eval = winner
-                    winner_part = apply_winning_projection(
-                        agent_trace,
-                        winner_commit=winner_commit,
-                        winner_eval=winner_eval,
-                    )
-                    if isinstance(winner_part, int):
-                        part_count = winner_part
-                        turn_count = get_trace_last_turn(agent_trace)
-                    latest_git_commit = winner_commit
-                    save_trace_parquet(
-                        trajectory_id, agent_trace,
-                        environment=environment,
-                        task_params=task_params_loaded,
-                    )
-                    checked_out = await checkout_workspace_commit(
-                        sandbox,
-                        winner_commit,
-                    )
-                    if checked_out:
-                        print(
-                            "[eval] final winner "
-                            f"commit={winner_commit[:10]} "
-                            f"part={winner_eval.part} "
-                            f"score={winner_eval.passed}/{winner_eval.total}"
-                        )
-                        end_reason = "solved"
-            except Exception as winner_finalize_error:
-                print(
-                    "[eval] final winner projection failed: "
-                    f"{winner_finalize_error}"
-                )
-
-            try:
-                sandbox_logs = await collect_sandbox_structured_logs(sandbox)
-                if sandbox_logs:
-                    structured_logs.extend(sandbox_logs)
-            except Exception as log_error:
-                print(f"[logs] failed collecting sandbox logs: {log_error}")
-
-            try:
-                await flush_logs(force=True)
-            except Exception as flush_error:
-                print(f"[logs] pre-end flush failed: {flush_error}")
-
-            try:
-                await end_session(
-                    sandbox,
-                    agent_trace,
-                    part_count,
-                    turn_count,
-                    end_reason,
-                    environment=environment,
-                    task_params=task_params_loaded,
-                    logs_parquet_uri=logs_parquet_uri,
-                    final_commit_hint=latest_git_commit,
-                )
-            except Exception as end_err:
-                print(
-                    "[error] failed to finalize session: "
-                    f"{end_err}"
-                )
-        if sandbox is not None:
-            try:
-                await sandbox.terminate()
-            except Exception:
-                pass
-        if (
-            (sandbox is None or agent_trace is None)
-            and structured_logs
-        ):
-            try:
-                await flush_logs(force=True)
-            except Exception as log_save_error:
-                print(f"[logs] failed saving logs.parquet: {log_save_error}")
-        try:
-            await flush_logs(force=True)
-        except Exception as log_save_error:
-            print(f"[logs] final flush failed: {log_save_error}")
-        if log_callback_token is not None:
-            reset_log_callback(log_callback_token)
-        if log_context_token is not None:
-            reset_log_context(log_context_token)
+        (
+            part_count,
+            turn_count,
+            end_reason,
+            latest_git_commit,
+        ) = await finalize_trajectory_run(
+            trajectory_id=trajectory_id,
+            sandbox=sandbox,
+            agent_trace=agent_trace,
+            evaluator=evaluator,
+            part_count=part_count,
+            turn_count=turn_count,
+            end_reason=end_reason,
+            latest_git_commit=latest_git_commit,
+            environment=environment,
+            task_params_loaded=task_params_loaded,
+            structured_logs=logs_runtime.records,
+            flush_logs=logs_runtime.flush,
+            logs_flush_task=logs_runtime.task,
+            logs_flush_wakeup=logs_runtime.wakeup,
+            logs_flush_stop=logs_runtime.stop,
+            log_callback_token=log_callback_token,
+            log_context_token=log_context_token,
+        )
 
     if interrupted_by_signal:
         raise KeyboardInterrupt
@@ -3673,4 +4231,4 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("[run] interrupted", flush=True)
-        raise SystemExit(130)
+        raise SystemExit(130) from None

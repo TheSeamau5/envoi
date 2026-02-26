@@ -1182,15 +1182,15 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             )
 
             if ctx.env_files:
-                py, c, txt = ctx.env_files
+                py, c, txt, sh = ctx.env_files
                 await upload_files_parallel(
                     sandbox,
-                    environment_upload_items(py, c, txt),
+                    environment_upload_items(py, c, txt, sh),
                     log_upload=True,
                 )
                 builtins.print(
                     f"[setup] uploaded {len(py)} py, "
-                    f"{len(c)} c, {len(txt)} txt files",
+                    f"{len(c)} c, {len(txt)} txt, {len(sh)} sh files",
                     flush=True,
                 )
 

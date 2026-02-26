@@ -36,7 +36,13 @@ class AgentSetupContext(BaseModel):
     model: str
     credentials: AgentCredentials
     env_files: (
-        tuple[dict[str, str], dict[str, str], dict[str, str]] | None
+        tuple[
+            dict[str, str],
+            dict[str, str],
+            dict[str, str],
+            dict[str, str],
+        ]
+        | None
     ) = None
     mcp_server_content: str = ""
     mcp_enabled: bool = False

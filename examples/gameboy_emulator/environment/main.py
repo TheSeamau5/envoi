@@ -111,13 +111,17 @@ def fixture_bootstrap_command(root: Path) -> str:
 
         if [ ! -f "$ROOT/blargg/cpu_instrs/cpu_instrs.gb" ]; then
             rm -rf "$ROOT/blargg"
-            git clone --depth 1 https://github.com/retrio/gb-test-roms.git "$ROOT/blargg"
+            git clone --depth 1 \\
+                https://github.com/retrio/gb-test-roms.git \\
+                "$ROOT/blargg"
         fi
 
-        if ! command -v wla-gb >/dev/null 2>&1 || ! command -v wlalink >/dev/null 2>&1; then
+        if ! command -v wla-gb >/dev/null 2>&1 \\
+            || ! command -v wlalink >/dev/null 2>&1; then
             WLA_DX_COMMIT=89a90a56be5c2b8cf19a9afa3e1b32384ddb1a97
             TMP_WLA="$(mktemp -d)"
-            curl -fsSL "https://github.com/vhelin/wla-dx/archive/${{WLA_DX_COMMIT}}.tar.gz" | tar xz -C "$TMP_WLA"
+            WLA_DX_URL="https://github.com/vhelin/wla-dx/archive/${{WLA_DX_COMMIT}}.tar.gz"
+            curl -fsSL "$WLA_DX_URL" | tar xz -C "$TMP_WLA"
             cd "$TMP_WLA/wla-dx-${{WLA_DX_COMMIT}}"
             cmake .
             make -j"$(nproc)"
@@ -126,10 +130,13 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_WLA"
         fi
 
-        if [ ! -d "$ROOT/mooneye/acceptance" ] || [ ! -d "$ROOT/mooneye/emulator-only" ]; then
+        if [ ! -d "$ROOT/mooneye/acceptance" ] \\
+            || [ ! -d "$ROOT/mooneye/emulator-only" ]; then
             rm -rf "$ROOT/mooneye"
             TMP_MOONEYE="$(mktemp -d)"
-            git clone --depth 1 https://github.com/Gekkio/mooneye-test-suite.git "$TMP_MOONEYE/mooneye-src"
+            git clone --depth 1 \\
+                https://github.com/Gekkio/mooneye-test-suite.git \\
+                "$TMP_MOONEYE/mooneye-src"
             cd "$TMP_MOONEYE/mooneye-src"
             make clean all WLA=wla-gb WLALINK=wlalink
             mkdir -p "$ROOT/mooneye"
@@ -138,9 +145,13 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_MOONEYE"
         fi
 
-        if ! command -v rgbasm >/dev/null 2>&1 || ! command -v rgblink >/dev/null 2>&1 || ! command -v rgbfix >/dev/null 2>&1; then
+        if ! command -v rgbasm >/dev/null 2>&1 \\
+            || ! command -v rgblink >/dev/null 2>&1 \\
+            || ! command -v rgbfix >/dev/null 2>&1; then
             TMP_RGBDS="$(mktemp -d)"
-            git clone --depth 1 --branch v0.6.1 https://github.com/gbdev/rgbds.git "$TMP_RGBDS/rgbds"
+            git clone --depth 1 --branch v0.6.1 \\
+                https://github.com/gbdev/rgbds.git \\
+                "$TMP_RGBDS/rgbds"
             cd "$TMP_RGBDS/rgbds"
             make -j"$(nproc)"
             make install
@@ -148,7 +159,8 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_RGBDS"
         fi
 
-        if [ ! -f "$ROOT/controls/breakpoint_fail.gb" ] || [ ! -f "$ROOT/controls/breakpoint_pass.gb" ]; then
+        if [ ! -f "$ROOT/controls/breakpoint_fail.gb" ] \\
+            || [ ! -f "$ROOT/controls/breakpoint_pass.gb" ]; then
             TMP_GUARD="$(mktemp -d)"
             mkdir -p "$ROOT/controls"
             cat > "$TMP_GUARD/fail.asm" <<'ASM'
@@ -197,12 +209,16 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_GUARD"
         fi
 
-        if [ ! -f "$ROOT/acid2/dmg/dmg-acid2.gb" ] || [ ! -f "$ROOT/acid2/dmg/reference.png" ]; then
+        if [ ! -f "$ROOT/acid2/dmg/dmg-acid2.gb" ] \\
+            || [ ! -f "$ROOT/acid2/dmg/reference.png" ]; then
             rm -rf "$ROOT/acid2/dmg"
             TMP_DMG_ACID2="$(mktemp -d)"
-            git clone --recurse-submodules --depth 1 https://github.com/mattcurrie/dmg-acid2.git "$TMP_DMG_ACID2/dmg-acid2"
+            git clone --recurse-submodules --depth 1 \\
+                https://github.com/mattcurrie/dmg-acid2.git \\
+                "$TMP_DMG_ACID2/dmg-acid2"
             cd "$TMP_DMG_ACID2/dmg-acid2"
-            sed -E -i 's/^[[:space:]]*HARDWARE_INC[[:space:]]+SET[[:space:]]+1[[:space:]]*$/DEF HARDWARE_INC EQU 1/' mgblib/src/hardware.inc
+            sed -E -i '/HARDWARE_INC/s/SET[[:space:]]+1/EQU 1/' \\
+                mgblib/src/hardware.inc
             make
             mkdir -p "$ROOT/acid2/dmg"
             cp build/dmg-acid2.gb "$ROOT/acid2/dmg/"
@@ -211,12 +227,16 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_DMG_ACID2"
         fi
 
-        if [ ! -f "$ROOT/acid2/cgb/cgb-acid2.gbc" ] || [ ! -f "$ROOT/acid2/cgb/reference.png" ]; then
+        if [ ! -f "$ROOT/acid2/cgb/cgb-acid2.gbc" ] \\
+            || [ ! -f "$ROOT/acid2/cgb/reference.png" ]; then
             rm -rf "$ROOT/acid2/cgb"
             TMP_CGB_ACID2="$(mktemp -d)"
-            git clone --recurse-submodules --depth 1 https://github.com/mattcurrie/cgb-acid2.git "$TMP_CGB_ACID2/cgb-acid2"
+            git clone --recurse-submodules --depth 1 \\
+                https://github.com/mattcurrie/cgb-acid2.git \\
+                "$TMP_CGB_ACID2/cgb-acid2"
             cd "$TMP_CGB_ACID2/cgb-acid2"
-            sed -E -i 's/^[[:space:]]*HARDWARE_INC[[:space:]]+SET[[:space:]]+1[[:space:]]*$/DEF HARDWARE_INC EQU 1/' mgblib/src/hardware.inc
+            sed -E -i '/HARDWARE_INC/s/SET[[:space:]]+1/EQU 1/' \\
+                mgblib/src/hardware.inc
             make
             mkdir -p "$ROOT/acid2/cgb"
             if [ -f build/cgb-acid2.gbc ]; then
@@ -229,10 +249,14 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_CGB_ACID2"
         fi
 
-        if [ ! -f "$ROOT/mealybug/roms/m3_bgp_change.gb" ] || [ ! -f "$ROOT/mealybug/expected/dmg/m3_bgp_change.png" ] || [ ! -f "$ROOT/mealybug/expected/cgb/m3_lcdc_bg_en_change2.png" ]; then
+        if [ ! -f "$ROOT/mealybug/roms/m3_bgp_change.gb" ] \\
+            || [ ! -f "$ROOT/mealybug/expected/dmg/m3_bgp_change.png" ] \\
+            || [ ! -f "$ROOT/mealybug/expected/cgb/m3_lcdc_bg_en_change2.png" ]; then
             rm -rf "$ROOT/mealybug"
             TMP_MEALYBUG="$(mktemp -d)"
-            git clone --depth 1 https://github.com/mattcurrie/mealybug-tearoom-tests.git "$TMP_MEALYBUG/mealybug"
+            git clone --depth 1 \\
+                https://github.com/mattcurrie/mealybug-tearoom-tests.git \\
+                "$TMP_MEALYBUG/mealybug"
             mkdir -p "$ROOT/mealybug/roms" "$ROOT/mealybug/expected"
             cd "$TMP_MEALYBUG/mealybug"
             unzip -o mealybug-tearoom-tests.zip -d "$ROOT/mealybug/roms/"
@@ -242,10 +266,13 @@ def fixture_bootstrap_command(root: Path) -> str:
             rm -rf "$TMP_MEALYBUG"
         fi
 
-        if [ ! -d "$ROOT/samesuite" ] || [ -z "$(find "$ROOT/samesuite" -name '*.gb' -print -quit 2>/dev/null)" ]; then
+        if [ ! -d "$ROOT/samesuite" ] \\
+            || [ -z "$(find "$ROOT/samesuite" -name '*.gb' -print -quit 2>/dev/null)" ]; then
             rm -rf "$ROOT/samesuite"
             TMP_SAMESUITE="$(mktemp -d)"
-            git clone --depth 1 https://github.com/LIJI32/SameSuite.git "$TMP_SAMESUITE/samesuite"
+            git clone --depth 1 \\
+                https://github.com/LIJI32/SameSuite.git \\
+                "$TMP_SAMESUITE/samesuite"
             cd "$TMP_SAMESUITE/samesuite"
             make
             mkdir -p "$ROOT/samesuite"

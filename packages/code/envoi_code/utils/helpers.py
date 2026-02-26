@@ -73,10 +73,15 @@ print = tprint
 
 def load_environment_files(
     env_dir: Path,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+]:
     """Load all source files from an environment directory for sandbox upload.
 
-    Returns three dicts mapping relative paths to file contents: (py, c, txt).
+    Returns dicts mapping relative paths to file contents: (py, c, txt, sh).
     These get passed to environment_upload_items() to produce sandbox paths.
     """
     py_files = {
@@ -91,7 +96,11 @@ def load_environment_files(
         str(p.relative_to(env_dir)): p.read_text()
         for p in env_dir.rglob("*.txt")
     }
-    return py_files, c_files, txt_files
+    sh_files = {
+        str(p.relative_to(env_dir)): p.read_text()
+        for p in env_dir.rglob("*.sh")
+    }
+    return py_files, c_files, txt_files, sh_files
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +245,7 @@ def environment_upload_items(
     py_files: dict[str, str],
     c_files: dict[str, str],
     txt_files: dict[str, str],
+    sh_files: dict[str, str],
 ) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     for rel, content in py_files.items():
@@ -243,6 +253,8 @@ def environment_upload_items(
     for rel, content in c_files.items():
         items.append((f"/environment/{rel}", content))
     for rel, content in txt_files.items():
+        items.append((f"/environment/{rel}", content))
+    for rel, content in sh_files.items():
         items.append((f"/environment/{rel}", content))
     return items
 
