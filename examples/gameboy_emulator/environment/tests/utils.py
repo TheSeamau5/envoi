@@ -375,6 +375,7 @@ async def run_rom_screenshot(
     sp = session_path()
     debug_dir = reset_debug_artifacts_dir(sp)
     screenshot_path = sp / "screenshot.png"
+    screenshot_path.unlink(missing_ok=True)
 
     cmd = (
         f"./gb_emu {shlex.quote(rom_path)} --headless"
@@ -385,8 +386,10 @@ async def run_rom_screenshot(
 
     result = await envoi.run(cmd, timeout_seconds=timeout_seconds)
 
-    # Did the emulator hit the breakpoint and produce a screenshot?
-    if result.exit_code != 0 or not screenshot_path.exists():
+    # Screenshot suites use LD B,B as a capture point; non-zero exit may still
+    # be expected depending on register conventions. The screenshot file itself
+    # is the authoritative signal that breakpoint capture occurred.
+    if not screenshot_path.exists():
         failure_stderr: str = (
             "emulator did not produce screenshot "
             f"(exit code {result.exit_code})"
@@ -424,6 +427,8 @@ async def run_rom_screenshot(
     stderr: str | None = None
     if not passed:
         parts: list[str] = []
+        if result.exit_code != 0:
+            parts.append(f"emulator exit code: {result.exit_code}")
         if diff_pixels > 0:
             parts.append(f"screenshot differs from reference by {diff_pixels} pixels")
         elif diff_pixels == -1:
