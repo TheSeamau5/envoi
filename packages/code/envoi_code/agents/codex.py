@@ -837,11 +837,11 @@ def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread 
     if stream is None:
         return None
 
-    def _drain() -> None:
+    def drain_stream() -> None:
         for line in stream:
             sink.append(line)
 
-    reader = threading.Thread(target=_drain, daemon=True)
+    reader = threading.Thread(target=drain_stream, daemon=True)
     reader.start()
     return reader
 
@@ -928,7 +928,7 @@ def start_progress_heartbeat(
     elapsed_offset_seconds: int = 0,
     interval_sec: int = 15,
 ) -> threading.Thread:
-    def _heartbeat() -> None:
+    def heartbeat_loop() -> None:
         while not stop_event.wait(interval_sec):
             turn_elapsed_seconds = int(
                 time.monotonic() - float(stats["started_at"])
@@ -948,7 +948,7 @@ def start_progress_heartbeat(
                 description="heartbeat",
             )
 
-    thread = threading.Thread(target=_heartbeat, daemon=True)
+    thread = threading.Thread(target=heartbeat_loop, daemon=True)
     thread.start()
     return thread
 

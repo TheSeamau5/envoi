@@ -19,19 +19,43 @@ _LOG_CALLBACK: ContextVar[Any] = ContextVar(
 _FILE_LOCK = threading.Lock()
 
 
-def _iso_now() -> str:
+def iso_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _json_default(value: Any) -> str:
+def json_default(value: Any) -> str:
     return str(value)
 
 
-def _default_component() -> str:
+def default_component() -> str:
     component = os.environ.get("ENVOI_LOG_COMPONENT", "").strip()
     if component:
         return component
     return "envoi"
+
+
+def component_name(default_name: str) -> str:
+    component = os.environ.get("ENVOI_LOG_COMPONENT", "").strip()
+    if component:
+        return component
+    return default_name
+
+
+def log_component_event(
+    default_name: str,
+    event: str,
+    *,
+    message: str = "",
+    level: str = "info",
+    **fields: Any,
+) -> dict[str, Any]:
+    return log_event(
+        component=component_name(default_name),
+        event=event,
+        message=message,
+        level=level,
+        **fields,
+    )
 
 
 def set_log_callback(callback: Any) -> Token[Any]:
@@ -70,13 +94,13 @@ def get_log_context() -> dict[str, Any]:
     return dict(_LOG_CONTEXT.get() or {})
 
 
-def _write_log_file(record: dict[str, Any]) -> None:
+def write_log_file(record: dict[str, Any]) -> None:
     log_path = (os.environ.get("ENVOI_LOG_PATH") or "").strip()
     if not log_path:
         return
     target = Path(log_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(record, ensure_ascii=False, default=_json_default)
+    line = json.dumps(record, ensure_ascii=False, default=json_default)
     with _FILE_LOCK:
         with target.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
@@ -91,9 +115,9 @@ def log_event(
     **fields: Any,
 ) -> dict[str, Any]:
     base = get_log_context()
-    resolved_component = component or _default_component()
+    resolved_component = component or default_component()
     record: dict[str, Any] = {
-        "ts": _iso_now(),
+        "ts": iso_now(),
         "component": resolved_component,
         "event": event,
         "level": level,
@@ -112,5 +136,5 @@ def log_event(
         except Exception:
             pass
 
-    _write_log_file(record)
+    write_log_file(record)
     return record

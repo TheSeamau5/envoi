@@ -28,28 +28,28 @@ _NORMALIZE_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
 _NORMALIZE_QUOTED_RE = re.compile(r"'[^']+'|\"[^\"]+\"")
 
 
-def _str_or_none(value: Any) -> str | None:
+def str_or_none(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()
     return stripped if stripped else None
 
 
-def _int_or_default(value: object, *, default: int = 0) -> int:
+def int_or_default(value: object, *, default: int = 0) -> int:
     return value if isinstance(value, int) else default
 
 
-def _int_or_none(value: object) -> int | None:
+def int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _clip(text: str, limit: int = 240) -> str:
+def clip_text(text: str, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + " ..."
 
 
-def _normalize_kind(failure_type: str | None, message: str | None) -> str:
+def normalize_kind(failure_type: str | None, message: str | None) -> str:
     text = (message or "").lower()
     failure = (failure_type or "").lower()
     if "undefined reference" in text or "linker failed" in text:
@@ -71,7 +71,7 @@ def _normalize_kind(failure_type: str | None, message: str | None) -> str:
     return "evaluation_error"
 
 
-def _offset_to_line_col(source: str, offset: int) -> tuple[int, int]:
+def offset_to_line_col(source: str, offset: int) -> tuple[int, int]:
     bounded = max(0, min(offset, len(source)))
     line = 1
     col = 1
@@ -84,14 +84,14 @@ def _offset_to_line_col(source: str, offset: int) -> tuple[int, int]:
     return line, col
 
 
-def _line_at(source: str, line_no: int) -> str:
+def line_at(source: str, line_no: int) -> str:
     lines = source.splitlines()
     if line_no <= 0 or line_no > len(lines):
         return ""
     return lines[line_no - 1]
 
 
-def _render_primary_span(
+def render_primary_span(
     *,
     source: str,
     line: int,
@@ -101,7 +101,7 @@ def _render_primary_span(
 ) -> str:
     if not source:
         return ""
-    target = _line_at(source, line)
+    target = line_at(source, line)
     if not target:
         return ""
 
@@ -123,14 +123,14 @@ def _render_primary_span(
     )
 
 
-def _render_diagnostic(
+def render_diagnostic(
     diagnostic: dict[str, Any],
     *,
     source: str | None,
 ) -> str:
-    severity = _str_or_none(diagnostic.get("severity")) or "error"
-    code = _str_or_none(diagnostic.get("code"))
-    message = _str_or_none(diagnostic.get("message")) or "diagnostic"
+    severity = str_or_none(diagnostic.get("severity")) or "error"
+    code = str_or_none(diagnostic.get("code"))
+    message = str_or_none(diagnostic.get("message")) or "diagnostic"
     primary = diagnostic.get("primary")
     header = (
         f"{severity}[{code}]: {message}"
@@ -139,37 +139,37 @@ def _render_diagnostic(
     )
     lines = [header]
     if isinstance(primary, dict):
-        file = _str_or_none(primary.get("file")) or "<source>"
-        line = _int_or_default(primary.get("line"), default=0)
-        col = _int_or_default(primary.get("col"), default=0)
-        end_col = _int_or_none(primary.get("end_col"))
+        file = str_or_none(primary.get("file")) or "<source>"
+        line = int_or_default(primary.get("line"), default=0)
+        col = int_or_default(primary.get("col"), default=0)
+        end_col = int_or_none(primary.get("end_col"))
         lines.append(f" --> {file}:{line}:{col}")
         if source:
             lines.append(
-                _render_primary_span(
+                render_primary_span(
                     source=source,
                     line=line,
                     col=col,
                     end_col=end_col,
-                    label=_str_or_none(primary.get("label")),
+                    label=str_or_none(primary.get("label")),
                 )
             )
     notes = diagnostic.get("notes")
     if isinstance(notes, list):
         for note in notes:
-            note_text = _str_or_none(note)
+            note_text = str_or_none(note)
             if note_text:
                 lines.append(f" note: {note_text}")
     help_list = diagnostic.get("help")
     if isinstance(help_list, list):
         for hint in help_list:
-            hint_text = _str_or_none(hint)
+            hint_text = str_or_none(hint)
             if hint_text:
                 lines.append(f" help: {hint_text}")
     return "\n".join(line for line in lines if line).strip()
 
 
-def _normalize_message_template(message: str) -> str:
+def normalize_message_template(message: str) -> str:
     value = _NORMALIZE_HEX_RE.sub("<hex>", message)
     value = _NORMALIZE_INT_RE.sub("<n>", value)
     value = _NORMALIZE_QUOTED_RE.sub("<q>", value)
@@ -177,17 +177,17 @@ def _normalize_message_template(message: str) -> str:
     return value
 
 
-def _cluster_key(
+def cluster_key(
     *,
     kind: str,
     code: str | None,
     message: str,
 ) -> str:
-    template = _normalize_message_template(message)
+    template = normalize_message_template(message)
     return f"{kind}|{code or '-'}|{template}"
 
 
-def _build_diag(
+def build_diagnostic(
     *,
     severity: Severity,
     kind: str,
@@ -201,7 +201,7 @@ def _build_diag(
     confidence: float,
     source: str | None,
 ) -> dict[str, Any]:
-    cluster = _cluster_key(
+    cluster = cluster_key(
         kind=kind,
         code=code,
         message=message,
@@ -219,14 +219,14 @@ def _build_diag(
         "confidence": max(0.0, min(1.0, confidence)),
         "cluster_key": cluster,
     }
-    diagnostic["rendered"] = _render_diagnostic(
+    diagnostic["rendered"] = render_diagnostic(
         diagnostic,
         source=source,
     )
     return diagnostic
 
 
-def _parse_rust_style(
+def parse_rust_style(
     text: str,
     *,
     source: str | None,
@@ -241,8 +241,8 @@ def _parse_rust_style(
             continue
 
         severity = header_match.group("severity")
-        code = _str_or_none(header_match.group("code"))
-        message = _str_or_none(header_match.group("message")) or "error"
+        code = str_or_none(header_match.group("code"))
+        message = str_or_none(header_match.group("message")) or "error"
 
         block_start = idx
         idx += 1
@@ -270,9 +270,9 @@ def _parse_rust_style(
                 notes.append(stripped.lstrip("= ").strip())
 
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity=severity,
-                kind=_normalize_kind("compile_error", message),
+                kind=normalize_kind("compile_error", message),
                 message=message,
                 code=code,
                 primary=primary,
@@ -285,7 +285,7 @@ def _parse_rust_style(
     return out
 
 
-def _parse_gcc_clang_style(
+def parse_gcc_clang_style(
     text: str,
     *,
     source: str | None,
@@ -296,14 +296,14 @@ def _parse_gcc_clang_style(
         if not match:
             continue
         severity = match.group("severity").replace("fatal ", "")
-        message = _str_or_none(match.group("message")) or "error"
+        message = str_or_none(match.group("message")) or "error"
         col = int(match.group("col"))
         end_col_value = match.group("endcol")
         end_col = int(end_col_value) if end_col_value is not None else None
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity=severity,
-                kind=_normalize_kind("compile_error", message),
+                kind=normalize_kind("compile_error", message),
                 message=message,
                 primary={
                     "file": match.group("file").strip(),
@@ -320,7 +320,7 @@ def _parse_gcc_clang_style(
     return out
 
 
-def _parse_byte_offset_style(
+def parse_byte_offset_style(
     text: str,
     *,
     source: str | None,
@@ -333,11 +333,11 @@ def _parse_byte_offset_style(
             continue
         if not source:
             continue
-        message = _str_or_none(line) or "error"
+        message = str_or_none(line) or "error"
         offset = int(match.group("offset"))
-        line_no, col = _offset_to_line_col(source, offset)
+        line_no, col = offset_to_line_col(source, offset)
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity="error",
                 kind="parse_error",
                 message=message,
@@ -355,7 +355,7 @@ def _parse_byte_offset_style(
     return out
 
 
-def _parse_linker_runtime(
+def parse_linker_runtime(
     text: str,
     *,
     source: str | None,
@@ -364,10 +364,10 @@ def _parse_linker_runtime(
     out: list[dict[str, Any]] = []
     if "undefined reference" in lowered:
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity="error",
                 kind="linker_error",
-                message=_clip(text),
+                message=clip_text(text),
                 source_origin="heuristic",
                 confidence=0.9,
                 source=source,
@@ -375,10 +375,10 @@ def _parse_linker_runtime(
         )
     if "already defined" in lowered and "symbol" in lowered:
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity="error",
                 kind="linker_error",
-                message=_clip(text),
+                message=clip_text(text),
                 source_origin="heuristic",
                 confidence=0.9,
                 source=source,
@@ -386,10 +386,10 @@ def _parse_linker_runtime(
         )
     if "exit code mismatch" in lowered or "stdout mismatch" in lowered:
         out.append(
-            _build_diag(
+            build_diagnostic(
                 severity="error",
                 kind="assertion_error",
-                message=_clip(text),
+                message=clip_text(text),
                 source_origin="heuristic",
                 confidence=0.88,
                 source=source,
@@ -398,7 +398,7 @@ def _parse_linker_runtime(
     return out
 
 
-def _dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None, str | None]] = set()
     for item in items:
@@ -411,10 +411,10 @@ def _dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 f"{primary.get('file')}:{primary.get('line')}:{primary.get('col')}"
             )
         key = (
-            _str_or_none(item.get("severity")) or "error",
-            _str_or_none(item.get("kind")) or "evaluation_error",
-            _str_or_none(item.get("code")),
-            (_str_or_none(item.get("message")) or "") + "|" + (primary_key or "-"),
+            str_or_none(item.get("severity")) or "error",
+            str_or_none(item.get("kind")) or "evaluation_error",
+            str_or_none(item.get("code")),
+            (str_or_none(item.get("message")) or "") + "|" + (primary_key or "-"),
         )
         if key in seen:
             continue
@@ -425,12 +425,12 @@ def _dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract structured diagnostics for a single test result."""
-    status = (_str_or_none(test.get("status")) or "failed").lower()
+    status = (str_or_none(test.get("status")) or "failed").lower()
     if status == "passed":
         return []
 
     existing = test.get("diagnostics")
-    source = _str_or_none(test.get("source"))
+    source = str_or_none(test.get("source"))
     if isinstance(existing, list) and existing:
         parsed_existing = [
             item for item in existing if isinstance(item, dict)
@@ -438,15 +438,15 @@ def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
         if parsed_existing:
             for item in parsed_existing:
                 if "rendered" not in item:
-                    item["rendered"] = _render_diagnostic(
+                    item["rendered"] = render_diagnostic(
                         item,
                         source=source,
                     )
                 if "cluster_key" not in item:
-                    kind = _str_or_none(item.get("kind")) or "evaluation_error"
-                    code = _str_or_none(item.get("code"))
-                    message = _str_or_none(item.get("message")) or "error"
-                    item["cluster_key"] = _cluster_key(
+                    kind = str_or_none(item.get("kind")) or "evaluation_error"
+                    code = str_or_none(item.get("code"))
+                    message = str_or_none(item.get("message")) or "error"
+                    item["cluster_key"] = cluster_key(
                         kind=kind,
                         code=code,
                         message=message,
@@ -455,45 +455,45 @@ def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
                     item["source_origin"] = "compiler_json"
                 if "confidence" not in item:
                     item["confidence"] = 0.98
-            return _dedupe_diagnostics(parsed_existing)
+            return dedupe_diagnostics(parsed_existing)
 
-    message = _str_or_none(test.get("message"))
-    stderr_tail = _str_or_none(test.get("stderr_tail"))
-    stdout_tail = _str_or_none(test.get("stdout_tail"))
-    default_file = (_str_or_none(test.get("test_id")) or "test") + ".c"
+    message = str_or_none(test.get("message"))
+    stderr_tail = str_or_none(test.get("stderr_tail"))
+    stdout_tail = str_or_none(test.get("stdout_tail"))
+    default_file = (str_or_none(test.get("test_id")) or "test") + ".c"
     combined_parts = [part for part in [message, stderr_tail, stdout_tail] if part]
     combined = "\n".join(combined_parts)
-    failure_type = _str_or_none(test.get("failure_type"))
+    failure_type = str_or_none(test.get("failure_type"))
 
     diagnostics: list[dict[str, Any]] = []
     if combined:
         diagnostics.extend(
-            _parse_rust_style(
+            parse_rust_style(
                 combined,
                 source=source,
             )
         )
         diagnostics.extend(
-            _parse_gcc_clang_style(
+            parse_gcc_clang_style(
                 combined,
                 source=source,
             )
         )
         diagnostics.extend(
-            _parse_byte_offset_style(
+            parse_byte_offset_style(
                 combined,
                 source=source,
                 default_file=default_file,
             )
         )
         diagnostics.extend(
-            _parse_linker_runtime(
+            parse_linker_runtime(
                 combined,
                 source=source,
             )
         )
 
-    diagnostics = _dedupe_diagnostics(diagnostics)
+    diagnostics = dedupe_diagnostics(diagnostics)
     if diagnostics:
         return diagnostics
 
@@ -503,9 +503,9 @@ def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
         or stdout_tail
         or "Test failed without diagnostic output."
     )
-    kind = _normalize_kind(failure_type, fallback_message)
+    kind = normalize_kind(failure_type, fallback_message)
     return [
-        _build_diag(
+        build_diagnostic(
             severity="error",
             kind=kind,
             message=fallback_message,
@@ -525,30 +525,30 @@ def cluster_from_tests(
     for test in tests:
         if not isinstance(test, dict):
             continue
-        status = (_str_or_none(test.get("status")) or "failed").lower()
+        status = (str_or_none(test.get("status")) or "failed").lower()
         if status == "passed":
             continue
         diagnostics = test.get("diagnostics")
         if not isinstance(diagnostics, list) or not diagnostics:
             continue
 
-        suite = _str_or_none(test.get("suite")) or "unknown_suite"
-        test_id = _str_or_none(test.get("test_id")) or "unknown_test"
+        suite = str_or_none(test.get("suite")) or "unknown_suite"
+        test_id = str_or_none(test.get("test_id")) or "unknown_test"
         for diag in diagnostics:
             if not isinstance(diag, dict):
                 continue
-            key = _str_or_none(diag.get("cluster_key"))
+            key = str_or_none(diag.get("cluster_key"))
             if key is None:
-                kind = _str_or_none(diag.get("kind")) or "evaluation_error"
-                code = _str_or_none(diag.get("code"))
-                message = _str_or_none(diag.get("message")) or "error"
-                key = _cluster_key(kind=kind, code=code, message=message)
+                kind = str_or_none(diag.get("kind")) or "evaluation_error"
+                code = str_or_none(diag.get("code"))
+                message = str_or_none(diag.get("message")) or "error"
+                key = cluster_key(kind=kind, code=code, message=message)
             bucket = buckets.get(key)
             if bucket is None:
                 bucket = {
                     "key": key,
-                    "kind": _str_or_none(diag.get("kind")) or "evaluation_error",
-                    "code": _str_or_none(diag.get("code")),
+                    "kind": str_or_none(diag.get("kind")) or "evaluation_error",
+                    "code": str_or_none(diag.get("code")),
                     "count": 0,
                     "suites": set(),
                     "sample_tests": [],
@@ -579,8 +579,8 @@ def cluster_from_tests(
     clusters.sort(
         key=lambda item: (
             -int(item.get("count", 0)),
-            _str_or_none(item.get("kind")) or "",
-            _str_or_none(item.get("key")) or "",
+            str_or_none(item.get("kind")) or "",
+            str_or_none(item.get("key")) or "",
         )
     )
     return clusters

@@ -1838,7 +1838,7 @@ def format_turn_end_evaluation_feedback(
     if isinstance(exit_code, int):
         lines.append(f"exit_code: {exit_code}")
 
-    def _truncate(value: str | None, limit: int) -> str | None:
+    def truncate_optional(value: str | None, limit: int) -> str | None:
         if value is None:
             return None
         if len(value) <= limit:
@@ -1908,12 +1908,12 @@ def format_turn_end_evaluation_feedback(
         if stdout is not None:
             lines.append(
                 "stdout: "
-                + (_truncate(stdout, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+                + (truncate_optional(stdout, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
             )
         if stderr is not None:
             lines.append(
                 "stderr: "
-                + (_truncate(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+                + (truncate_optional(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
             )
         if advisor_assessment:
             lines.extend([

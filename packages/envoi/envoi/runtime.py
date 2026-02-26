@@ -23,36 +23,21 @@ from fastapi.responses import JSONResponse
 
 from . import environment
 from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
-from .logging import bind_log_context, log_event
+from .logging import bind_log_context, component_name, log_component_event
 from .utils import Documents, parse_params, serialize_object, working_dir
 
 sessions: dict[str, dict[str, Any]] = {}
 
 _OPTIONAL_FILE = File(default=None)
-
-
-def _runtime_component() -> str:
-    return os.environ.get("ENVOI_LOG_COMPONENT", "").strip() or "runtime"
-
-
-def _log(
-    event: str,
-    *,
-    message: str = "",
-    level: str = "info",
-    **fields: Any,
-) -> None:
-    log_event(
-        component=_runtime_component(),
-        event=event,
-        message=message,
-        level=level,
-        **fields,
-    )
+RUNTIME_COMPONENT_DEFAULT = "runtime"
 
 
 def load_environment(module_file: str) -> None:
-    _log("environment.load.start", module_file=module_file)
+    log_component_event(
+        RUNTIME_COMPONENT_DEFAULT,
+        "environment.load.start",
+        module_file=module_file,
+    )
     environment.clear_environment()
 
     module_path = Path(module_file).resolve()
@@ -82,7 +67,7 @@ def load_environment(module_file: str) -> None:
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    _log(
+    log_component_event(RUNTIME_COMPONENT_DEFAULT,
         "environment.load.complete",
         module_file=str(module_path),
         has_setup=environment.setup_fn is not None,
@@ -175,7 +160,7 @@ async def spawn_worker(
     worker_env["ENVOI_LOG_PATH"] = worker_log_path
     worker_env["ENVOI_LOG_COMPONENT"] = "session_worker"
     worker_env["ENVOI_LOG_SESSION_ID"] = session_id
-    _log(
+    log_component_event(RUNTIME_COMPONENT_DEFAULT,
         "worker.spawn.start",
         session_id=session_id,
         port=port,
@@ -204,7 +189,7 @@ async def spawn_worker(
                 stderr_text = (await process.stderr.read()).decode(
                     errors="replace"
                 ).strip()
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "worker.spawn.failed",
                 level="error",
                 session_id=session_id,
@@ -220,7 +205,7 @@ async def spawn_worker(
         try:
             async with httpx.AsyncClient() as client:
                 await client.get(f"{worker_url}/docs", timeout=1.0)
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "worker.spawn.ready",
                 session_id=session_id,
                 port=port,
@@ -238,7 +223,7 @@ async def spawn_worker(
     except Exception:
         pass
 
-    _log(
+    log_component_event(RUNTIME_COMPONENT_DEFAULT,
         "worker.spawn.timeout",
         level="error",
         session_id=session_id,
@@ -271,7 +256,7 @@ def try_parse_json(response: httpx.Response) -> Any | None:
 async def session_timeout(session_id: str, timeout_seconds: int) -> None:
     await asyncio.sleep(timeout_seconds)
     if session_id in sessions:
-        _log(
+        log_component_event(RUNTIME_COMPONENT_DEFAULT,
             "session.timeout",
             session_id=session_id,
             timeout_seconds=timeout_seconds,
@@ -297,7 +282,7 @@ async def cleanup_session(session_id: str) -> None:
     session_state = sessions.pop(session_id, None)
     if session_state is None:
         return
-    _log(
+    log_component_event(RUNTIME_COMPONENT_DEFAULT,
         "session.cleanup.start",
         session_id=session_id,
         worker_url=session_state.get("url"),
@@ -321,13 +306,17 @@ async def cleanup_session(session_id: str) -> None:
             pass
 
     shutil.rmtree(session_state["dir"], ignore_errors=True)
-    _log("session.cleanup.complete", session_id=session_id)
+    log_component_event(
+        RUNTIME_COMPONENT_DEFAULT,
+        "session.cleanup.complete",
+        session_id=session_id,
+    )
 
 
 def build_app(module_file: str) -> FastAPI:
     module_path = str(Path(module_file).resolve())
     bind_log_context(
-        component=_runtime_component(),
+        component=component_name(RUNTIME_COMPONENT_DEFAULT),
         module_file=module_path,
     )
     load_environment(module_path)
@@ -344,7 +333,7 @@ def build_app(module_file: str) -> FastAPI:
         params: str,
     ) -> Any:
         started = time.monotonic()
-        _log("test.local.start", path=path or "/")
+        log_component_event(RUNTIME_COMPONENT_DEFAULT, "test.local.start", path=path or "/")
         if environment.setup_fn is not None:
             return JSONResponse(
                 status_code=400,
@@ -361,7 +350,7 @@ def build_app(module_file: str) -> FastAPI:
                 await extract_upload(file, temp_dir)
 
             parsed_params = parse_params(params)
-            documents = Documents._from_dir(temp_dir)
+            documents = Documents.from_dir(temp_dir)
 
             async def run_one(
                 test_path: str,
@@ -385,7 +374,7 @@ def build_app(module_file: str) -> FastAPI:
                     for test_path, (function, path_params) in matched.items()
                 ]
             )
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "test.local.complete",
                 path=path or "/",
                 matched=len(matched),
@@ -396,7 +385,7 @@ def build_app(module_file: str) -> FastAPI:
                 return results[0][1]
             return dict(results)
         except Exception as error:
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "test.local.failed",
                 level="error",
                 path=path or "/",
@@ -432,7 +421,7 @@ def build_app(module_file: str) -> FastAPI:
         process: asyncio.subprocess.Process | None = None
 
         try:
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "session.create.start",
                 session_id=session_id,
                 timeout_seconds=timeout,
@@ -471,7 +460,7 @@ def build_app(module_file: str) -> FastAPI:
                 "timeout_seconds": timeout,
                 "timeout_task": timeout_task,
             }
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "session.create.complete",
                 session_id=session_id,
                 timeout_seconds=timeout,
@@ -481,7 +470,7 @@ def build_app(module_file: str) -> FastAPI:
             )
             return {"session_id": session_id, "timeout": timeout}
         except Exception as error:
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "session.create.failed",
                 level="error",
                 session_id=session_id,
@@ -512,7 +501,7 @@ def build_app(module_file: str) -> FastAPI:
             + 30.0,
         )
         started = time.monotonic()
-        _log(
+        log_component_event(RUNTIME_COMPONENT_DEFAULT,
             "session.test.start",
             session_id=session_id,
             path=path or "/",
@@ -528,7 +517,7 @@ def build_app(module_file: str) -> FastAPI:
                     timeout=request_timeout,
                 )
         except Exception as error:
-            _log(
+            log_component_event(RUNTIME_COMPONENT_DEFAULT,
                 "session.test.unavailable",
                 level="error",
                 session_id=session_id,
@@ -541,7 +530,7 @@ def build_app(module_file: str) -> FastAPI:
             )
 
         payload = try_parse_json(response)
-        _log(
+        log_component_event(RUNTIME_COMPONENT_DEFAULT,
             "session.test.response",
             session_id=session_id,
             path=path or "/",
@@ -594,7 +583,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
-    _log(
+    log_component_event(RUNTIME_COMPONENT_DEFAULT,
         "runtime.start",
         file=args.file,
         host=args.host,

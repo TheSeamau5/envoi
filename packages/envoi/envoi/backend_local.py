@@ -23,29 +23,11 @@ from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
 
 from . import environment
-from .logging import bind_log_context, log_event
+from .logging import bind_log_context, component_name, log_component_event
 from .runtime import load_environment
 from .utils import Documents, parse_params, serialize_object, working_dir
 
-
-def _worker_component() -> str:
-    return os.environ.get("ENVOI_LOG_COMPONENT", "").strip() or "session_worker"
-
-
-def _log(
-    event: str,
-    *,
-    message: str = "",
-    level: str = "info",
-    **fields: Any,
-) -> None:
-    log_event(
-        component=_worker_component(),
-        event=event,
-        message=message,
-        level=level,
-        **fields,
-    )
+WORKER_COMPONENT_DEFAULT = "session_worker"
 
 
 def coerce_path_value(value: str) -> Any:
@@ -103,10 +85,10 @@ def matched_tests(path: str) -> dict[str, tuple[Callable[..., Any], dict[str, An
 
 def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     bind_log_context(
-        component=_worker_component(),
+        component=component_name(WORKER_COMPONENT_DEFAULT),
         session_id=os.environ.get("ENVOI_LOG_SESSION_ID"),
     )
-    _log(
+    log_component_event(WORKER_COMPONENT_DEFAULT,
         "worker.app.start",
         module_file=module_file,
         session_dir=session_dir,
@@ -117,27 +99,31 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     @app.post("/setup")
     async def setup(params: str = Form(default="{}")) -> Any:
         started = time.monotonic()
-        _log("worker.setup.start")
+        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.setup.start")
         if environment.setup_fn is None:
-            _log("worker.setup.skip", message="no setup fn")
+            log_component_event(
+                WORKER_COMPONENT_DEFAULT,
+                "worker.setup.skip",
+                message="no setup fn",
+            )
             return {"ok": True}
 
         token = working_dir.set(session_dir)
         try:
-            documents = Documents._from_dir(Path(session_dir))
+            documents = Documents.from_dir(Path(session_dir))
             kwargs = environment.resolve_kwargs(
                 environment.setup_fn,
                 documents,
                 parse_params(params),
             )
             await environment.setup_fn(**kwargs)
-            _log(
+            log_component_event(WORKER_COMPONENT_DEFAULT,
                 "worker.setup.complete",
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             return {"ok": True}
         except Exception as error:
-            _log(
+            log_component_event(WORKER_COMPONENT_DEFAULT,
                 "worker.setup.failed",
                 level="error",
                 error=str(error),
@@ -148,7 +134,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
 
     async def run_tests(path: str, params: str) -> Any:
         started = time.monotonic()
-        _log("worker.test.start", path=path or "/")
+        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.test.start", path=path or "/")
         matched = matched_tests(path)
         if not matched:
             return JSONResponse(status_code=404, content={"error": f"No tests match: {path}"})
@@ -177,7 +163,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 for test_path, (function, path_params) in matched.items()
             ]
         )
-        _log(
+        log_component_event(WORKER_COMPONENT_DEFAULT,
             "worker.test.complete",
             path=path or "/",
             matched=len(matched),
@@ -198,7 +184,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
 
     @app.delete("/teardown")
     async def teardown() -> Any:
-        _log("worker.teardown.start")
+        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.teardown.start")
         if environment.teardown_fn is not None:
             token = working_dir.set(session_dir)
             try:
@@ -206,7 +192,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
             finally:
                 working_dir.reset(token)
 
-        _log("worker.teardown.complete")
+        log_component_event(WORKER_COMPONENT_DEFAULT, "worker.teardown.complete")
         asyncio.get_event_loop().call_later(0.1, sys.exit, 0)
         return {"ok": True}
 
@@ -220,7 +206,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
 
-    _log(
+    log_component_event(WORKER_COMPONENT_DEFAULT,
         "worker.start",
         file=args.file,
         session_dir=args.session_dir,

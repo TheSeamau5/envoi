@@ -42,7 +42,7 @@ class Documents:
         return cls(file_path)
 
     @classmethod
-    def _from_dir(cls, directory: str | Path) -> Documents:
+    def from_dir(cls, directory: str | Path) -> Documents:
         instance = cls()
         instance._dir = str(directory)
         return instance

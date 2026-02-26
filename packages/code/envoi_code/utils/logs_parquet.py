@@ -39,13 +39,13 @@ _CORE_KEYS: set[str] = {
 }
 
 
-def _json_or_none(value: Any) -> str | None:
+def json_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-def _int_or_none(value: Any) -> int | None:
+def int_or_none(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float) and value.is_integer():
@@ -57,7 +57,7 @@ def _int_or_none(value: Any) -> int | None:
     return None
 
 
-def _str_or_none(value: Any) -> str | None:
+def str_or_none(value: Any) -> str | None:
     if isinstance(value, str):
         stripped = value.strip()
         return stripped if stripped else None
@@ -81,17 +81,17 @@ def log_records_to_rows(
             {
                 "trajectory_id": trajectory_id,
                 "seq": idx,
-                "ts": _str_or_none(record.get("ts")),
-                "component": _str_or_none(record.get("component")),
-                "event": _str_or_none(record.get("event")),
-                "level": _str_or_none(record.get("level")),
-                "message": _str_or_none(record.get("message")),
-                "turn": _int_or_none(record.get("turn")),
-                "part": _int_or_none(record.get("part")),
-                "git_commit": _str_or_none(record.get("git_commit")),
-                "session_id": _str_or_none(record.get("session_id")),
-                "source": _str_or_none(record.get("source")),
-                "fields": _json_or_none(extras) if extras else None,
+                "ts": str_or_none(record.get("ts")),
+                "component": str_or_none(record.get("component")),
+                "event": str_or_none(record.get("event")),
+                "level": str_or_none(record.get("level")),
+                "message": str_or_none(record.get("message")),
+                "turn": int_or_none(record.get("turn")),
+                "part": int_or_none(record.get("part")),
+                "git_commit": str_or_none(record.get("git_commit")),
+                "session_id": str_or_none(record.get("session_id")),
+                "source": str_or_none(record.get("source")),
+                "fields": json_or_none(extras) if extras else None,
             }
         )
     return rows

@@ -287,7 +287,7 @@ async def upload_files_parallel(
 
     semaphore = asyncio.Semaphore(bounded)
 
-    async def _upload(path: str, content: str) -> None:
+    async def upload_one(path: str, content: str) -> None:
         if log_upload:
             print(f"[setup][upload] {path}")
         async with semaphore:
@@ -299,7 +299,7 @@ async def upload_files_parallel(
             )
 
     await asyncio.gather(
-        *[_upload(path, content) for path, content in uploads],
+        *[upload_one(path, content) for path, content in uploads],
     )
 
 
