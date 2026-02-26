@@ -39,18 +39,19 @@ class E2BSandbox:
         """Create a new E2B sandbox from a pre-built template.
 
         Reads ``config.template`` (falls back to ``E2B_TEMPLATE`` env var
-        or ``"envoi-trace"``). Ignores ``config.image_requirements`` and
+        when set). Ignores ``config.image_requirements`` and
         ``config.environment_dockerfile`` — E2B templates are pre-built.
         """
         if config.environment_docker_build_args:
-            raise RuntimeError(
-                "E2B backend does not support per-run Docker build args. "
-                "Use a pre-built E2B template or switch to --sandbox modal."
+            arg_keys = ", ".join(sorted(config.environment_docker_build_args.keys()))
+            builtins.print(
+                "[e2b] ignoring per-run Docker build args "
+                f"(template is pre-built): {arg_keys}"
             )
         if config.cpu is not None or config.memory_mb is not None:
-            raise RuntimeError(
-                "E2B backend does not support per-run cpu/memory requests. "
-                "Configure resources in the E2B template instead."
+            builtins.print(
+                "[e2b] ignoring per-run cpu/memory request "
+                "(configure resources in the template)"
             )
         try:
             e2b_module = importlib.import_module(
@@ -71,23 +72,20 @@ class E2BSandbox:
                 "AsyncSandbox"
             )
 
-        resolved_template = (
-            config.template
-            or os.environ.get("E2B_TEMPLATE", "envoi-trace")
-        )
+        resolved_template = config.template or os.environ.get("E2B_TEMPLATE")
         # E2B Pro caps at 24 h; hobby at 1 h.
         capped_timeout = min(config.timeout, 86400)
-        kwargs: dict[str, Any] = {
-            "template": resolved_template,
-            "timeout": capped_timeout,
-        }
+        kwargs: dict[str, Any] = {"timeout": capped_timeout}
+        if resolved_template:
+            kwargs["template"] = resolved_template
         if config.api_key:
             kwargs["api_key"] = config.api_key
         inner = await async_sandbox.create(**kwargs)
+        template_label = resolved_template or "<provider-default>"
         builtins.print(
             f"[e2b] sandbox created: "
             f"id={inner.sandbox_id} "
-            f"template={resolved_template}"
+            f"template={template_label}"
         )
         return E2BSandbox(inner)
 

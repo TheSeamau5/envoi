@@ -2279,23 +2279,51 @@ async def run_trajectory(
         if resolved_docker_plan is not None
         else {}
     )
-    if sandbox_provider == "e2b" and resolved_docker_plan is not None:
-        if docker_build_args or dockerfile_rel_path != "Dockerfile":
-            raise RuntimeError(
-                "E2B backend cannot honor environment Docker plan overrides "
-                "(dockerfile path/build args) in v1. "
-                "Use a compatible E2B template or switch to --sandbox modal."
+    if sandbox_provider == "e2b":
+        if docker_build_args:
+            ignored_arg_keys = ", ".join(sorted(docker_build_args.keys()))
+            print(
+                "[sandbox][e2b] ignoring environment Docker build args "
+                f"(template is pre-built): {ignored_arg_keys}"
             )
-    effective_sandbox_cpu = merge_resource_request(
-        resource_name="sandbox cpu",
-        requested=sandbox_cpu,
-        minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
-    )
-    effective_sandbox_memory_mb = merge_resource_request(
-        resource_name="sandbox memory_mb",
-        requested=sandbox_memory_mb,
-        minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
-    )
+            docker_build_args = {}
+        if dockerfile_rel_path != "Dockerfile":
+            print(
+                "[sandbox][e2b] ignoring environment Dockerfile override "
+                f"(template is pre-built): {dockerfile_rel_path}"
+            )
+
+    if sandbox_provider == "modal":
+        effective_sandbox_cpu = merge_resource_request(
+            resource_name="sandbox cpu",
+            requested=sandbox_cpu,
+            minimum=effective_resolved_env_params.sandbox_requirements.min_cpu,
+        )
+        effective_sandbox_memory_mb = merge_resource_request(
+            resource_name="sandbox memory_mb",
+            requested=sandbox_memory_mb,
+            minimum=effective_resolved_env_params.sandbox_requirements.min_memory_mb,
+        )
+    else:
+        if (
+            sandbox_cpu is not None
+            or effective_resolved_env_params.sandbox_requirements.min_cpu is not None
+        ):
+            print(
+                "[sandbox][e2b] ignoring cpu request/minimum "
+                "(configure resources in the E2B template)"
+            )
+        if (
+            sandbox_memory_mb is not None
+            or effective_resolved_env_params.sandbox_requirements.min_memory_mb
+            is not None
+        ):
+            print(
+                "[sandbox][e2b] ignoring memory request/minimum "
+                "(configure resources in the E2B template)"
+            )
+        effective_sandbox_cpu = None
+        effective_sandbox_memory_mb = None
     run_metadata: dict[str, Any] = {
         "raw_params": raw_params_map,
         "resolved_task": {

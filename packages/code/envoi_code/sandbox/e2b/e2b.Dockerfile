@@ -3,7 +3,7 @@
 # Build once with:
 #   cd sandbox/e2b && e2b template build --name envoi-trace --dockerfile e2b.Dockerfile
 #
-# The resulting template ID goes in E2B_TEMPLATE (defaults to "envoi-trace").
+# The resulting template ID goes in E2B_TEMPLATE.
 
 FROM ubuntu:24.04
 
