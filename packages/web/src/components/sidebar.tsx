@@ -44,13 +44,15 @@ export function Sidebar() {
       style={{ width: spring.width }}
     >
       {/* Header: logo + collapse toggle */}
-      <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border px-3">
-        <animated.span
-          className="flex-1 text-sm font-bold whitespace-nowrap text-envoi-accent"
-          style={{ opacity: spring.contentOpacity }}
-        >
-          envoi
-        </animated.span>
+      <div className={`flex h-[41px] shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}>
+        {!collapsed && (
+          <animated.span
+            className="min-w-0 flex-1 overflow-hidden text-sm font-bold whitespace-nowrap text-envoi-accent"
+            style={{ opacity: spring.contentOpacity }}
+          >
+            envoi
+          </animated.span>
+        )}
         <Tooltip>
           <TooltipTrigger asChild>
             <button

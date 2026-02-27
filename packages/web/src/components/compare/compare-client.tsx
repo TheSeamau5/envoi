@@ -2,6 +2,10 @@
  * Compare Client — main client component for the Compare page.
  * Manages mode toggle (Trace vs Setup), trace selection, tab navigation,
  * sorting, and model filtering.
+ *
+ * Trace colors are stable: each trace is assigned a color index on selection
+ * and keeps it even when other traces are deselected. Assignments are persisted
+ * to localStorage with graceful error handling for stale/missing trace IDs.
  */
 
 "use client";
@@ -46,23 +50,78 @@ type CompareClientProps = {
 
 type SortKey = "score" | "date";
 
+const STORAGE_KEY = "envoi:compare-trace-colors";
+
 const TABS: { key: CompareTab; label: string; icon: typeof TrendingUp }[] = [
   { key: "curves", label: "Progress Curves", icon: TrendingUp },
   { key: "milestones", label: "Milestone Divergence", icon: Target },
   { key: "suites", label: "Suite Breakdown", icon: LayoutGrid },
 ];
 
+/** Find the smallest non-negative integer not in `usedSet` */
+function minAvailableColor(usedSet: Set<number>): number {
+  let idx = 0;
+  while (usedSet.has(idx)) idx++;
+  return idx;
+}
+
 export function CompareClient({ allTraces }: CompareClientProps) {
   const [mode, setMode] = useState<CompareMode>("traces");
-  const [selectedIds, setSelectedIds] = useState<string[]>(() => {
-    return allTraces.slice(0, 2).map((trace) => trace.id);
+
+  /**
+   * colorMap: traceId → colorIndex.
+   * Keys are the selected trace IDs; values are their assigned color indices.
+   * Initialized with the first 2 traces; hydrated from localStorage on mount.
+   */
+  const [colorMap, setColorMap] = useState<Record<string, number>>(() => {
+    const initial: Record<string, number> = {};
+    allTraces.slice(0, 2).forEach((trace, idx) => {
+      initial[trace.id] = idx;
+    });
+    return initial;
   });
+
+  /** Hydrate from localStorage (once, on mount) */
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      if (!stored) return;
+      const parsed: unknown = JSON.parse(stored);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      const validIds = new Set(allTraces.map((t) => t.id));
+      const cleaned: Record<string, number> = {};
+      for (const [id, colorIdx] of Object.entries(parsed as Record<string, unknown>)) {
+        if (validIds.has(id) && typeof colorIdx === "number" && colorIdx >= 0) {
+          cleaned[id] = colorIdx;
+        }
+      }
+      if (Object.keys(cleaned).length > 0) {
+        setColorMap(cleaned);
+      }
+    } catch {
+      // Bad data — keep default
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Persist colorMap to localStorage on every change */
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(colorMap));
+    } catch {
+      // Storage full or blocked — silently ignore
+    }
+  }, [colorMap]);
+
   const [activeTab, setActiveTab] = useState<CompareTab>("curves");
   const [sortBy, setSortBy] = useState<SortKey>("score");
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [focusedIndex, setFocusedIndex] = useState(0);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const focusedRowRef = useRef<HTMLDivElement>(null);
+
+  /** Derive selected IDs from colorMap keys */
+  const selectedIds = useMemo(() => Object.keys(colorMap), [colorMap]);
 
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
@@ -84,6 +143,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     return sorted;
   }, [filteredTraces, sortBy]);
 
+  /** Selected traces (ordered by insertion into colorMap) */
   const selectedTraces = useMemo(
     () =>
       selectedIds
@@ -92,17 +152,31 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     [selectedIds, allTraces],
   );
 
-  function toggleTrace(traceId: string) {
-    setSelectedIds((prev) => {
-      if (prev.includes(traceId)) {
-        return prev.filter((existingId) => existingId !== traceId);
-      }
-      return [...prev, traceId];
-    });
-  }
+  /** Color indices parallel to selectedTraces */
+  const colorIndices = useMemo(
+    () => selectedTraces.map((trace) => colorMap[trace.id] ?? 0),
+    [selectedTraces, colorMap],
+  );
 
-  function getSelectionIndex(traceId: string): number {
-    return selectedIds.indexOf(traceId);
+  /** Toggle trace selection — assigns min available color on select */
+  const toggleTrace = useCallback((traceId: string) => {
+    setColorMap((prev) => {
+      if (traceId in prev) {
+        // Deselect: remove from map, other colors are untouched
+        const next = { ...prev };
+        delete next[traceId];
+        return next;
+      }
+      // Select: pick the smallest unused color index
+      const usedColors = new Set(Object.values(prev));
+      const newColor = minAvailableColor(usedColors);
+      return { ...prev, [traceId]: newColor };
+    });
+  }, []);
+
+  /** Get the assigned color index for a trace (-1 if not selected) */
+  function getColorIndex(traceId: string): number {
+    return colorMap[traceId] ?? -1;
   }
 
   /** Unique model names for the filter dropdown */
@@ -157,7 +231,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           break;
       }
     },
-    [sortedTraces, focusedIndex],
+    [sortedTraces, focusedIndex, toggleTrace],
   );
 
   return (
@@ -314,11 +388,11 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             {/* Trace list */}
             <div className="flex-1 overflow-y-auto">
               {sortedTraces.map((trace, traceIndex) => {
-                const selIndex = getSelectionIndex(trace.id);
-                const isSelected = selIndex >= 0;
+                const colorIdx = getColorIndex(trace.id);
+                const isSelected = colorIdx >= 0;
                 const isFocused = traceIndex === focusedIndex;
                 const color = isSelected
-                  ? TRACE_COLORS[selIndex % TRACE_COLORS.length]!
+                  ? TRACE_COLORS[colorIdx % TRACE_COLORS.length]!
                   : undefined;
 
                 return (
@@ -404,13 +478,13 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             ) : (
               <>
                 {activeTab === "curves" && (
-                  <ProgressCurves traces={selectedTraces} />
+                  <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} />
                 )}
                 {activeTab === "milestones" && (
-                  <MilestoneTable traces={selectedTraces} />
+                  <MilestoneTable traces={selectedTraces} colorIndices={colorIndices} />
                 )}
                 {activeTab === "suites" && (
-                  <SuiteBreakdown traces={selectedTraces} />
+                  <SuiteBreakdown traces={selectedTraces} colorIndices={colorIndices} />
                 )}
               </>
             )}

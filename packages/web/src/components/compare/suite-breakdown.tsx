@@ -16,6 +16,8 @@ import { formatPercent } from "@/lib/utils";
 
 type SuiteBreakdownProps = {
   traces: Trajectory[];
+  /** Stable color index for each trace (parallel to `traces` array) */
+  colorIndices?: number[];
 };
 
 /** Mini chart layout constants */
@@ -68,12 +70,14 @@ function MiniSuiteChart({
   suiteName,
   suiteTotal,
   traces,
+  colorIndices,
   hoveredTrace,
   onHover,
 }: {
   suiteName: string;
   suiteTotal: number;
   traces: Trajectory[];
+  colorIndices?: number[];
   hoveredTrace: number | undefined;
   onHover: (index: number | undefined) => void;
 }) {
@@ -141,7 +145,7 @@ function MiniSuiteChart({
 
         {/* Area fills */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
           return (
             <path
               key={`area-${trace.id}`}
@@ -154,7 +158,7 @@ function MiniSuiteChart({
 
         {/* Lines */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
           return (
             <path
               key={`line-${trace.id}`}
@@ -172,7 +176,7 @@ function MiniSuiteChart({
 
         {/* Endpoint labels */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
           const lastCommit = trace.commits[trace.commits.length - 1];
           if (!lastCommit) return undefined;
           const passed = lastCommit.suiteState[suiteName] ?? 0;
@@ -193,7 +197,7 @@ function MiniSuiteChart({
   );
 }
 
-export function SuiteBreakdown({ traces }: SuiteBreakdownProps) {
+export function SuiteBreakdown({ traces, colorIndices }: SuiteBreakdownProps) {
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
 
   return (
@@ -206,6 +210,7 @@ export function SuiteBreakdown({ traces }: SuiteBreakdownProps) {
             suiteName={suite.name}
             suiteTotal={suite.total}
             traces={traces}
+            colorIndices={colorIndices}
             hoveredTrace={hoveredTrace}
             onHover={setHoveredTrace}
           />
@@ -223,7 +228,7 @@ export function SuiteBreakdown({ traces }: SuiteBreakdownProps) {
             Total
           </span>
           {traces.map((_trace, traceIndex) => {
-            const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
             return (
               <span
                 key={`col-${traceIndex}`}
@@ -269,7 +274,7 @@ export function SuiteBreakdown({ traces }: SuiteBreakdownProps) {
                 const lastCommit = trace.commits[trace.commits.length - 1];
                 const passed = lastCommit?.suiteState[suite.name] ?? 0;
                 const pct = (passed / suite.total) * 100;
-                const traceColor = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+                const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
 
                 return (
                   <div

@@ -133,6 +133,8 @@ export type MilestoneDef = {
   label: string;
   suite: string | undefined;
   threshold: number;
+  /** Grouping key for table column separators (e.g. "overall", "basics") */
+  group: string;
 };
 
 /** Compare page mode */

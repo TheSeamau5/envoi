@@ -17,6 +17,8 @@ import { formatDuration, formatPercent } from "@/lib/utils";
 
 type ProgressCurvesProps = {
   traces: Trajectory[];
+  /** Stable color index for each trace (parallel to `traces` array) */
+  colorIndices?: number[];
 };
 
 /** Chart layout constants */
@@ -72,7 +74,7 @@ function buildAreaPath(commits: Commit[]): string {
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
-export function ProgressCurves({ traces }: ProgressCurvesProps) {
+export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
 
   const xTicks = getXTicks();
@@ -171,7 +173,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
 
           {/* Trace area fills (rendered first, behind lines) */}
           {traces.map((trace, traceIndex) => {
-            const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
             return (
               <path
                 key={`area-${trace.id}`}
@@ -184,7 +186,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
 
           {/* Trace lines */}
           {traces.map((trace, traceIndex) => {
-            const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
             return (
               <path
                 key={`line-${trace.id}`}
@@ -202,7 +204,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
 
           {/* Regression dots (red circles) */}
           {traces.map((trace, traceIndex) => {
-            const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
             return trace.commits
               .filter((commit) => commit.isRegression)
               .map((commit) => (
@@ -225,7 +227,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
 
           {/* Endpoint score labels */}
           {traces.map((trace, traceIndex) => {
-            const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
             const lastCommit = trace.commits[trace.commits.length - 1];
             if (!lastCommit) return undefined;
             return (
@@ -250,7 +252,7 @@ export function ProgressCurves({ traces }: ProgressCurvesProps) {
       {/* Stat cards per trace */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {traces.map((trace, traceIndex) => {
-          const color = TRACE_COLORS[traceIndex % TRACE_COLORS.length]!;
+          const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
           const lastCommit = trace.commits[trace.commits.length - 1];
           const regressionCount = trace.commits.filter((commit) => commit.isRegression).length;
           const maxPassed = Math.max(...trace.commits.map((commit) => commit.totalPassed));
