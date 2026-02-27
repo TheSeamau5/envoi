@@ -276,6 +276,24 @@ export function ProgressCurve({
           strokeWidth={1.2}
         />
 
+        {/* Percentage label above selected commit */}
+        {commits[selectedIndex] && (() => {
+          const commit = commits[selectedIndex]!;
+          const xPos = toX(selectedIndex, commits.length);
+          const yPos = toY(getYValue(commit, activeSuite), yMax);
+          const pct = Math.round((getYValue(commit, activeSuite) / yMax) * 100);
+          return (
+            <text
+              x={xPos}
+              y={yPos - 12}
+              textAnchor="middle"
+              style={{ fontSize: "10px", fill: T.accent, fontWeight: 700 }}
+            >
+              {pct}%
+            </text>
+          );
+        })()}
+
         {/* Commit dots */}
         {commits.map((commit, dotIndex) => {
           const xPos = toX(dotIndex, commits.length);

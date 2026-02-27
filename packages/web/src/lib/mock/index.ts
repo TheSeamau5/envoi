@@ -329,7 +329,13 @@ function generateTrajectoryFromConfig(
   const suiteState: SuiteState = { basics: 0, wacct: 0, c_testsuite: 0, torture: 0 };
   let totalPassed = 0;
   const timePerCommit = durationMinutes / numCommits;
-  const startDate = new Date("2025-01-15T10:00:00Z");
+  const baseDate = new Date("2025-01-15T10:00:00Z");
+  const dayOffset = Math.floor(rng.next() * 60) - 30;
+  const hourOffset = Math.floor(rng.next() * 14);
+  const minuteOffset = Math.floor(rng.next() * 60);
+  const startDate = new Date(
+    baseDate.getTime() + dayOffset * 86400000 + hourOffset * 3600000 + minuteOffset * 60000,
+  );
 
   for (let commitIdx = 0; commitIdx < numCommits; commitIdx++) {
     const phase = commitIdx / numCommits;

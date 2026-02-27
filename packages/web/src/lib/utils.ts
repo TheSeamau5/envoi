@@ -80,14 +80,16 @@ export function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
-/** Format an ISO date string as a short date (e.g., "Jan 15, 2025") */
+/** Format an ISO date string as YY/MM/DD HH:MM:SS */
 export function formatDate(isoString: string): string {
   const date = new Date(isoString);
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  const yy = String(date.getFullYear()).slice(2);
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${yy}/${mm}/${dd} ${hh}:${min}:${ss}`;
 }
 
 /** Format an ISO date string as a short date + time (e.g., "Jan 15, 10:00") */

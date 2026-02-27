@@ -16,6 +16,7 @@ import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
 import type { Trajectory, DetailLeftTab, DetailRightTab } from "@/lib/types";
 import { SUITES } from "@/lib/constants";
+import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
 import {
   Tooltip,
@@ -64,24 +65,21 @@ export function TrajectoryDetail({
    */
   const [rightPanelOpen, setRightPanelOpenRaw] = useState(initialRightPanelOpen);
   const [dividerPct, setDividerPctRaw] = useState(initialDividerPct);
+  const [dragging, setDragging] = useState(false);
 
   const setRightPanelOpen = useCallback((open: boolean) => {
     setRightPanelOpenRaw(open);
     setLayoutCookie("rightPanelOpen", open);
   }, []);
 
-  const setDividerPct = useCallback((pct: number) => {
-    setDividerPctRaw(pct);
-    setLayoutCookie("dividerPct", pct);
-  }, []);
-
-  /** Animated panel layout */
+  /** Animated panel layout — immediate during drag for responsiveness */
   const panelSpring = useSpring({
     leftWidth: rightPanelOpen ? dividerPct : 100,
     rightWidth: rightPanelOpen ? 100 - dividerPct : 0,
-    dividerWidth: rightPanelOpen ? 5 : 0,
+    dividerWidth: rightPanelOpen ? 9 : 0,
     rightOpacity: rightPanelOpen ? 1 : 0,
     config: { tension: 300, friction: 30 },
+    immediate: (key: string) => dragging && (key === "leftWidth" || key === "rightWidth"),
   });
 
   /** Refs for drag + keyboard */
@@ -153,31 +151,39 @@ export function TrajectoryDetail({
     containerRef.current?.focus();
   }, []);
 
-  /** Draggable divider handlers */
+  /** Draggable divider handlers — uses raw state during drag (no cookie, no spring) for responsiveness */
   const handleDividerMouseDown = useCallback(() => {
     isDragging.current = true;
+    setDragging(true);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
+
+    let lastPct = 0;
 
     const handleMouseMove = (event: MouseEvent) => {
       if (!isDragging.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const percentage = ((event.clientX - rect.left) / rect.width) * 100;
-      const clamped = Math.max(25, Math.min(75, percentage));
-      setDividerPct(Math.round(clamped));
+      const clamped = Math.round(Math.max(25, Math.min(75, percentage)));
+      lastPct = clamped;
+      setDividerPctRaw(clamped);
     };
 
     const handleMouseUp = () => {
       isDragging.current = false;
+      setDragging(false);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      if (lastPct > 0) {
+        setLayoutCookie("dividerPct", lastPct);
+      }
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
-  }, [setDividerPct]);
+  }, []);
 
   if (!selectedCommit) return undefined;
 
@@ -302,7 +308,7 @@ export function TrajectoryDetail({
       {/* Draggable divider — always mounted, width animates to 0 */}
       <animated.div
         onMouseDown={rightPanelOpen ? handleDividerMouseDown : undefined}
-        className="flex shrink-0 items-center justify-center border-x border-envoi-border-light hover:bg-envoi-accent-bg active:bg-envoi-accent-bg"
+        className="group relative flex shrink-0 items-center justify-center"
         style={{
           width: panelSpring.dividerWidth.to((v) => `${v}px`),
           cursor: rightPanelOpen ? "col-resize" : "default",
@@ -310,7 +316,17 @@ export function TrajectoryDetail({
           overflow: "hidden",
         }}
       >
-        <div className="h-[24px] w-[2px] rounded-full bg-envoi-border" />
+        {/* Thin vertical line */}
+        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-envoi-border-light" />
+        {/* Capsule handle — turns orange on hover/drag */}
+        <div
+          className={`relative z-10 h-[36px] w-[4px] rounded-full transition-colors ${
+            dragging
+              ? ""
+              : "bg-envoi-border group-hover:bg-envoi-accent"
+          }`}
+          style={dragging ? { background: T.accent } : undefined}
+        />
       </animated.div>
 
       {/* Right panel — always mounted, width + opacity animated */}

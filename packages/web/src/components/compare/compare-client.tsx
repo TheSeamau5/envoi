@@ -438,6 +438,16 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                       <span className="text-[9px] text-envoi-text-dim">
                         {formatDate(trace.startedAt)}
                       </span>
+                      {/* Score bar */}
+                      <div className="mt-[1px] h-[3px] w-full rounded-full bg-envoi-border-light">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${(trace.finalPassed / TOTAL_TESTS) * 100}%`,
+                            background: isSelected && color ? color.line : T.textDim,
+                          }}
+                        />
+                      </div>
                     </div>
 
                     {/* Score */}

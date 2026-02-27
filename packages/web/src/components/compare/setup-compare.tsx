@@ -402,7 +402,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               return (
                 <span
                   key={group.key}
-                  className="flex min-w-[130px] flex-1 items-center gap-[4px] pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
+                  className="flex min-w-[160px] flex-1 items-center gap-[4px] border-l border-envoi-border-light pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
                   style={{ color: color.line }}
                 >
                   <span
@@ -440,9 +440,9 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                   return (
                     <div
                       key={`${group.key}-${suite.name}`}
-                      className="flex min-w-[130px] flex-1 items-center gap-2 pl-4"
+                      className="flex min-w-[160px] flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
                     >
-                      <div className="h-[4px] w-[50px] rounded-full bg-envoi-border-light">
+                      <div className="h-[4px] w-[80px] rounded-full bg-envoi-border-light">
                         <div
                           className="h-full rounded-full"
                           style={{ width: `${pct}%`, background: color.line }}
@@ -528,7 +528,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                             {trace.duration}
                           </span>
                           <div className="flex flex-1 items-center gap-2">
-                            <div className="h-[4px] w-[60px] rounded-full bg-envoi-border-light">
+                            <div className="h-[4px] w-[90px] rounded-full bg-envoi-border-light">
                               <div
                                 className="h-full rounded-full"
                                 style={{
