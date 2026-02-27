@@ -21,22 +21,7 @@ from .utils import TestResult, fixture_path, run_case, select_cases, to_result
 wacct = envoi.suite("wacct")
 
 
-@wacct.test()
-async def run_wacct_all(
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    return await run_wacct_tests(
-        chapter=None,
-        n_tests=n_tests,
-        test_name=test_name,
-        offset=offset,
-    )
-
-
-@wacct.test("chapter_{chapter}")
-async def run_wacct_tests(
+async def run_wacct_tests_impl(
     chapter: int | None = None,
     n_tests: int = 0,
     test_name: str | None = None,
@@ -104,3 +89,32 @@ async def run_wacct_tests(
             f"No WACCT cases discovered for {chapter_label}; check fixtures under {tests_dir}"
         )
     return to_result([await run_case(c) for c in selected])
+
+
+@wacct.test()
+async def run_wacct_all(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_wacct_tests_impl(
+        chapter=None,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
+
+
+@wacct.test("chapter_{chapter}")
+async def run_wacct_tests(
+    chapter: int | None = None,
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_wacct_tests_impl(
+        chapter=chapter,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
