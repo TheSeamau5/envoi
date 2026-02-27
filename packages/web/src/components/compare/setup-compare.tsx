@@ -166,7 +166,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
   const yTicks = getYTicks();
 
   return (
-    <div className="flex h-full gap-0">
+    <div className="flex flex-1 gap-0 overflow-hidden">
       {/* Sidebar */}
       <div className="flex w-[260px] shrink-0 flex-col border-r border-envoi-border">
         {/* Dimension chips header */}
@@ -184,7 +184,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               <button
                 key={dimKey}
                 onClick={() => removeDimension(dimKey)}
-                className="flex items-center gap-[4px] rounded-[3px] bg-envoi-accent-bg px-[8px] py-[3px] text-[10px] font-medium text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
+                className="flex items-center gap-[4px] rounded-[3px] bg-envoi-accent-bg px-[8px] py-[3px] text-[10px] font-medium whitespace-nowrap text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
               >
                 {dimDef?.label ?? dimKey}
                 <X size={9} />
@@ -586,7 +586,7 @@ function AddDimensionButton({
                 onAdd(dim.key);
                 setOpen(false);
               }}
-              className="flex w-full items-center px-3 py-[6px] text-[10px] text-envoi-text transition-colors hover:bg-envoi-surface"
+              className="flex w-full items-center px-3 py-[6px] text-[10px] whitespace-nowrap text-envoi-text transition-colors hover:bg-envoi-surface"
             >
               {dim.label}
             </button>

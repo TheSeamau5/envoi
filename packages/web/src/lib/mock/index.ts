@@ -23,6 +23,7 @@ import { CODE_TEMPLATES, LINE_POOLS, NEW_FILE_TEMPLATES } from "./code-templates
 import {
   MODEL_CONFIGS,
   IMPL_LANGS,
+  NATURAL_LANGS,
   SANDBOXES,
   AGENTS,
   MILESTONE_STARTS,
@@ -522,7 +523,7 @@ export function generateAllTrajectories(): Trajectory[] {
       const params: TrajectoryParams = {
         target: "x86_64-linux",
         implLang: rng.pick(IMPL_LANGS),
-        lang: "en",
+        lang: rng.pick(NATURAL_LANGS),
         milestone: rng.pick(MILESTONE_STARTS),
         sandbox: rng.pick(SANDBOXES),
         agent: rng.pick(AGENTS),

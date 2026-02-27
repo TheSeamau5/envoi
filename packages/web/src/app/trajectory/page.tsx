@@ -24,7 +24,7 @@ export default function TrajectoryListPage() {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div className="flex flex-1 flex-col overflow-hidden">
       {/* Header */}
       <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">

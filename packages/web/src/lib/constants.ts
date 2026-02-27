@@ -42,7 +42,8 @@ export const MILESTONES: MilestoneDef[] = [
 /** Dimensions available for grouping trajectories in Setup Compare mode */
 export const GROUPABLE_DIMENSIONS = [
   { key: "model", label: "Model" },
-  { key: "implLang", label: "Impl Language" },
+  { key: "implLang", label: "Programming Language" },
+  { key: "lang", label: "Natural Language" },
   { key: "target", label: "Target" },
   { key: "milestone", label: "Milestone" },
   { key: "agent", label: "Agent" },

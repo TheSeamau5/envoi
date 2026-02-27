@@ -43,14 +43,27 @@ export function Sidebar() {
       className="flex shrink-0 flex-col overflow-hidden border-r border-envoi-border bg-envoi-bg"
       style={{ width: spring.width }}
     >
-      {/* Logo */}
+      {/* Header: logo + collapse toggle */}
       <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border px-3">
         <animated.span
-          className="text-sm font-bold whitespace-nowrap text-envoi-accent"
+          className="flex-1 text-sm font-bold whitespace-nowrap text-envoi-accent"
           style={{ opacity: spring.contentOpacity }}
         >
           envoi
         </animated.span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => setCollapsed((prev) => !prev)}
+              className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+            >
+              {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">
+            {collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       {/* Navigation */}
@@ -98,21 +111,6 @@ export function Sidebar() {
           return <div key={item.href}>{linkContent}</div>;
         })}
       </div>
-
-      {/* Collapse toggle */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            onClick={() => setCollapsed((prev) => !prev)}
-            className="flex items-center justify-center border-t border-envoi-border py-2 text-envoi-text-dim hover:text-envoi-text"
-          >
-            {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
-          </button>
-        </TooltipTrigger>
-        {collapsed && (
-          <TooltipContent side="right">Expand sidebar</TooltipContent>
-        )}
-      </Tooltip>
     </animated.div>
   );
 }

@@ -161,7 +161,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   );
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div className="flex flex-1 flex-col overflow-hidden">
       {/* Top bar: mode toggle + tab navigation */}
       <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         {/* Mode toggle */}

@@ -83,6 +83,9 @@ export const MODEL_CONFIGS: ModelConfig[] = [
 /** Impl languages and their probabilities */
 export const IMPL_LANGS = ["rust", "rust", "rust", "zig", "zig"] as const;
 
+/** Natural language options (weighted towards English) */
+export const NATURAL_LANGS = ["english", "english", "english", "spanish", "arabic", "mandarin chinese"] as const;
+
 /** Sandbox options */
 export const SANDBOXES = ["modal", "modal", "modal", "e2b"] as const;
 
