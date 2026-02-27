@@ -4,12 +4,16 @@
  *
  * Manages all interactive state: selected commit, playback, tabs, suite filter,
  * panel visibility, divider position. Keyboard navigation for commit selection.
+ *
+ * Panel open/close is animated with react-spring. Both panels are always mounted;
+ * the right panel's width animates to 0 when closed.
  */
 
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { useSpring, animated } from "@react-spring/web";
 import type { Trajectory, DetailLeftTab, DetailRightTab } from "@/lib/types";
 import { SUITES } from "@/lib/constants";
 import { setLayoutCookie } from "@/lib/cookies.client";
@@ -70,6 +74,15 @@ export function TrajectoryDetail({
     setDividerPctRaw(pct);
     setLayoutCookie("dividerPct", pct);
   }, []);
+
+  /** Animated panel layout */
+  const panelSpring = useSpring({
+    leftWidth: rightPanelOpen ? dividerPct : 100,
+    rightWidth: rightPanelOpen ? 100 - dividerPct : 0,
+    dividerWidth: rightPanelOpen ? 5 : 0,
+    rightOpacity: rightPanelOpen ? 1 : 0,
+    config: { tension: 300, friction: 30 },
+  });
 
   /** Refs for drag + keyboard */
   const containerRef = useRef<HTMLDivElement>(null);
@@ -176,12 +189,12 @@ export function TrajectoryDetail({
       onKeyDown={handleKeyDown}
     >
       {/* Left panel */}
-      <div
+      <animated.div
         className="flex flex-col overflow-hidden"
-        style={{ width: rightPanelOpen ? `${dividerPct}%` : "100%" }}
+        style={{ width: panelSpring.leftWidth.to((v) => `${v}%`) }}
       >
         {/* Tab bar */}
-        <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border">
+        <div className="flex h-[41px] shrink-0 items-stretch border-b border-envoi-border">
           <TabButton
             label="Timeline"
             isActive={leftTab === "timeline"}
@@ -199,7 +212,7 @@ export function TrajectoryDetail({
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => setRightPanelOpen(true)}
-                    className="mr-2 flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+                    className="mr-2 flex h-[24px] w-[24px] shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
                   >
                     <PanelRightOpen size={14} />
                   </button>
@@ -284,61 +297,72 @@ export function TrajectoryDetail({
         ) : (
           <TestsPanel commit={selectedCommit} />
         )}
-      </div>
+      </animated.div>
 
-      {/* Draggable divider */}
-      {rightPanelOpen && (
-        <div
-          onMouseDown={handleDividerMouseDown}
-          className="flex w-[5px] shrink-0 cursor-col-resize items-center justify-center border-x border-envoi-border-light hover:bg-envoi-accent-bg active:bg-envoi-accent-bg"
-          style={{ touchAction: "none" }}
-        >
-          <div className="h-[24px] w-[2px] rounded-full bg-envoi-border" />
+      {/* Draggable divider — always mounted, width animates to 0 */}
+      <animated.div
+        onMouseDown={rightPanelOpen ? handleDividerMouseDown : undefined}
+        className="flex shrink-0 items-center justify-center border-x border-envoi-border-light hover:bg-envoi-accent-bg active:bg-envoi-accent-bg"
+        style={{
+          width: panelSpring.dividerWidth.to((v) => `${v}px`),
+          cursor: rightPanelOpen ? "col-resize" : "default",
+          touchAction: "none",
+          overflow: "hidden",
+        }}
+      >
+        <div className="h-[24px] w-[2px] rounded-full bg-envoi-border" />
+      </animated.div>
+
+      {/* Right panel — always mounted, width + opacity animated */}
+      <animated.div
+        className="flex flex-col overflow-hidden"
+        style={{
+          width: panelSpring.rightWidth.to((v) => `${v}%`),
+          opacity: panelSpring.rightOpacity,
+        }}
+      >
+        {/* Tab bar */}
+        <div className="flex h-[41px] shrink-0 items-stretch border-b border-envoi-border">
+          <TabButton
+            label="Steps"
+            isActive={rightTab === "steps"}
+            onClick={() => setRightTab("steps")}
+          />
+          <TabButton
+            label="Code"
+            isActive={rightTab === "code"}
+            onClick={() => setRightTab("code")}
+          />
+          <div className="flex-1" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => setRightPanelOpen(false)}
+                className="mr-2 flex h-[24px] w-[24px] shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+              >
+                <PanelRightClose size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Close right panel</TooltipContent>
+          </Tooltip>
         </div>
-      )}
 
-      {/* Right panel */}
-      {rightPanelOpen && (
-        <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Tab bar */}
-          <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border">
-            <TabButton
-              label="Steps"
-              isActive={rightTab === "steps"}
-              onClick={() => setRightTab("steps")}
-            />
-            <TabButton
-              label="Code"
-              isActive={rightTab === "code"}
-              onClick={() => setRightTab("code")}
-            />
-            <div className="flex-1" />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={() => setRightPanelOpen(false)}
-                  className="mr-2 flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
-                >
-                  <PanelRightClose size={14} />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Close right panel</TooltipContent>
-            </Tooltip>
-          </div>
-
-          {/* Right tab content */}
-          {rightTab === "steps" ? (
-            <StepsPanel commit={selectedCommit} />
-          ) : (
-            <CodePanel commit={selectedCommit} />
-          )}
-        </div>
-      )}
+        {/* Right tab content */}
+        {rightTab === "steps" ? (
+          <StepsPanel commit={selectedCommit} />
+        ) : (
+          <CodePanel commit={selectedCommit} />
+        )}
+      </animated.div>
     </div>
   );
 }
 
-/** Tab button for panel tab bars */
+/**
+ * Tab button for panel tab bars.
+ * Uses items-stretch on the parent so the border-b aligns flush with the
+ * container's bottom border (orange active indicator overlaps gray border).
+ */
 function TabButton({
   label,
   isActive,
@@ -351,7 +375,7 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`px-[14px] py-[8px] text-[10px] font-semibold uppercase tracking-[0.06em] transition-colors ${
+      className={`flex items-center px-[14px] text-[10px] font-semibold uppercase tracking-[0.06em] transition-colors ${
         isActive
           ? "border-b-[2px] border-envoi-accent text-envoi-accent"
           : "border-b-[2px] border-transparent text-envoi-text-dim hover:text-envoi-text"

@@ -234,17 +234,51 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             tabIndex={0}
             onKeyDown={handleSidebarKeyDown}
           >
-            {/* Sidebar header with sort + model filter */}
-            <div className="flex items-center gap-2 border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
+            {/* Sidebar header */}
+            <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
               <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 Trajectories ({sortedTraces.length})
               </span>
+            </div>
+
+            {/* Filter + sort row */}
+            <div className="flex items-center gap-2 px-[14px] py-[6px]">
+              {/* Model filter */}
+              <Select value={modelFilter} onValueChange={setModelFilter}>
+                <SelectTrigger
+                  size="sm"
+                  className="h-auto max-w-[140px] gap-1 rounded-[3px] border-none bg-transparent px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text [&>span]:truncate"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent
+                  position="popper"
+                  className="border-envoi-border bg-envoi-bg font-mono shadow-md"
+                >
+                  <SelectItem
+                    value="all"
+                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                  >
+                    All models
+                  </SelectItem>
+                  {uniqueModels.map((model) => (
+                    <SelectItem
+                      key={model}
+                      value={model}
+                      className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    >
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
               <div className="flex-1" />
 
               {/* Sort dropdown */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex items-center gap-[3px] rounded-[3px] px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
+                  <button className="flex shrink-0 items-center gap-[3px] rounded-[3px] px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
                     <ArrowUpDown size={9} />
                     {sortBy === "score" ? "Score" : "Date"}
                   </button>
@@ -275,36 +309,6 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-
-              {/* Model filter */}
-              <Select value={modelFilter} onValueChange={setModelFilter}>
-                <SelectTrigger
-                  size="sm"
-                  className="h-auto gap-1 rounded-[3px] border-none bg-transparent px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent
-                  position="popper"
-                  className="border-envoi-border bg-envoi-bg font-mono shadow-md"
-                >
-                  <SelectItem
-                    value="all"
-                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
-                  >
-                    All models
-                  </SelectItem>
-                  {uniqueModels.map((model) => (
-                    <SelectItem
-                      key={model}
-                      value={model}
-                      className="text-[10px] text-envoi-text focus:bg-envoi-surface"
-                    >
-                      {model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
 
             {/* Trace list */}

@@ -2,6 +2,7 @@
  * Collapsible sidebar navigation.
  * Client component — manages collapse state with localStorage persistence.
  * Claude-style: collapsed shows icons only, no text.
+ * Animated with react-spring for smooth width transitions.
  */
 
 "use client";
@@ -14,6 +15,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
+import { useSpring, animated } from "@react-spring/web";
 import { usePersistedState } from "@/lib/storage";
 import {
   Tooltip,
@@ -30,27 +32,37 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = usePersistedState("sidebar-collapsed", false);
   const pathname = usePathname();
 
+  const spring = useSpring({
+    width: collapsed ? 48 : 200,
+    contentOpacity: collapsed ? 0 : 1,
+    config: { tension: 300, friction: 30 },
+  });
+
   return (
-    <div
-      className="flex flex-col border-r border-envoi-border bg-envoi-bg"
-      style={{ width: collapsed ? 48 : 200, transition: "width 0.15s ease" }}
+    <animated.div
+      className="flex shrink-0 flex-col overflow-hidden border-r border-envoi-border bg-envoi-bg"
+      style={{ width: spring.width }}
     >
       {/* Logo */}
       <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border px-3">
-        {!collapsed && (
-          <span className="text-sm font-bold text-envoi-accent">envoi</span>
-        )}
+        <animated.span
+          className="text-sm font-bold whitespace-nowrap text-envoi-accent"
+          style={{ opacity: spring.contentOpacity }}
+        >
+          envoi
+        </animated.span>
       </div>
 
       {/* Navigation */}
       <div className="flex-1 py-2">
-        {!collapsed && (
-          <div className="px-3 pb-2">
-            <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
-              Navigation
-            </span>
-          </div>
-        )}
+        <animated.div
+          className="overflow-hidden px-3 pb-2"
+          style={{ opacity: spring.contentOpacity, height: spring.contentOpacity.to((v) => v === 0 ? 0 : "auto") }}
+        >
+          <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
+            Navigation
+          </span>
+        </animated.div>
         {NAV_ITEMS.map((item) => {
           const isActive =
             pathname === item.href || pathname.startsWith(item.href + "/");
@@ -70,7 +82,7 @@ export function Sidebar() {
               }`}
             >
               <Icon size={14} />
-              {!collapsed && <span>{item.label}</span>}
+              {!collapsed && <span className="whitespace-nowrap">{item.label}</span>}
             </Link>
           );
 
@@ -101,6 +113,6 @@ export function Sidebar() {
           <TooltipContent side="right">Expand sidebar</TooltipContent>
         )}
       </Tooltip>
-    </div>
+    </animated.div>
   );
 }
