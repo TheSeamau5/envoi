@@ -1,12 +1,12 @@
 /**
  * Collapsible sidebar navigation.
- * Client component — manages collapse state with localStorage persistence.
- * Claude-style: collapsed shows icons only, no text.
- * Animated with react-spring for smooth width transitions.
+ * Client component — collapse state persisted via cookie so SSR matches hydration.
+ * Animated with react-spring (skipped on first render to prevent flash).
  */
 
 "use client";
 
+import { useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -16,7 +16,7 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import { usePersistedState } from "@/lib/storage";
+import { setLayoutCookie } from "@/lib/cookies.client";
 import {
   Tooltip,
   TooltipContent,
@@ -28,14 +28,27 @@ const NAV_ITEMS = [
   { href: "/trajectory", label: "Trajectories", icon: GitCommitHorizontal },
 ] as const;
 
-export function Sidebar() {
-  const [collapsed, setCollapsed] = usePersistedState("sidebar-collapsed", false);
+type SidebarProps = {
+  /** Server-read initial value — eliminates FOUC on collapse state */
+  initialCollapsed: boolean;
+};
+
+export function Sidebar({ initialCollapsed }: SidebarProps) {
+  const [collapsed, setCollapsedRaw] = useState(initialCollapsed);
   const pathname = usePathname();
+  const isFirstRender = useRef(true);
+
+  const setCollapsed = useCallback((next: boolean) => {
+    setCollapsedRaw(next);
+    setLayoutCookie("sidebarCollapsed", next);
+  }, []);
 
   const spring = useSpring({
     width: collapsed ? 48 : 200,
     contentOpacity: collapsed ? 0 : 1,
     config: { tension: 300, friction: 30 },
+    immediate: isFirstRender.current,
+    onRest: () => { isFirstRender.current = false; },
   });
 
   return (
@@ -53,31 +66,16 @@ export function Sidebar() {
             envoi
           </animated.span>
         )}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={() => setCollapsed((prev) => !prev)}
-              className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
-            >
-              {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            {collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          </TooltipContent>
-        </Tooltip>
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+        >
+          {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+        </button>
       </div>
 
       {/* Navigation */}
       <div className="flex-1 py-2">
-        <animated.div
-          className="overflow-hidden px-3 pb-2"
-          style={{ opacity: spring.contentOpacity, height: spring.contentOpacity.to((v) => v === 0 ? 0 : "auto") }}
-        >
-          <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
-            Navigation
-          </span>
-        </animated.div>
         {NAV_ITEMS.map((item) => {
           const isActive =
             pathname === item.href || pathname.startsWith(item.href + "/");

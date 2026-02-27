@@ -12,10 +12,12 @@ import { cookies } from "next/headers";
 
 const COOKIE_RIGHT_PANEL = "envoi:detail-right-panel-open";
 const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
+const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 
 export type LayoutCookies = {
   rightPanelOpen: boolean;
   dividerPct: number;
+  sidebarCollapsed: boolean;
 };
 
 /** Read layout preferences from cookies (server-side only). */
@@ -46,5 +48,15 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
-  return { rightPanelOpen, dividerPct };
+  let sidebarCollapsed = false;
+  try {
+    const sidebarCookie = jar.get(COOKIE_SIDEBAR_COLLAPSED);
+    if (sidebarCookie) {
+      sidebarCollapsed = sidebarCookie.value === "true";
+    }
+  } catch {
+    // cookie unavailable — use default
+  }
+
+  return { rightPanelOpen, dividerPct, sidebarCollapsed };
 }
