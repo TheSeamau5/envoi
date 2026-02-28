@@ -33,6 +33,9 @@ import {
   ChevronRight,
   ChevronDown,
   AlertCircle,
+  MessageSquare,
+  GitBranch,
+  Type,
 } from "lucide-react";
 import type { Commit, Step } from "@/lib/types";
 import { T } from "@/lib/tokens";
@@ -52,6 +55,9 @@ const STEP_CONFIG: Record<
   tool_call: { icon: Terminal, color: "#a17a08", label: "TOOL" },
   test_run: { icon: Play, color: "#059669", label: "TEST" },
   mcp_call: { icon: Hexagon, color: "#c026a3", label: "MCP" },
+  text: { icon: Type, color: "#6b7280", label: "TEXT" },
+  spawn: { icon: GitBranch, color: "#7c3aed", label: "SPAWN" },
+  message: { icon: MessageSquare, color: "#0891b2", label: "MESSAGE" },
 };
 
 /** Section label used in expanded content */

@@ -22,9 +22,9 @@ import {
   ArrowUpDown,
 } from "lucide-react";
 import Link from "next/link";
-import type { Trajectory, CompareMode, CompareTab } from "@/lib/types";
+import type { Trajectory, CompareMode, CompareTab, Suite } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
-import { TOTAL_TESTS } from "@/lib/constants";
+import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { formatPercent, formatDate } from "@/lib/utils";
 import {
   Select,
@@ -66,6 +66,10 @@ function minAvailableColor(usedSet: Set<number>): number {
 }
 
 export function CompareClient({ allTraces }: CompareClientProps) {
+  // Derive suites from data, fallback to defaults
+  const suites: Suite[] = allTraces[0]?.suites ?? DEFAULT_SUITES;
+  const totalTests = computeTotalTests(suites);
+
   const [mode, setMode] = useState<CompareMode>("traces");
 
   /**
@@ -443,7 +447,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                         <div
                           className="h-full rounded-full"
                           style={{
-                            width: `${(trace.finalPassed / TOTAL_TESTS) * 100}%`,
+                            width: `${(trace.finalPassed / totalTests) * 100}%`,
                             background: isSelected && color ? color.line : T.textDim,
                           }}
                         />
@@ -456,7 +460,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                         {trace.finalPassed}
                       </span>
                       <span className="text-[9px] text-envoi-text-dim">
-                        {formatPercent(trace.finalPassed, TOTAL_TESTS)}
+                        {formatPercent(trace.finalPassed, totalTests)}
                       </span>
                     </div>
 
@@ -488,20 +492,20 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             ) : (
               <>
                 {activeTab === "curves" && (
-                  <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} />
+                  <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} suites={suites} totalTests={totalTests} />
                 )}
                 {activeTab === "milestones" && (
                   <MilestoneTable traces={selectedTraces} colorIndices={colorIndices} />
                 )}
                 {activeTab === "suites" && (
-                  <SuiteBreakdown traces={selectedTraces} colorIndices={colorIndices} />
+                  <SuiteBreakdown traces={selectedTraces} colorIndices={colorIndices} suites={suites} />
                 )}
               </>
             )}
           </div>
         </div>
       ) : (
-        <SetupCompare allTraces={allTraces} />
+        <SetupCompare allTraces={allTraces} suites={suites} totalTests={totalTests} />
       )}
     </div>
   );

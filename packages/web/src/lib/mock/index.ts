@@ -503,6 +503,7 @@ function generateTrajectoryFromConfig(
     cost,
     params,
     finalPassed,
+    suites: SUITES,
   };
 }
 

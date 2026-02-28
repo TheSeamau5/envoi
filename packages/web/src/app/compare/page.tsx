@@ -1,13 +1,13 @@
 /**
  * Compare page — server component.
- * Generates all 30 mock trajectories and passes them to the client component.
+ * Fetches all trajectories from data layer (S3 or mock fallback).
  */
 
-import { generateAllTrajectories } from "@/lib/mock";
+import { getAllTrajectories } from "@/lib/server/data";
 import { CompareClient } from "@/components/compare/compare-client";
 
-export default function ComparePage() {
-  const allTraces = generateAllTrajectories();
+export default async function ComparePage() {
+  const allTraces = await getAllTrajectories();
 
   return <CompareClient allTraces={allTraces} />;
 }

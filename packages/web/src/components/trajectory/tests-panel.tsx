@@ -6,17 +6,21 @@
 
 "use client";
 
-import type { Commit } from "@/lib/types";
-import { SUITES, TOTAL_TESTS } from "@/lib/constants";
+import type { Commit, Suite } from "@/lib/types";
+import { SUITES as DEFAULT_SUITES, TOTAL_TESTS as DEFAULT_TOTAL_TESTS } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
 import { formatPercent } from "@/lib/utils";
 
 type TestsPanelProps = {
   commit: Commit;
+  suites?: Suite[];
+  totalTests?: number;
 };
 
-export function TestsPanel({ commit }: TestsPanelProps) {
-  const overallPercent = formatPercent(commit.totalPassed, TOTAL_TESTS);
+export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
+  const effectiveSuites = suites ?? DEFAULT_SUITES;
+  const effectiveTotal = totalTests ?? DEFAULT_TOTAL_TESTS;
+  const overallPercent = formatPercent(commit.totalPassed, effectiveTotal);
 
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">
@@ -27,7 +31,7 @@ export function TestsPanel({ commit }: TestsPanelProps) {
             {commit.totalPassed}
           </span>
           <span className="text-[11px] text-envoi-text-dim">
-            / {TOTAL_TESTS} passed ({overallPercent})
+            / {effectiveTotal} passed ({overallPercent})
           </span>
         </div>
         <div className="mt-[6px] flex items-center gap-2">
@@ -56,7 +60,7 @@ export function TestsPanel({ commit }: TestsPanelProps) {
           Suites
         </span>
         <div className="mt-[8px] space-y-[10px]">
-          {SUITES.map((suite) => {
+          {effectiveSuites.map((suite) => {
             const passed = commit.suiteState[suite.name] ?? 0;
             const ratio = passed / suite.total;
             const suiteColor = SUITE_COLORS[suite.name];

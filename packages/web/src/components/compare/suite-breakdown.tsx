@@ -9,15 +9,16 @@
 "use client";
 
 import { useState } from "react";
-import type { Trajectory, Commit } from "@/lib/types";
+import type { Trajectory, Commit, Suite } from "@/lib/types";
 import { TRACE_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { SUITES, MAX_DURATION } from "@/lib/constants";
+import { SUITES as DEFAULT_SUITES, MAX_DURATION } from "@/lib/constants";
 import { formatPercent } from "@/lib/utils";
 
 type SuiteBreakdownProps = {
   traces: Trajectory[];
   /** Stable color index for each trace (parallel to `traces` array) */
   colorIndices?: number[];
+  suites?: Suite[];
 };
 
 /** Mini chart layout constants */
@@ -197,14 +198,15 @@ function MiniSuiteChart({
   );
 }
 
-export function SuiteBreakdown({ traces, colorIndices }: SuiteBreakdownProps) {
+export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: SuiteBreakdownProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
 
   return (
     <div className="flex flex-col gap-4">
       {/* Mini charts grid */}
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {SUITES.map((suite) => (
+        {effectiveSuites.map((suite) => (
           <MiniSuiteChart
             key={suite.name}
             suiteName={suite.name}
@@ -248,7 +250,7 @@ export function SuiteBreakdown({ traces, colorIndices }: SuiteBreakdownProps) {
         </div>
 
         {/* Rows per suite */}
-        {SUITES.map((suite) => {
+        {effectiveSuites.map((suite) => {
           const suiteColor = SUITE_COLORS[suite.name];
           return (
             <div

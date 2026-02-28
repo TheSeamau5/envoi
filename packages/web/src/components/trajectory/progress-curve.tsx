@@ -13,15 +13,17 @@
 
 "use client";
 
-import type { Commit } from "@/lib/types";
+import type { Commit, Suite } from "@/lib/types";
 import { T } from "@/lib/tokens";
-import { TOTAL_TESTS, SUITES } from "@/lib/constants";
+import { TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
 
 type ProgressCurveProps = {
   commits: Commit[];
   selectedIndex: number;
   onSelect: (index: number) => void;
   activeSuite: string;
+  suites?: Suite[];
+  totalTests?: number;
 };
 
 /**
@@ -37,10 +39,10 @@ const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 /** Get Y-axis max based on active suite filter */
-function getYMax(activeSuite: string): number {
-  if (activeSuite === "all") return TOTAL_TESTS;
-  const suite = SUITES.find((suiteItem) => suiteItem.name === activeSuite);
-  return suite ? suite.total : TOTAL_TESTS;
+function getYMax(activeSuite: string, suites: Suite[], totalTests: number): number {
+  if (activeSuite === "all") return totalTests;
+  const suite = suites.find((suiteItem) => suiteItem.name === activeSuite);
+  return suite ? suite.total : totalTests;
 }
 
 /** Get Y value for a commit based on active suite */
@@ -159,8 +161,12 @@ export function ProgressCurve({
   selectedIndex,
   onSelect,
   activeSuite,
+  suites: suitesProp,
+  totalTests: totalTestsProp,
 }: ProgressCurveProps) {
-  const yMax = getYMax(activeSuite);
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
+  const yMax = getYMax(activeSuite, effectiveSuites, effectiveTotal);
   const yTicks = getYTicks(yMax);
   const lastCommit = commits[commits.length - 1];
   const totalMinutes = lastCommit?.minutesElapsed ?? 0;

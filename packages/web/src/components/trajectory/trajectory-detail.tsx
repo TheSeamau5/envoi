@@ -14,8 +14,8 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type { Trajectory, DetailLeftTab, DetailRightTab } from "@/lib/types";
-import { SUITES } from "@/lib/constants";
+import type { Trajectory, DetailLeftTab, DetailRightTab, Suite } from "@/lib/types";
+import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
 import {
@@ -43,6 +43,8 @@ export function TrajectoryDetail({
   initialDividerPct,
 }: TrajectoryDetailProps) {
   const { commits } = trajectory;
+  const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
+  const totalTests = computeTotalTests(suites);
 
   /** Selected commit index */
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -238,6 +240,8 @@ export function TrajectoryDetail({
               selectedIndex={selectedIndex}
               onSelect={handleSelectCommit}
               activeSuite={activeSuite}
+              suites={suites}
+              totalTests={totalTests}
             />
 
             {/* Playback controls */}
@@ -266,9 +270,9 @@ export function TrajectoryDetail({
                     all
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>All suites: {SUITES.reduce((sum, suite) => sum + suite.total, 0)} tests</TooltipContent>
+                <TooltipContent>All suites: {totalTests} tests</TooltipContent>
               </Tooltip>
-              {SUITES.map((suite) => (
+              {suites.map((suite) => (
                 <Tooltip key={suite.name}>
                   <TooltipTrigger asChild>
                     <button
@@ -301,7 +305,7 @@ export function TrajectoryDetail({
             </div>
           </div>
         ) : (
-          <TestsPanel commit={selectedCommit} />
+          <TestsPanel commit={selectedCommit} suites={suites} totalTests={totalTests} />
         )}
       </animated.div>
 

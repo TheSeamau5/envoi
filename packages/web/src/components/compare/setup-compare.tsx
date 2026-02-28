@@ -10,13 +10,15 @@
 
 import { useState, useMemo } from "react";
 import { Eye, EyeOff, X, Plus, ChevronDown, ChevronRight } from "lucide-react";
-import type { Trajectory, TrajectoryGroup, Commit } from "@/lib/types";
+import type { Trajectory, TrajectoryGroup, Commit, Suite } from "@/lib/types";
 import { GROUP_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { GROUPABLE_DIMENSIONS, MAX_DURATION, TOTAL_TESTS, SUITES } from "@/lib/constants";
+import { GROUPABLE_DIMENSIONS, MAX_DURATION, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { groupTraces, median, formatPercent, formatDuration } from "@/lib/utils";
 
 type SetupCompareProps = {
   allTraces: Trajectory[];
+  suites?: Suite[];
+  totalTests?: number;
 };
 
 /** Chart layout constants for the median curves chart */
@@ -30,8 +32,8 @@ function toX(minutes: number): number {
   return MARGIN.left + (minutes / MAX_DURATION) * PLOT_WIDTH;
 }
 
-function toY(passed: number): number {
-  return MARGIN.top + PLOT_HEIGHT - (passed / TOTAL_TESTS) * PLOT_HEIGHT;
+function toY(passed: number, totalTests: number): number {
+  return MARGIN.top + PLOT_HEIGHT - (passed / totalTests) * PLOT_HEIGHT;
 }
 
 /** Compute a median progress curve from a set of traces */
@@ -65,28 +67,28 @@ function computeMedianCurve(traces: Trajectory[]): MedianPoint[] {
 }
 
 /** Build SVG line path from median points */
-function buildMedianLinePath(points: MedianPoint[]): string {
+function buildMedianLinePath(points: MedianPoint[], totalTests: number): string {
   return points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG area path from median points */
-function buildMedianAreaPath(points: MedianPoint[]): string {
+function buildMedianAreaPath(points: MedianPoint[], totalTests: number): string {
   if (points.length === 0) return "";
   const firstPoint = points[0]!;
   const lastPoint = points[points.length - 1]!;
   const lineSegments = points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${toX(lastPoint.minutes).toFixed(1)},${toY(0).toFixed(1)}`;
-  const bottomLeft = `L${toX(firstPoint.minutes).toFixed(1)},${toY(0).toFixed(1)}`;
+  const bottomRight = `L${toX(lastPoint.minutes).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomLeft = `L${toX(firstPoint.minutes).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
@@ -105,11 +107,13 @@ function getXTicks(): number[] {
 }
 
 /** Y-axis tick generator */
-function getYTicks(): number[] {
-  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * TOTAL_TESTS));
+function getYTicks(totalTests: number): number[] {
+  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * totalTests));
 }
 
-export function SetupCompare({ allTraces }: SetupCompareProps) {
+export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalTestsProp }: SetupCompareProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
   const [activeDimensions, setActiveDimensions] = useState<string[]>(["model"]);
   const [hiddenGroups, setHiddenGroups] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -163,7 +167,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
   }
 
   const xTicks = getXTicks();
-  const yTicks = getYTicks();
+  const yTicks = getYTicks(effectiveTotal);
 
   return (
     <div className="flex flex-1 gap-0 overflow-hidden">
@@ -271,9 +275,9 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               <line
                 key={`y-grid-${tick}`}
                 x1={MARGIN.left}
-                y1={toY(tick)}
+                y1={toY(tick, effectiveTotal)}
                 x2={VIEW_WIDTH - MARGIN.right}
-                y2={toY(tick)}
+                y2={toY(tick, effectiveTotal)}
                 stroke={T.borderLight}
                 strokeWidth={1}
               />
@@ -295,7 +299,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               <text
                 key={`y-label-${tick}`}
                 x={MARGIN.left - 8}
-                y={toY(tick) + 3}
+                y={toY(tick, effectiveTotal) + 3}
                 textAnchor="end"
                 style={{ fontSize: "9px", fill: T.textDim }}
               >
@@ -308,11 +312,11 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               <text
                 key={`y-pct-${tick}`}
                 x={VIEW_WIDTH - MARGIN.right + 8}
-                y={toY(tick) + 3}
+                y={toY(tick, effectiveTotal) + 3}
                 textAnchor="start"
                 style={{ fontSize: "9px", fill: T.textDim }}
               >
-                {`${Math.round((tick / TOTAL_TESTS) * 100)}%`}
+                {`${Math.round((tick / effectiveTotal) * 100)}%`}
               </text>
             ))}
 
@@ -357,11 +361,11 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               return (
                 <g key={group.key}>
                   <path
-                    d={buildMedianAreaPath(curve)}
+                    d={buildMedianAreaPath(curve, effectiveTotal)}
                     fill={color.fill}
                   />
                   <path
-                    d={buildMedianLinePath(curve)}
+                    d={buildMedianLinePath(curve, effectiveTotal)}
                     fill="none"
                     stroke={color.line}
                     strokeWidth={1.5}
@@ -369,7 +373,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                   {lastPoint && (
                     <text
                       x={toX(lastPoint.minutes) + 6}
-                      y={toY(lastPoint.medianPassed) + 3}
+                      y={toY(lastPoint.medianPassed, effectiveTotal) + 3}
                       style={{ fontSize: "8px", fill: color.line, fontWeight: 700 }}
                     >
                       {Math.round(lastPoint.medianPassed)}
@@ -416,7 +420,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
           </div>
 
           {/* Suite rows */}
-          {SUITES.map((suite) => {
+          {effectiveSuites.map((suite) => {
             const suiteColor = SUITE_COLORS[suite.name];
             return (
               <div
@@ -532,7 +536,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                               <div
                                 className="h-full rounded-full"
                                 style={{
-                                  width: `${((lastTraceCommit?.totalPassed ?? 0) / TOTAL_TESTS) * 100}%`,
+                                  width: `${((lastTraceCommit?.totalPassed ?? 0) / effectiveTotal) * 100}%`,
                                   background: color.line,
                                 }}
                               />
@@ -541,7 +545,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                               {lastTraceCommit?.totalPassed ?? 0}
                             </span>
                             <span className="text-[9px] text-envoi-text-dim">
-                              / {TOTAL_TESTS}
+                              / {effectiveTotal}
                             </span>
                           </div>
                         </div>

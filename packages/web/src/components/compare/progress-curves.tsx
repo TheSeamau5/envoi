@@ -10,15 +10,17 @@
 
 import { useState } from "react";
 import { AlertCircle, Clock, Hash } from "lucide-react";
-import type { Trajectory, Commit } from "@/lib/types";
+import type { Trajectory, Commit, Suite } from "@/lib/types";
 import { TRACE_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { MAX_DURATION, TOTAL_TESTS, SUITES } from "@/lib/constants";
+import { MAX_DURATION, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { formatDuration, formatPercent } from "@/lib/utils";
 
 type ProgressCurvesProps = {
   traces: Trajectory[];
   /** Stable color index for each trace (parallel to `traces` array) */
   colorIndices?: number[];
+  suites?: Suite[];
+  totalTests?: number;
 };
 
 /** Chart layout constants */
@@ -34,8 +36,9 @@ function toX(minutes: number): number {
 }
 
 /** Map tests passed to Y pixel position */
-function toY(passed: number): number {
-  return MARGIN.top + PLOT_HEIGHT - (passed / TOTAL_TESTS) * PLOT_HEIGHT;
+function toY(passed: number, totalTests: number): number {
+  if (totalTests === 0) return MARGIN.top + PLOT_HEIGHT;
+  return MARGIN.top + PLOT_HEIGHT - (passed / totalTests) * PLOT_HEIGHT;
 }
 
 /** Generate X-axis tick values (every hour) */
@@ -44,41 +47,44 @@ function getXTicks(): number[] {
 }
 
 /** Generate Y-axis tick values */
-function getYTicks(): number[] {
-  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * TOTAL_TESTS));
+function getYTicks(totalTests: number): number[] {
+  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * totalTests));
 }
 
 /** Build SVG path data for a trace line */
-function buildLinePath(commits: Commit[]): string {
+function buildLinePath(commits: Commit[], totalTests: number): string {
   return commits
     .map((commit, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed).toFixed(1)}`;
+      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG path data for the area fill under the curve */
-function buildAreaPath(commits: Commit[]): string {
+function buildAreaPath(commits: Commit[], totalTests: number): string {
   if (commits.length === 0) return "";
   const firstCommit = commits[0]!;
   const lastCommit = commits[commits.length - 1]!;
   const lineSegments = commits
     .map((commit, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed).toFixed(1)}`;
+      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${toX(lastCommit.minutesElapsed).toFixed(1)},${toY(0).toFixed(1)}`;
-  const bottomLeft = `L${toX(firstCommit.minutesElapsed).toFixed(1)},${toY(0).toFixed(1)}`;
+  const bottomRight = `L${toX(lastCommit.minutesElapsed).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomLeft = `L${toX(firstCommit.minutesElapsed).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
-export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
+export function ProgressCurves({ traces, colorIndices, suites: suitesProp, totalTests: totalTestsProp }: ProgressCurvesProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
+
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
 
   const xTicks = getXTicks();
-  const yTicks = getYTicks();
+  const yTicks = getYTicks(effectiveTotal);
 
   return (
     <div className="flex flex-col gap-4">
@@ -94,9 +100,9 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             <line
               key={`y-grid-${tick}`}
               x1={MARGIN.left}
-              y1={toY(tick)}
+              y1={toY(tick, effectiveTotal)}
               x2={VIEW_WIDTH - MARGIN.right}
-              y2={toY(tick)}
+              y2={toY(tick, effectiveTotal)}
               stroke={T.borderLight}
               strokeWidth={1}
             />
@@ -118,7 +124,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             <text
               key={`y-label-${tick}`}
               x={MARGIN.left - 8}
-              y={toY(tick) + 3}
+              y={toY(tick, effectiveTotal) + 3}
               textAnchor="end"
               style={{ fontSize: "9px", fill: T.textDim }}
             >
@@ -131,11 +137,11 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             <text
               key={`y-pct-${tick}`}
               x={VIEW_WIDTH - MARGIN.right + 8}
-              y={toY(tick) + 3}
+              y={toY(tick, effectiveTotal) + 3}
               textAnchor="start"
               style={{ fontSize: "9px", fill: T.textDim }}
             >
-              {`${Math.round((tick / TOTAL_TESTS) * 100)}%`}
+              {`${Math.round((tick / effectiveTotal) * 100)}%`}
             </text>
           ))}
 
@@ -177,7 +183,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             return (
               <path
                 key={`area-${trace.id}`}
-                d={buildAreaPath(trace.commits)}
+                d={buildAreaPath(trace.commits, effectiveTotal)}
                 fill={color.fill}
                 opacity={hoveredTrace !== undefined && hoveredTrace !== traceIndex ? 0.3 : 1}
               />
@@ -190,7 +196,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             return (
               <path
                 key={`line-${trace.id}`}
-                d={buildLinePath(trace.commits)}
+                d={buildLinePath(trace.commits, effectiveTotal)}
                 fill="none"
                 stroke={color.line}
                 strokeWidth={hoveredTrace === traceIndex ? 2.5 : 1.5}
@@ -211,7 +217,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                 <circle
                   key={`reg-${trace.id}-${commit.index}`}
                   cx={toX(commit.minutesElapsed)}
-                  cy={toY(commit.totalPassed)}
+                  cy={toY(commit.totalPassed, effectiveTotal)}
                   r={3}
                   fill={T.red}
                   stroke={T.bg}
@@ -234,7 +240,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
               <text
                 key={`label-${trace.id}`}
                 x={toX(lastCommit.minutesElapsed) + 6}
-                y={toY(lastCommit.totalPassed) + 3}
+                y={toY(lastCommit.totalPassed, effectiveTotal) + 3}
                 style={{
                   fontSize: "9px",
                   fill: color.line,
@@ -284,7 +290,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                   <span className="text-[11px] font-semibold">
                     {lastCommit?.totalPassed ?? 0}
                     <span className="text-envoi-text-dim">
-                      {" "}/ {TOTAL_TESTS}
+                      {" "}/ {effectiveTotal}
                     </span>
                   </span>
                 </div>
@@ -296,7 +302,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                   <span className="text-[11px] font-semibold">
                     {maxPassed}
                     <span className="text-envoi-text-dim">
-                      {" "}({formatPercent(maxPassed, TOTAL_TESTS)})
+                      {" "}({formatPercent(maxPassed, effectiveTotal)})
                     </span>
                   </span>
                 </div>
@@ -323,7 +329,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
 
               {/* Per-suite mini bars */}
               <div className="mt-2 space-y-1 border-t border-envoi-border-light pt-2">
-                {SUITES.map((suite) => {
+                {effectiveSuites.map((suite) => {
                   const passed = lastCommit?.suiteState[suite.name] ?? 0;
                   const pct = (passed / suite.total) * 100;
                   const suiteColor = SUITE_COLORS[suite.name];

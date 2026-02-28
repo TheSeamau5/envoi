@@ -35,7 +35,16 @@ export type Evaluation = {
 
 /** One agent action between two commits */
 export type Step = {
-  type: "reasoning" | "file_read" | "file_write" | "tool_call" | "test_run" | "mcp_call";
+  type:
+    | "reasoning"
+    | "file_read"
+    | "file_write"
+    | "tool_call"
+    | "test_run"
+    | "mcp_call"
+    | "text"
+    | "spawn"
+    | "message";
   summary: string;
   detail: string;
   index: number;
@@ -93,17 +102,14 @@ export type Commit = {
   codeSnapshot: CodeSnapshot;
   phase: number;
   tokensUsed: number;
+  /** Evaluation ID from the backend */
+  evalId?: string;
+  /** Git commit hash this evaluation targeted */
+  targetCommit?: string;
 };
 
-/** Configuration parameters for a trajectory run */
-export type TrajectoryParams = {
-  target: string;
-  implLang: string;
-  lang: string;
-  milestone: string;
-  sandbox: string;
-  agent: string;
-};
+/** Configuration parameters for a trajectory run (flexible for any environment) */
+export type TrajectoryParams = Record<string, string>;
 
 /** A complete agent trajectory — one attempt at solving the environment */
 export type Trajectory = {
@@ -118,6 +124,14 @@ export type Trajectory = {
   cost: number;
   params: TrajectoryParams;
   finalPassed: number;
+  /** Dynamic suite definitions from the data (replaces hardcoded SUITES) */
+  suites?: Suite[];
+  /** Agent harness name (e.g. "codex", "claude-code") */
+  agentHarness?: string;
+  /** Session identifier */
+  sessionId?: string;
+  /** Why the session ended (e.g. "solved", "timeout", "agent_error") */
+  sessionEndReason?: string;
 };
 
 /** A group of trajectories sharing some dimension */

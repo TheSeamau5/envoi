@@ -1,10 +1,10 @@
 /**
  * Trajectory Detail page — server component.
- * Resolves trajectory by ID from mock data and renders the detail view.
+ * Resolves trajectory by ID from data layer (S3 or mock fallback).
  */
 
 import { notFound } from "next/navigation";
-import { getTrajectoryById } from "@/lib/mock";
+import { getTrajectoryById } from "@/lib/server/data";
 import { readLayoutCookies } from "@/lib/cookies";
 import { TrajectoryDetail } from "@/components/trajectory/trajectory-detail";
 
@@ -14,7 +14,7 @@ type TrajectoryPageProps = {
 
 export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
   const { id } = await params;
-  const trajectory = getTrajectoryById(id);
+  const trajectory = await getTrajectoryById(id);
 
   if (!trajectory) {
     notFound();

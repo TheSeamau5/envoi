@@ -5,12 +5,12 @@
 
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
-import { generateAllTrajectories } from "@/lib/mock";
-import { TOTAL_TESTS } from "@/lib/constants";
+import { getAllTrajectories } from "@/lib/server/data";
+import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
 import { formatPercent, formatDuration, formatDate } from "@/lib/utils";
 
-export default function TrajectoryListPage() {
-  const allTraces = generateAllTrajectories();
+export default async function TrajectoryListPage() {
+  const allTraces = await getAllTrajectories();
 
   /** Group by model */
   const grouped = new Map<string, typeof allTraces>();
@@ -76,7 +76,10 @@ export default function TrajectoryListPage() {
             {traces.map((trace) => {
               const lastCommit = trace.commits[trace.commits.length - 1];
               const finalPassed = lastCommit?.totalPassed ?? 0;
-              const pct = (finalPassed / TOTAL_TESTS) * 100;
+              const totalTests = trace.suites
+                ? computeTotalTests(trace.suites)
+                : TOTAL_TESTS;
+              const pct = totalTests > 0 ? (finalPassed / totalTests) * 100 : 0;
 
               return (
                 <Link
@@ -91,17 +94,17 @@ export default function TrajectoryListPage() {
 
                   {/* Target */}
                   <span className="min-w-[56px] border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
-                    {trace.params.target.split("-")[0]}
+                    {(trace.params.target ?? "").split("-")[0]}
                   </span>
 
                   {/* Impl Language */}
                   <span className="min-w-[50px] border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
-                    {trace.params.implLang}
+                    {trace.params.implLang ?? ""}
                   </span>
 
                   {/* Natural Language */}
                   <span className="min-w-[120px] whitespace-nowrap border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
-                    {trace.params.lang}
+                    {trace.params.lang ?? ""}
                   </span>
 
                   {/* Date started */}
@@ -126,7 +129,7 @@ export default function TrajectoryListPage() {
                       {finalPassed}
                     </span>
                     <span className="text-[9px] text-envoi-text-dim">
-                      {formatPercent(finalPassed, TOTAL_TESTS)}
+                      {formatPercent(finalPassed, totalTests)}
                     </span>
                   </div>
 

@@ -22,6 +22,8 @@ This file contains all rules, conventions, and architectural context for AI agen
 4. `const` over `let` — only `let` when reassignment is genuinely needed. Never `var`.
 5. No single-letter variable names — `index` not `i`, `suite` not `s`. Exception: `x`/`y` in chart math.
 6. No classes — use functions, closures, plain objects.
+7. **No `!` (non-null assertion) or `as` type casts** — never use `!` to bypass strictness or `as` to force types. Handle types properly with `if` guards, early returns, or runtime validation (e.g. Zod). The only exception: `as` may be used on strings to narrow a `string` to a string literal type (e.g. `"model" as const`).
+8. **Prefer async APIs over sync** — always use async versions of APIs when available. Never use sync methods (e.g. `closeSync()`) when an async equivalent exists.
 
 ## React & Next.js
 
