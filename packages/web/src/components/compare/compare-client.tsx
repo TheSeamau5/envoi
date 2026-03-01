@@ -595,7 +595,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             ) : (
               <>
                 {activeTab === "curves" && (
-                  <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} suites={suites} totalTests={totalTests} />
+                  <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} />
                 )}
                 {activeTab === "milestones" && (
                   <MilestoneTable traces={selectedTraces} colorIndices={colorIndices} suites={suites} />
