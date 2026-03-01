@@ -99,7 +99,7 @@ function MiniSuiteChart({
     <div className="rounded border border-envoi-border bg-envoi-bg p-2">
       <div className="mb-1 flex items-center gap-2 px-1">
         <span
-          className="h-[6px] w-[6px] rounded-full"
+          className="h-1.5 w-1.5 rounded-full"
           style={{ background: suiteColor?.color ?? T.textMuted }}
         />
         <span className="text-[10px] font-semibold text-envoi-text">{suiteName}</span>
@@ -245,11 +245,11 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
       {/* Comparison table */}
       <div className="rounded border border-envoi-border bg-envoi-bg">
         {/* Table header */}
-        <div className="flex items-center border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
-          <span className="min-w-[100px] text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+        <div className="flex items-center border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
+          <span className="min-w-25 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Suite
           </span>
-          <span className="min-w-[60px] text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <span className="min-w-15 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Total
           </span>
           {traces.map((_trace, traceIndex) => {
@@ -260,11 +260,11 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
             return (
               <span
                 key={`col-${traceIndex}`}
-                className="flex min-w-[160px] flex-1 items-center gap-[6px] pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
+                className="flex min-w-40 flex-1 items-center gap-1.5 pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
                 style={{ color: color.line }}
               >
                 <span
-                  className="flex h-[14px] w-[14px] items-center justify-center rounded text-[8px] font-bold text-white"
+                  className="flex h-3.5 w-3.5 items-center justify-center rounded text-[8px] font-bold text-white"
                   style={{ background: color.line }}
                 >
                   {color.label}
@@ -281,19 +281,19 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
           return (
             <div
               key={suite.name}
-              className="flex items-center border-b border-envoi-border-light px-[14px] py-[10px] transition-colors hover:bg-envoi-surface"
+              className="flex items-center border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
             >
               {/* Suite name */}
-              <span className="flex min-w-[100px] items-center gap-2 text-[11px] font-medium text-envoi-text">
+              <span className="flex min-w-25 items-center gap-2 text-[11px] font-medium text-envoi-text">
                 <span
-                  className="h-[6px] w-[6px] rounded-full"
+                  className="h-1.5 w-1.5 rounded-full"
                   style={{ background: suiteColor?.color ?? T.textMuted }}
                 />
                 {suite.name}
               </span>
 
               {/* Total */}
-              <span className="min-w-[60px] text-right text-[11px] text-envoi-text-muted">
+              <span className="min-w-15 text-right text-[11px] text-envoi-text-muted">
                 {suite.total}
               </span>
 
@@ -310,10 +310,10 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
                 return (
                   <div
                     key={`cell-${trace.id}-${suite.name}`}
-                    className="flex min-w-[160px] flex-1 items-center gap-3 pl-4"
+                    className="flex min-w-40 flex-1 items-center gap-3 pl-4"
                   >
                     {/* Progress bar */}
-                    <div className="h-[5px] w-[60px] rounded-full bg-envoi-border-light">
+                    <div className="h-1.25 w-15 rounded-full bg-envoi-border-light">
                       <div
                         className="h-full rounded-full"
                         style={{

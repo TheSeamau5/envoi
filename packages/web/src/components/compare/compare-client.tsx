@@ -348,12 +348,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Top bar: mode toggle + tab navigation */}
-      <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
+      <div className="flex h-10.25 shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         {/* Mode toggle */}
-        <div className="flex items-center gap-[2px] rounded-[4px] border border-envoi-border p-[2px]">
+        <div className="flex items-center gap-0.5 rounded-sm border border-envoi-border p-0.5">
           <button
             onClick={() => setMode("traces")}
-            className="flex items-center gap-[6px] rounded-[3px] px-3 py-[5px] text-[10px] font-semibold transition-colors"
+            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[10px] font-semibold transition-colors"
             style={{
               background: mode === "traces" ? T.text : "transparent",
               color: mode === "traces" ? T.bg : T.textMuted,
@@ -364,7 +364,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           </button>
           <button
             onClick={() => setMode("setups")}
-            className="flex items-center gap-[6px] rounded-[3px] px-3 py-[5px] text-[10px] font-semibold transition-colors"
+            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[10px] font-semibold transition-colors"
             style={{
               background: mode === "setups" ? T.text : "transparent",
               color: mode === "setups" ? T.bg : T.textMuted,
@@ -385,7 +385,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
-                  className="flex items-center gap-[5px] rounded-[3px] px-3 py-[5px] text-[10px] font-medium transition-colors"
+                  className="flex items-center gap-1.25 rounded-[3px] px-3 py-1.25 text-[10px] font-medium transition-colors"
                   style={{
                     background: isActive ? T.accentBg : "transparent",
                     color: isActive ? T.accentDark : T.textMuted,
@@ -415,12 +415,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           {/* Trace selection sidebar */}
           <div
             ref={sidebarRef}
-            className="flex w-[280px] shrink-0 flex-col border-r border-envoi-border outline-none"
+            className="flex w-70 shrink-0 flex-col border-r border-envoi-border outline-none"
             tabIndex={0}
             onKeyDown={handleSidebarKeyDown}
           >
             {/* Sidebar header */}
-            <div className="flex items-center justify-between border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
+            <div className="flex items-center justify-between border-b border-envoi-border bg-envoi-surface px-3.5 py-2">
               <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 Trajectories ({sortedTraces.length})
               </span>
@@ -435,12 +435,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             </div>
 
             {/* Filter + sort row */}
-            <div className="flex items-center gap-2 px-[14px] py-[6px]">
+            <div className="flex items-center gap-2 px-3.5 py-1.5">
               {/* Model filter */}
               <Select value={modelFilter} onValueChange={setModelFilter}>
                 <SelectTrigger
                   size="sm"
-                  className="h-auto max-w-[140px] gap-1 rounded-[3px] border-none bg-transparent px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text [&>span]:truncate"
+                  className="h-auto max-w-35 gap-1 rounded-[3px] border-none bg-transparent px-1.5 py-0.75 text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text [&>span]:truncate"
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -471,14 +471,14 @@ export function CompareClient({ allTraces }: CompareClientProps) {
               {/* Sort dropdown */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex shrink-0 items-center gap-[3px] rounded-[3px] px-[6px] py-[3px] text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
+                  <button className="flex shrink-0 items-center gap-0.75 rounded-[3px] px-1.5 py-0.75 text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
                     <ArrowUpDown size={9} />
                     {sortBy === "score" ? "Score" : "Date"}
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
                   align="end"
-                  className="min-w-[100px] border-envoi-border bg-envoi-bg font-mono shadow-md"
+                  className="min-w-25 border-envoi-border bg-envoi-bg font-mono shadow-md"
                 >
                   <DropdownMenuItem
                     onClick={() => setSortBy("score")}
@@ -518,7 +518,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   <div
                     key={trace.id}
                     ref={isFocused ? focusedRowRef : undefined}
-                    className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
+                    className="flex w-full items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5 text-left transition-colors hover:bg-envoi-surface"
                     style={{
                       borderLeft: color
                         ? `3px solid ${color.line}`
@@ -535,7 +535,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   >
                     {/* Checkbox */}
                     <span
-                      className="flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-[3px] border"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border"
                       style={{
                         borderColor: color ? color.line : T.border,
                         background: color ? color.line : "transparent",
@@ -547,7 +547,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     </span>
 
                     {/* Trace info */}
-                    <div className="flex min-w-0 flex-1 flex-col gap-[2px]">
+                    <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="truncate text-[11px] font-medium text-envoi-text">
                         {trace.id}
                       </span>
@@ -558,7 +558,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                         {formatDate(trace.startedAt)}
                       </span>
                       {/* Score bar */}
-                      <div className="mt-[1px] h-[3px] w-full rounded-full bg-envoi-border-light">
+                      <div className="mt-px h-0.75 w-full rounded-full bg-envoi-border-light">
                         <div
                           className="h-full rounded-full"
                           style={{
@@ -570,7 +570,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     </div>
 
                     {/* Score */}
-                    <div className="flex shrink-0 flex-col items-end gap-[2px]">
+                    <div className="flex shrink-0 flex-col items-end gap-0.5">
                       <span className="text-[11px] font-semibold text-envoi-text">
                         {trace.finalPassed}
                       </span>
@@ -583,7 +583,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     <Link
                       href={`/trajectory/${trace.id}`}
                       onClick={(event) => event.stopPropagation()}
-                      className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
+                      className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
                     >
                       <ArrowUpRight size={12} />
                     </Link>

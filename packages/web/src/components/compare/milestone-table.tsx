@@ -93,7 +93,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
             {/* Suite group header row */}
             <tr className="bg-envoi-surface">
               <th
-                className="sticky left-0 z-10 min-w-[140px] border-b border-r border-envoi-border bg-envoi-surface px-[14px] py-[6px]"
+                className="sticky left-0 z-10 min-w-35 border-b border-r border-envoi-border bg-envoi-surface px-3.5 py-1.5"
                 rowSpan={2}
               >
                 <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
@@ -104,7 +104,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                 <th
                   key={group.name}
                   colSpan={group.items.length}
-                  className={`border-b border-envoi-border px-[14px] py-[6px] text-center text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim ${
+                  className={`border-b border-envoi-border px-3.5 py-1.5 text-center text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim ${
                     groupIdx < groups.length - 1 ? "border-r" : ""
                   }`}
                 >
@@ -121,7 +121,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                   return (
                     <th
                       key={entry.milestone.id}
-                      className={`border-b border-envoi-border px-[14px] py-[6px] text-left text-[10px] font-medium whitespace-nowrap text-envoi-text-dim ${
+                      className={`border-b border-envoi-border px-3.5 py-1.5 text-left text-[10px] font-medium whitespace-nowrap text-envoi-text-dim ${
                         isLastInGroup && !isLastGroup ? "border-r" : ""
                       }`}
                     >
@@ -144,10 +144,10 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
               return (
                 <tr key={trace.id} className="transition-colors hover:bg-envoi-surface">
                   {/* Sticky trace label */}
-                  <td className="sticky left-0 z-10 border-b border-r border-envoi-border bg-envoi-bg px-[14px] py-[10px]">
-                    <span className="flex items-center gap-[6px]">
+                  <td className="sticky left-0 z-10 border-b border-r border-envoi-border bg-envoi-bg px-3.5 py-2.5">
+                    <span className="flex items-center gap-1.5">
                       <span
-                        className="flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
+                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
                         style={{ background: color.line }}
                       >
                         {color.label}
@@ -172,12 +172,12 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                       return (
                         <td
                           key={`${trace.id}-${entry.milestone.id}`}
-                          className={`border-b border-envoi-border-light px-[14px] py-[10px] whitespace-nowrap ${
+                          className={`border-b border-envoi-border-light px-3.5 py-2.5 whitespace-nowrap ${
                             isLastInGroup && !isLastGroup ? "border-r border-r-envoi-border" : ""
                           }`}
                         >
                           {hit.commit ? (
-                            <span className="flex items-center gap-[6px]">
+                            <span className="flex items-center gap-1.5">
                               <span className="text-[11px] font-semibold" style={{ color: color.line }}>
                                 #{hit.commit.index}
                               </span>
@@ -189,7 +189,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                               )}
                             </span>
                           ) : (
-                            <span className="flex items-center gap-[4px] text-[10px] text-envoi-text-dim">
+                            <span className="flex items-center gap-1 text-[10px] text-envoi-text-dim">
                               <Minus size={10} />
                             </span>
                           )}
@@ -203,7 +203,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
 
             {/* Spread row */}
             <tr className="bg-envoi-surface">
-              <td className="sticky left-0 z-10 border-r border-envoi-border bg-envoi-surface px-[14px] py-[10px] text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+              <td className="sticky left-0 z-10 border-r border-envoi-border bg-envoi-surface px-3.5 py-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 Spread
               </td>
               {groups.map((group, groupIdx) =>
@@ -213,7 +213,7 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                   return (
                     <td
                       key={`spread-${entry.milestone.id}`}
-                      className={`px-[14px] py-[10px] whitespace-nowrap ${
+                      className={`px-3.5 py-2.5 whitespace-nowrap ${
                         isLastInGroup && !isLastGroup ? "border-r border-r-envoi-border" : ""
                       }`}
                     >

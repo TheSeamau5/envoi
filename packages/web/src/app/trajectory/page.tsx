@@ -15,7 +15,7 @@ const COL = {
   target: "w-[64px] shrink-0",
   lang: "w-[48px] shrink-0",
   nl: "w-[40px] shrink-0",
-  started: "w-[140px] shrink-0",
+  started: "w-35 shrink-0",
   duration: "w-[64px] shrink-0",
   score: "flex-1 min-w-[200px]",
   commits: "w-[72px] shrink-0",
@@ -41,14 +41,14 @@ export default async function TrajectoryListPage() {
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex h-[41px] shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
+      <div className="flex h-10.25 shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           All Trajectories ({allTraces.length})
         </span>
       </div>
 
       {/* Column header */}
-      <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px]">
+      <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5">
         <span className={`${COL.id} ${CELL_BORDER} ${HEADER_STYLE} pl-0`}>ID</span>
         <span className={`${COL.target} ${CELL_BORDER} ${HEADER_STYLE}`}>Target</span>
         <span className={`${COL.lang} ${CELL_BORDER} ${HEADER_STYLE}`}>Lang</span>
@@ -57,7 +57,7 @@ export default async function TrajectoryListPage() {
         <span className={`${COL.duration} ${CELL_BORDER} ${HEADER_STYLE}`}>Duration</span>
         <span className={`${COL.score} ${CELL_BORDER} ${HEADER_STYLE}`}>Score</span>
         <span className={`${COL.commits} px-3 text-right ${HEADER_STYLE}`}>Commits</span>
-        <span className="w-[12px] shrink-0" />
+        <span className="w-3 shrink-0" />
       </div>
 
       {/* Scrollable body */}
@@ -65,7 +65,7 @@ export default async function TrajectoryListPage() {
         {[...grouped.entries()].map(([model, traces]) => (
           <div key={model}>
             {/* Model group header */}
-            <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
+            <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
               <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 {model} ({traces.length})
               </span>
@@ -84,7 +84,7 @@ export default async function TrajectoryListPage() {
                 <Link
                   key={trace.id}
                   href={`/trajectory/${trace.id}`}
-                  className="flex items-center border-b border-envoi-border-light px-[14px] py-[10px] transition-colors hover:bg-envoi-surface"
+                  className="flex items-center border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
                 >
                   {/* ID */}
                   <span className={`${COL.id} ${CELL_BORDER} truncate pl-0 text-[11px] font-medium text-envoi-text`}>
@@ -118,7 +118,7 @@ export default async function TrajectoryListPage() {
 
                   {/* Progress bar + score */}
                   <div className={`${COL.score} ${CELL_BORDER} flex items-center gap-2`}>
-                    <div className="h-[4px] w-[140px] shrink-0 rounded-full bg-envoi-border-light">
+                    <div className="h-1 w-35 shrink-0 rounded-full bg-envoi-border-light">
                       <div
                         className="h-full rounded-full bg-envoi-accent"
                         style={{ width: `${pct}%` }}
@@ -138,7 +138,7 @@ export default async function TrajectoryListPage() {
                   </span>
 
                   {/* Arrow */}
-                  <ArrowUpRight size={12} className="w-[12px] shrink-0 text-envoi-text-dim" />
+                  <ArrowUpRight size={12} className="w-3 shrink-0 text-envoi-text-dim" />
                 </Link>
               );
             })}

@@ -19,34 +19,52 @@ function isSameType<T>(value: unknown, sample: T): value is T {
   return typeof value === typeof sample;
 }
 
+/**
+ * Read a stored value from localStorage, returning undefined if not found
+ * or invalid. Pure function with no side effects.
+ */
+function readStoredValue<T>(prefixedKey: string, defaultValue: T): T | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  try {
+    const stored = window.localStorage.getItem(prefixedKey);
+    if (stored === null) {
+      return undefined;
+    }
+    const parsed: unknown = JSON.parse(stored);
+    if (isSameType(parsed, defaultValue)) {
+      return parsed;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** React hook that persists state to localStorage */
 export function usePersistedState<T>(
   key: string,
   defaultValue: T,
 ): [T, (valueOrUpdater: T | ((prev: T) => T)) => void] {
   const prefixedKey = `${STORAGE_PREFIX}${key}`;
+  const hydrated = useRef(false);
 
   // Always start with defaultValue — matches SSR output, avoids hydration mismatch
   const [value, setValue] = useState<T>(defaultValue);
-  const hydrated = useRef(false);
 
-  // After mount: read localStorage and update if a stored value exists
+  // After mount: read localStorage and update via a scheduled state update
   useEffect(() => {
     if (hydrated.current) {
       return;
     }
     hydrated.current = true;
-    try {
-      const stored = window.localStorage.getItem(prefixedKey);
-      if (stored === null) {
-        return;
-      }
-      const parsed: unknown = JSON.parse(stored);
-      if (isSameType(parsed, defaultValue)) {
-        setValue(parsed);
-      }
-    } catch {
-      // Bad data — keep default
+    const stored = readStoredValue(prefixedKey, defaultValue);
+    if (stored !== undefined) {
+      // Use requestAnimationFrame to avoid synchronous setState in effect
+      requestAnimationFrame(() => {
+        setValue(stored);
+      });
     }
   }, [prefixedKey, defaultValue]);
 

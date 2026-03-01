@@ -173,23 +173,23 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
   return (
     <div className="flex flex-1 gap-0 overflow-hidden">
       {/* Sidebar */}
-      <div className="flex w-[260px] shrink-0 flex-col border-r border-envoi-border">
+      <div className="flex w-65 shrink-0 flex-col border-r border-envoi-border">
         {/* Dimension chips header */}
-        <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
+        <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
           <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Group By
           </span>
         </div>
 
         {/* Active dimension chips */}
-        <div className="flex flex-wrap gap-[6px] border-b border-envoi-border px-[14px] py-[10px]">
+        <div className="flex flex-wrap gap-1.5 border-b border-envoi-border px-3.5 py-2.5">
           {activeDimensions.map((dimKey) => {
             const dimDef = GROUPABLE_DIMENSIONS.find((dim) => dim.key === dimKey);
             return (
               <button
                 key={dimKey}
                 onClick={() => removeDimension(dimKey)}
-                className="flex items-center gap-[4px] rounded-[3px] bg-envoi-accent-bg px-[8px] py-[3px] text-[10px] font-medium whitespace-nowrap text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
+                className="flex items-center gap-1 rounded-[3px] bg-envoi-accent-bg px-2 py-0.75 text-[10px] font-medium whitespace-nowrap text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
               >
                 {dimDef?.label ?? dimKey}
                 <X size={9} />
@@ -209,7 +209,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
         </div>
 
         {/* Group list */}
-        <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
+        <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
           <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Groups ({groups.length})
           </span>
@@ -229,17 +229,17 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                 className="border-b border-envoi-border-light"
               >
                 <div
-                  className="flex items-center gap-[8px] px-[14px] py-[10px] transition-colors hover:bg-envoi-surface"
+                  className="flex items-center gap-2 px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
                   style={{ opacity: isHidden ? 0.4 : 1 }}
                 >
                   {/* Color dot */}
                   <span
-                    className="h-[8px] w-[8px] shrink-0 rounded-full"
+                    className="h-2 w-2 shrink-0 rounded-full"
                     style={{ background: color.line }}
                   />
 
                   {/* Label + stats */}
-                  <div className="flex min-w-0 flex-1 flex-col gap-[2px]">
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="truncate text-[11px] font-medium text-envoi-text">
                       {group.label}
                     </span>
@@ -394,18 +394,18 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
         {/* Per-suite median table */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg">
-          <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
+          <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
             <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Per-Suite Medians
             </span>
           </div>
 
           {/* Table header */}
-          <div className="flex items-center border-b border-envoi-border px-[14px] py-[8px]">
-            <span className="min-w-[100px] text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <div className="flex items-center border-b border-envoi-border px-3.5 py-2">
+            <span className="min-w-25 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Suite
             </span>
-            <span className="min-w-[50px] text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            <span className="min-w-12.5 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Total
             </span>
             {visibleGroups.map((group, groupIndex) => {
@@ -416,11 +416,11 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               return (
                 <span
                   key={group.key}
-                  className="flex min-w-[160px] flex-1 items-center gap-[4px] border-l border-envoi-border-light pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
+                  className="flex min-w-40 flex-1 items-center gap-1 border-l border-envoi-border-light pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
                   style={{ color: color.line }}
                 >
                   <span
-                    className="h-[6px] w-[6px] rounded-full"
+                    className="h-1.5 w-1.5 rounded-full"
                     style={{ background: color.line }}
                   />
                   {group.label.length > 16 ? group.label.slice(0, 16) + "..." : group.label}
@@ -435,16 +435,16 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             return (
               <div
                 key={suite.name}
-                className="flex items-center border-b border-envoi-border-light px-[14px] py-[8px] transition-colors hover:bg-envoi-surface"
+                className="flex items-center border-b border-envoi-border-light px-3.5 py-2 transition-colors hover:bg-envoi-surface"
               >
-                <span className="flex min-w-[100px] items-center gap-2 text-[11px] font-medium text-envoi-text">
+                <span className="flex min-w-25 items-center gap-2 text-[11px] font-medium text-envoi-text">
                   <span
-                    className="h-[6px] w-[6px] rounded-full"
+                    className="h-1.5 w-1.5 rounded-full"
                     style={{ background: suiteColor?.color ?? T.textMuted }}
                   />
                   {suite.name}
                 </span>
-                <span className="min-w-[50px] text-right text-[11px] text-envoi-text-muted">
+                <span className="min-w-12.5 text-right text-[11px] text-envoi-text-muted">
                   {suite.total}
                 </span>
                 {visibleGroups.map((group, groupIndex) => {
@@ -457,9 +457,9 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                   return (
                     <div
                       key={`${group.key}-${suite.name}`}
-                      className="flex min-w-[160px] flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
+                      className="flex min-w-40 flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
                     >
-                      <div className="h-[4px] w-[80px] rounded-full bg-envoi-border-light">
+                      <div className="h-1 w-20 rounded-full bg-envoi-border-light">
                         <div
                           className="h-full rounded-full"
                           style={{ width: `${pct}%`, background: color.line }}
@@ -481,7 +481,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
         {/* Group -> Trace breakdown table */}
         <div className="rounded border border-envoi-border bg-envoi-bg">
-          <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[10px]">
+          <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
             <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Group Breakdown
             </span>
@@ -506,7 +506,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                 {/* Group header row */}
                 <button
                   onClick={() => toggleGroupExpand(group.key)}
-                  className="flex w-full items-center gap-[8px] px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
+                  className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left transition-colors hover:bg-envoi-surface"
                 >
                   {isExpanded ? (
                     <ChevronDown size={12} className="shrink-0 text-envoi-text-dim" />
@@ -514,7 +514,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                     <ChevronRight size={12} className="shrink-0 text-envoi-text-dim" />
                   )}
                   <span
-                    className="h-[8px] w-[8px] shrink-0 rounded-full"
+                    className="h-2 w-2 shrink-0 rounded-full"
                     style={{ background: color.line }}
                   />
                   <span className="flex-1 truncate text-[11px] font-medium text-envoi-text">
@@ -536,19 +536,19 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                       return (
                         <div
                           key={trace.id}
-                          className="flex items-center gap-3 border-b border-envoi-border-light px-[14px] py-[8px] pl-[38px]"
+                          className="flex items-center gap-3 border-b border-envoi-border-light px-3.5 py-2 pl-9.5"
                         >
-                          <span className="min-w-[80px] truncate text-[10px] font-medium text-envoi-text">
+                          <span className="min-w-20 truncate text-[10px] font-medium text-envoi-text">
                             {trace.id}
                           </span>
-                          <span className="min-w-[100px] truncate text-[10px] text-envoi-text-muted">
+                          <span className="min-w-25 truncate text-[10px] text-envoi-text-muted">
                             {trace.model}
                           </span>
                           <span className="text-[10px] text-envoi-text-muted">
                             {trace.duration}
                           </span>
                           <div className="flex flex-1 items-center gap-2">
-                            <div className="h-[4px] w-[90px] rounded-full bg-envoi-border-light">
+                            <div className="h-1 w-22.5 rounded-full bg-envoi-border-light">
                               <div
                                 className="h-full rounded-full"
                                 style={{
@@ -592,7 +592,7 @@ function AddDimensionButton({
     <>
       <button
         onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-[3px] rounded-[3px] border border-envoi-border px-[6px] py-[3px] text-[10px] text-envoi-text-dim transition-colors hover:bg-envoi-surface hover:text-envoi-text"
+        className="flex items-center gap-0.75 rounded-[3px] border border-envoi-border px-1.5 py-0.75 text-[10px] text-envoi-text-dim transition-colors hover:bg-envoi-surface hover:text-envoi-text"
       >
         <Plus size={9} />
         Add
@@ -606,7 +606,7 @@ function AddDimensionButton({
                 onAdd(dim.key);
                 setOpen(false);
               }}
-              className="flex w-full items-center px-3 py-[6px] text-[10px] whitespace-nowrap text-envoi-text transition-colors hover:bg-envoi-surface"
+              className="flex w-full items-center px-3 py-1.5 text-[10px] whitespace-nowrap text-envoi-text transition-colors hover:bg-envoi-surface"
             >
               {dim.label}
             </button>

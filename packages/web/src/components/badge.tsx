@@ -12,7 +12,7 @@ type BadgeProps = {
 export function Badge({ children, color, bg }: BadgeProps) {
   return (
     <span
-      className="whitespace-nowrap rounded-[3px] px-[7px] py-[2px] text-[10px] font-medium"
+      className="whitespace-nowrap rounded-[3px] px-1.75 py-0.5 text-[10px] font-medium"
       style={{ color, background: bg }}
     >
       {children}

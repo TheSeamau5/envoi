@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -36,7 +36,7 @@ type SidebarProps = {
 export function Sidebar({ initialCollapsed }: SidebarProps) {
   const [collapsed, setCollapsedRaw] = useState(initialCollapsed);
   const pathname = usePathname();
-  const isFirstRender = useRef(true);
+  const [isFirstRender, setIsFirstRender] = useState(true);
 
   const setCollapsed = useCallback((next: boolean) => {
     setCollapsedRaw(next);
@@ -47,8 +47,10 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
     width: collapsed ? 48 : 200,
     contentOpacity: collapsed ? 0 : 1,
     config: { tension: 300, friction: 30 },
-    immediate: isFirstRender.current,
-    onRest: () => { isFirstRender.current = false; },
+    immediate: isFirstRender,
+    onRest: () => {
+      setIsFirstRender(false);
+    },
   });
 
   return (
@@ -57,7 +59,7 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
       style={{ width: spring.width }}
     >
       {/* Header: logo + collapse toggle */}
-      <div className={`flex h-[41px] shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}>
+      <div className={`flex h-10.25 shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}>
         {!collapsed && (
           <animated.span
             className="min-w-0 flex-1 overflow-hidden text-sm font-bold whitespace-nowrap text-envoi-accent"
@@ -68,7 +70,7 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
         )}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
         >
           {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
         </button>
