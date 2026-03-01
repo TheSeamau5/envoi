@@ -30,7 +30,9 @@ const MINI_PLOT_H = MINI_HEIGHT - MINI_MARGIN.top - MINI_MARGIN.bottom;
 
 /** Map minutes to X in mini chart */
 function miniToX(minutes: number, maxDuration: number): number {
-  if (maxDuration === 0) return MINI_MARGIN.left;
+  if (maxDuration === 0) {
+    return MINI_MARGIN.left;
+  }
   return MINI_MARGIN.left + (minutes / maxDuration) * MINI_PLOT_W;
 }
 
@@ -52,10 +54,14 @@ function buildSuiteLinePath(commits: Commit[], suiteName: string, suiteTotal: nu
 
 /** Build SVG area path for a trace within a single suite */
 function buildSuiteAreaPath(commits: Commit[], suiteName: string, suiteTotal: number, maxDuration: number): string {
-  if (commits.length === 0) return "";
+  if (commits.length === 0) {
+    return "";
+  }
   const firstCommit = commits[0];
   const lastCommit = commits[commits.length - 1];
-  if (!firstCommit || !lastCommit) return "";
+  if (!firstCommit || !lastCommit) {
+    return "";
+  }
   const lineSegments = commits
     .map((commit, pointIdx) => {
       const passed = commit.suiteState[suiteName] ?? 0;
@@ -151,7 +157,9 @@ function MiniSuiteChart({
         {/* Area fills */}
         {traces.map((trace, traceIndex) => {
           const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-          if (!traceColor) return undefined;
+          if (!traceColor) {
+            return undefined;
+          }
           return (
             <path
               key={`area-${trace.id}`}
@@ -165,7 +173,9 @@ function MiniSuiteChart({
         {/* Lines */}
         {traces.map((trace, traceIndex) => {
           const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-          if (!traceColor) return undefined;
+          if (!traceColor) {
+            return undefined;
+          }
           return (
             <path
               key={`line-${trace.id}`}
@@ -184,9 +194,13 @@ function MiniSuiteChart({
         {/* Endpoint labels */}
         {traces.map((trace, traceIndex) => {
           const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-          if (!traceColor) return undefined;
+          if (!traceColor) {
+            return undefined;
+          }
           const lastCommit = trace.commits[trace.commits.length - 1];
-          if (!lastCommit) return undefined;
+          if (!lastCommit) {
+            return undefined;
+          }
           const passed = lastCommit.suiteState[suiteName] ?? 0;
           return (
             <text
@@ -207,7 +221,7 @@ function MiniSuiteChart({
 
 export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: SuiteBreakdownProps) {
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
-  const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
+  const [hoveredTrace, setHoveredTrace] = useState<number>();
   const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
 
   return (
@@ -240,7 +254,9 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
           </span>
           {traces.map((_trace, traceIndex) => {
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
+            if (!color) {
+              return undefined;
+            }
             return (
               <span
                 key={`col-${traceIndex}`}
@@ -287,7 +303,9 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
                 const passed = lastCommit?.suiteState[suite.name] ?? 0;
                 const pct = (passed / suite.total) * 100;
                 const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-                if (!traceColor) return undefined;
+                if (!traceColor) {
+                  return undefined;
+                }
 
                 return (
                   <div

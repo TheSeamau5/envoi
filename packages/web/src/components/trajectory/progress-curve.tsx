@@ -40,32 +40,42 @@ const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 /** Get Y-axis max based on active suite filter */
 function getYMax(activeSuite: string, suites: Suite[], totalTests: number): number {
-  if (activeSuite === "all") return totalTests;
+  if (activeSuite === "all") {
+    return totalTests;
+  }
   const suite = suites.find((suiteItem) => suiteItem.name === activeSuite);
   return suite ? suite.total : totalTests;
 }
 
 /** Get Y value for a commit based on active suite */
 function getYValue(commit: Commit, activeSuite: string): number {
-  if (activeSuite === "all") return commit.totalPassed;
+  if (activeSuite === "all") {
+    return commit.totalPassed;
+  }
   return commit.suiteState[activeSuite] ?? 0;
 }
 
 /** Map commit index to X pixel position */
 function toX(commitIndex: number, totalCommits: number): number {
-  if (totalCommits <= 1) return MARGIN.left + PLOT_WIDTH / 2;
+  if (totalCommits <= 1) {
+    return MARGIN.left + PLOT_WIDTH / 2;
+  }
   return MARGIN.left + (commitIndex / (totalCommits - 1)) * PLOT_WIDTH;
 }
 
 /** Map value to Y pixel position */
 function toY(value: number, yMax: number): number {
-  if (yMax === 0) return MARGIN.top + PLOT_HEIGHT;
+  if (yMax === 0) {
+    return MARGIN.top + PLOT_HEIGHT;
+  }
   return MARGIN.top + PLOT_HEIGHT - (value / yMax) * PLOT_HEIGHT;
 }
 
 /** Map a time in minutes to an X pixel position (linear interpolation across duration) */
 function timeToX(minutes: number, totalMinutes: number): number {
-  if (totalMinutes <= 0) return MARGIN.left;
+  if (totalMinutes <= 0) {
+    return MARGIN.left;
+  }
   const ratio = Math.min(1, minutes / totalMinutes);
   return MARGIN.left + ratio * PLOT_WIDTH;
 }
@@ -96,7 +106,9 @@ function buildAreaPath(
   yMax: number,
 ): string {
   const subset = commits.slice(0, endIndex + 1);
-  if (subset.length === 0) return "";
+  if (subset.length === 0) {
+    return "";
+  }
 
   const lineSegments = subset
     .map((commit, pointIndex) => {
@@ -121,17 +133,25 @@ function getYTicks(yMax: number): number[] {
 
 /** Format minutes as a time label — "0" for zero, then "30m", "1h", "2h", etc. */
 function formatTimeLabel(minutes: number): string {
-  if (minutes === 0) return "0";
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes === 0) {
+    return "0";
+  }
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  if (mins === 0) return `${hours}h`;
+  if (mins === 0) {
+    return `${hours}h`;
+  }
   return `${hours}h${mins}m`;
 }
 
 /** Generate sensible X-axis time ticks based on total duration */
 function getXTimeTicks(totalMinutes: number): number[] {
-  if (totalMinutes <= 0) return [0];
+  if (totalMinutes <= 0) {
+    return [0];
+  }
 
   let intervalMinutes: number;
   if (totalMinutes <= 60) {
@@ -285,7 +305,9 @@ export function ProgressCurve({
         {/* Percentage label above selected commit */}
         {(() => {
           const commit = commits[selectedIndex];
-          if (!commit) return undefined;
+          if (!commit) {
+            return undefined;
+          }
           const xPos = toX(selectedIndex, commits.length);
           const yPos = toY(getYValue(commit, activeSuite), yMax);
           const pct = Math.round((getYValue(commit, activeSuite) / yMax) * 100);

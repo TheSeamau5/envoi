@@ -65,9 +65,11 @@ const TABS: { key: CompareTab; label: string; icon: typeof TrendingUp }[] = [
 
 /** Find the smallest non-negative integer not in `usedSet` */
 function minAvailableColor(usedSet: Set<number>): number {
-  let idx = 0;
-  while (usedSet.has(idx)) idx++;
-  return idx;
+  let colorIndex = 0;
+  while (usedSet.has(colorIndex)) {
+    colorIndex++;
+  }
+  return colorIndex;
 }
 
 export function CompareClient({ allTraces }: CompareClientProps) {
@@ -100,8 +102,8 @@ export function CompareClient({ allTraces }: CompareClientProps) {
    */
   const [colorMap, setColorMap] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {};
-    allTraces.slice(0, 2).forEach((trace, idx) => {
-      initial[trace.id] = idx;
+    allTraces.slice(0, 2).forEach((trace, traceIndex) => {
+      initial[trace.id] = traceIndex;
     });
     return initial;
   });
@@ -110,10 +112,14 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(STORAGE_KEY);
-      if (!stored) return;
+      if (!stored) {
+        return;
+      }
       const parsed: unknown = JSON.parse(stored);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-      const validIds = new Set(allTraces.map((t) => t.id));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return;
+      }
+      const validIds = new Set(allTraces.map((trace) => trace.id));
       const cleaned: Record<string, number> = {};
       for (const [id, colorIdx] of Object.entries(parsed)) {
         if (validIds.has(id) && typeof colorIdx === "number" && colorIdx >= 0) {
@@ -153,11 +159,15 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     const idsToFetch = selectedIds.filter(
       (id) => !fullTrajectories[id] && !loadingIds.has(id),
     );
-    if (idsToFetch.length === 0) return;
+    if (idsToFetch.length === 0) {
+      return;
+    }
 
     setLoadingIds((prev) => {
       const next = new Set(prev);
-      for (const id of idsToFetch) next.add(id);
+      for (const id of idsToFetch) {
+        next.add(id);
+      }
       return next;
     });
 
@@ -166,8 +176,8 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       .then((data: Trajectory[]) => {
         setFullTrajectories((prev) => {
           const next = { ...prev };
-          for (const t of data) {
-            next[t.id] = t;
+          for (const traj of data) {
+            next[traj.id] = traj;
           }
           return next;
         });
@@ -178,7 +188,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       .finally(() => {
         setLoadingIds((prev) => {
           const next = new Set(prev);
-          for (const id of idsToFetch) next.delete(id);
+          for (const id of idsToFetch) {
+            next.delete(id);
+          }
           return next;
         });
       });
@@ -187,7 +199,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
   /** Fetch all full trajectories when entering Setup Compare mode */
   useEffect(() => {
-    if (mode !== "setups" || allFullFetched.current || loadingAllFull) return;
+    if (mode !== "setups" || allFullFetched.current || loadingAllFull) {
+      return;
+    }
 
     setLoadingAllFull(true);
     fetch("/api/compare")
@@ -198,8 +212,8 @@ export function CompareClient({ allTraces }: CompareClientProps) {
         // Also populate fullTrajectories cache for trace mode
         setFullTrajectories((prev) => {
           const next = { ...prev };
-          for (const t of data) {
-            next[t.id] = t;
+          for (const traj of data) {
+            next[traj.id] = traj;
           }
           return next;
         });
@@ -213,7 +227,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
-    if (modelFilter === "all") return allTraces;
+    if (modelFilter === "all") {
+      return allTraces;
+    }
     return allTraces.filter((trace) => trace.model === modelFilter);
   }, [allTraces, modelFilter]);
 
@@ -221,11 +237,11 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   const sortedTraces = useMemo(() => {
     const sorted = [...filteredTraces];
     if (sortBy === "score") {
-      sorted.sort((a, b) => b.finalPassed - a.finalPassed);
+      sorted.sort((traceA, traceB) => traceB.finalPassed - traceA.finalPassed);
     } else {
       sorted.sort(
-        (a, b) =>
-          new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+        (traceA, traceB) =>
+          new Date(traceB.startedAt).getTime() - new Date(traceA.startedAt).getTime(),
       );
     }
     return sorted;
@@ -272,7 +288,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
   /** Unique model names for the filter dropdown */
   const uniqueModels = useMemo(() => {
-    const models = new Set(allTraces.map((t) => t.model));
+    const models = new Set(allTraces.map((trace) => trace.model));
     return [...models];
   }, [allTraces]);
 
@@ -306,7 +322,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
         case "Enter": {
           event.preventDefault();
           const focused = sortedTraces[focusedIndex];
-          if (focused) toggleTrace(focused.id);
+          if (focused) {
+            toggleTrace(focused.id);
+          }
           break;
         }
         case "Home":

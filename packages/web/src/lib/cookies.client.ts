@@ -19,7 +19,9 @@ export function setLayoutCookie(
     sidebarCollapsed: COOKIE_SIDEBAR_COLLAPSED,
   };
   const name = cookieNames[key];
-  if (!name) return;
+  if (!name) {
+    return;
+  }
   const encoded = encodeURIComponent(String(value));
   document.cookie = `${name}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
 }

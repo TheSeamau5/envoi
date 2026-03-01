@@ -21,27 +21,28 @@ This file contains all rules, conventions, and architectural context for AI agen
 3. `type` over `interface` — always. No `interface` keyword anywhere.
 4. `const` over `let` — only `let` when reassignment is genuinely needed. Never `var`.
 5. No single-letter variable names — `index` not `i`, `suite` not `s`. Exception: `x`/`y` in chart math.
-6. No classes — use functions, closures, plain objects.
-7. **No `!` (non-null assertion) or `as` type casts** — never use `!` to bypass strictness or `as` to force types. Handle types properly with `if` guards, early returns, or runtime validation (e.g. Zod). The only exception: `as` may be used on strings to narrow a `string` to a string literal type (e.g. `"model" as const`).
-8. **Prefer async APIs over sync** — always use async versions of APIs when available. Never use sync methods (e.g. `closeSync()`) when an async equivalent exists.
+6. **Always use curly braces on new lines** — every `if`, `else`, `for`, `while` body must use `{ }` with the body on its own line. No single-line bodies. `if (x) { return y; }` is forbidden — write `if (x) {\n  return y;\n}`. This applies everywhere: conditions, loops, callbacks. Ternaries excluded.
+7. No classes — use functions, closures, plain objects.
+8. **No `!` (non-null assertion) or `as` type casts** — never use `!` to bypass strictness or `as` to force types. Handle types properly with `if` guards, early returns, or runtime validation (e.g. Zod). The only exception: `as` may be used on strings to narrow a `string` to a string literal type (e.g. `"model" as const`).
+9. **Prefer async APIs over sync** — always use async versions of APIs when available. Never use sync methods (e.g. `closeSync()`) when an async equivalent exists.
 
 ## React & Next.js
 
-7. Server components first — every `page.tsx` is a server component. Only interactive parts use `"use client"`.
-8. shadcn/ui for UI primitives — buttons, tabs, selects, tables, tooltips.
-9. lucide-react for all icons.
+10. Server components first — every `page.tsx` is a server component. Only interactive parts use `"use client"`.
+11. shadcn/ui for UI primitives — buttons, tabs, selects, tables, tooltips.
+12. lucide-react for all icons.
 
 ## Styling
 
-10. Padding over margins — use padding and gap. Only acceptable margin: `margin: 0 auto`.
-11. Design tokens in `src/lib/tokens.ts` for inline SVG styles.
-12. Tailwind theme tokens in `src/app/globals.css`.
+13. Padding over margins — use padding and gap. Only acceptable margin: `margin: 0 auto`.
+14. Design tokens in `src/lib/tokens.ts` for inline SVG styles.
+15. Tailwind theme tokens in `src/app/globals.css`.
 
 ## Code Quality
 
-13. JSDoc comments on every exported function, component, and type.
-14. Zero TypeScript errors, zero warnings, zero ESLint errors.
-15. The build must be clean: `pnpm build` exits 0 with no warnings.
+16. JSDoc comments on every exported function, component, and type.
+17. Zero TypeScript errors, zero warnings, zero ESLint errors.
+18. The build must be clean: `pnpm build` exits 0 with no warnings.
 
 ## Architecture
 
@@ -62,8 +63,8 @@ This file contains all rules, conventions, and architectural context for AI agen
 
 ## localStorage & UI Persistence
 
-16. Use `usePersistedState` from `src/lib/storage.ts` for all localStorage access — never call `localStorage` directly.
-17. All keys are auto-prefixed with `envoi:`. Use descriptive kebab-case key names (e.g., `"sidebar-collapsed"`, `"divider-position"`).
-18. The hook handles SSR, invalid JSON, schema changes, and quota errors. Always provide a sensible default value.
-19. Never crash on bad/missing/outdated localStorage data — always fall back to defaults.
-20. Validate stored values against current valid options before using them.
+19. Use `usePersistedState` from `src/lib/storage.ts` for all localStorage access — never call `localStorage` directly.
+20. All keys are auto-prefixed with `envoi:`. Use descriptive kebab-case key names (e.g., `"sidebar-collapsed"`, `"divider-position"`).
+21. The hook handles SSR, invalid JSON, schema changes, and quota errors. Always provide a sensible default value.
+22. Never crash on bad/missing/outdated localStorage data — always fall back to defaults.
+23. Validate stored values against current valid options before using them.

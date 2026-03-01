@@ -20,6 +20,11 @@ except ImportError:
     graph_command = None
     run_command = None
 
+try:
+    from envoi_code.scripts.materialize_summaries import materialize_command
+except ImportError:
+    materialize_command = None
+
 
 def normalize_code_argv(argv: list[str]) -> list[str]:
     """Normalize shorthand `envoi code` forms before argparse parsing."""
@@ -30,7 +35,7 @@ def normalize_code_argv(argv: list[str]) -> list[str]:
         return argv
 
     code_head = argv[1]
-    if code_head in {"graph", "-h", "--help"}:
+    if code_head in {"graph", "materialize", "-h", "--help"}:
         return argv
 
     if code_head == "run":
@@ -97,13 +102,46 @@ def main() -> None:
         graph_parser.add_argument("--part", type=int, default=None)
         graph_parser.add_argument("--checkout-dest", default=None)
 
+        # "materialize" subcommand
+        if materialize_command is not None:
+            mat_parser = code_subparsers.add_parser(
+                "materialize",
+                help="Build summary parquet files from raw traces",
+            )
+            mat_parser.add_argument(
+                "--source",
+                required=True,
+                help="Source directory containing trajectory subdirs with trace.parquet",
+            )
+            mat_parser.add_argument(
+                "--dest",
+                required=True,
+                help="Destination directory for summary parquet files",
+            )
+            mat_parser.add_argument(
+                "--extract-code",
+                action="store_true",
+                default=False,
+                help="Extract code snapshots from git bundles",
+            )
+            mat_parser.add_argument(
+                "--incremental",
+                action="store_true",
+                default=False,
+                help="Only process new/updated trajectories",
+            )
+
     normalized_argv = normalize_code_argv(sys.argv[1:])
     is_code_command = bool(normalized_argv) and normalized_argv[0] == "code"
     is_code_graph = (
         len(normalized_argv) >= 2 and normalized_argv[0] == "code"
         and normalized_argv[1] == "graph"
     )
-    if extract_param_flags is not None and is_code_command and not is_code_graph:
+    is_code_materialize = (
+        len(normalized_argv) >= 2 and normalized_argv[0] == "code"
+        and normalized_argv[1] == "materialize"
+    )
+    if extract_param_flags is not None and is_code_command and not is_code_graph and not is_code_materialize:
         argv_without_params, raw_params = extract_param_flags(normalized_argv)
     else:
         argv_without_params, raw_params = normalized_argv, {}
@@ -147,6 +185,14 @@ def main() -> None:
         elif code_command == "graph":
             assert graph_command is not None
             graph_command(args)
+        elif code_command == "materialize":
+            if materialize_command is None:
+                print(
+                    "envoi-code is not installed. Run: pip install envoi-cli[code]",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            materialize_command(args)
         else:
             parser.parse_args(["code", "--help"])
 

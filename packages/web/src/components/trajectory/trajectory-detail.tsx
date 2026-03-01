@@ -11,10 +11,10 @@
 
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type { Trajectory, DetailLeftTab, DetailRightTab, Suite } from "@/lib/types";
+import type { Trajectory, DetailLeftTab, DetailRightTab, Suite, CodeSnapshot, Commit } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
@@ -60,6 +60,36 @@ export function TrajectoryDetail({
   /** Suite filter for timeline */
   const [activeSuite, setActiveSuite] = useState("all");
 
+  /** Code history — fetched lazily from code_snapshots.parquet */
+  const [codeHistory, setCodeHistory] = useState<Record<number, CodeSnapshot>>();
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchCodeHistory() {
+      try {
+        const response = await fetch(`/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history`);
+        if (!response.ok) {
+          return;
+        }
+        const data: Record<string, CodeSnapshot> = await response.json();
+        if (!cancelled) {
+          /** Convert string keys from JSON to numeric keys */
+          const mapped: Record<number, CodeSnapshot> = {};
+          for (const [key, snapshot] of Object.entries(data)) {
+            mapped[Number(key)] = snapshot;
+          }
+          setCodeHistory(mapped);
+        }
+      } catch {
+        /** Code history is optional — silently ignore fetch errors */
+      }
+    }
+    fetchCodeHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [trajectory.id]);
+
   /**
    * Right panel open/close + divider position.
    * Initial values come from server-read cookies so SSR matches hydration.
@@ -89,6 +119,21 @@ export function TrajectoryDetail({
   const isDragging = useRef(false);
 
   const selectedCommit = commits[selectedIndex];
+
+  /** Merge code snapshot into selected commit when code history is available */
+  const enrichedCommit: Commit | undefined = useMemo(() => {
+    if (!selectedCommit) {
+      return undefined;
+    }
+    const snapshot = codeHistory?.[selectedCommit.index];
+    if (!snapshot) {
+      return selectedCommit;
+    }
+    return {
+      ...selectedCommit,
+      codeSnapshot: snapshot,
+    };
+  }, [selectedCommit, codeHistory]);
 
   const handleSelectCommit = useCallback(
     (index: number) => {
@@ -165,7 +210,9 @@ export function TrajectoryDetail({
     let lastPct = 0;
 
     const handleMouseMove = (event: MouseEvent) => {
-      if (!isDragging.current || !containerRef.current) return;
+      if (!isDragging.current || !containerRef.current) {
+        return;
+      }
       const rect = containerRef.current.getBoundingClientRect();
       const percentage = ((event.clientX - rect.left) / rect.width) * 100;
       const clamped = Math.round(Math.max(25, Math.min(75, percentage)));
@@ -189,7 +236,9 @@ export function TrajectoryDetail({
     document.addEventListener("mouseup", handleMouseUp);
   }, []);
 
-  if (!selectedCommit) return undefined;
+  if (!selectedCommit) {
+    return undefined;
+  }
 
   return (
     <div
@@ -201,7 +250,7 @@ export function TrajectoryDetail({
       {/* Left panel */}
       <animated.div
         className="flex flex-col overflow-hidden"
-        style={{ width: panelSpring.leftWidth.to((v) => `${v}%`) }}
+        style={{ width: panelSpring.leftWidth.to((width) => `${width}%`) }}
       >
         {/* Tab bar */}
         <div className="flex h-[41px] shrink-0 items-stretch border-b border-envoi-border">
@@ -317,7 +366,7 @@ export function TrajectoryDetail({
         onMouseDown={rightPanelOpen ? handleDividerMouseDown : undefined}
         className="group relative flex shrink-0 items-center justify-center"
         style={{
-          width: panelSpring.dividerWidth.to((v) => `${v}px`),
+          width: panelSpring.dividerWidth.to((width) => `${width}px`),
           cursor: rightPanelOpen ? "col-resize" : "default",
           touchAction: "none",
           overflow: "hidden",
@@ -340,7 +389,7 @@ export function TrajectoryDetail({
       <animated.div
         className="flex flex-col overflow-hidden"
         style={{
-          width: panelSpring.rightWidth.to((v) => `${v}%`),
+          width: panelSpring.rightWidth.to((width) => `${width}%`),
           opacity: panelSpring.rightOpacity,
         }}
       >
@@ -374,7 +423,7 @@ export function TrajectoryDetail({
         {rightTab === "steps" ? (
           <StepsPanel commit={selectedCommit} />
         ) : (
-          <CodePanel commit={selectedCommit} />
+          <CodePanel commit={enrichedCommit ?? selectedCommit} />
         )}
       </animated.div>
     </div>

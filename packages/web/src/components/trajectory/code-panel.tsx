@@ -16,7 +16,7 @@ type CodePanelProps = {
 };
 
 export function CodePanel({ commit }: CodePanelProps) {
-  const [selectedFile, setSelectedFile] = useState<string | undefined>(undefined);
+  const [selectedFile, setSelectedFile] = useState<string>();
 
   /** Auto-select first changed file when commit changes */
   useEffect(() => {

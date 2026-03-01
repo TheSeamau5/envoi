@@ -35,7 +35,9 @@ function hasCommit(hit: MilestoneHit): hit is MilestoneHit & { commit: Commit } 
 /** Find which trace index reached the milestone fastest */
 function findFastestIndex(hits: MilestoneHit[]): number | undefined {
   const reachedHits = hits.filter(hasCommit);
-  if (reachedHits.length === 0) return undefined;
+  if (reachedHits.length === 0) {
+    return undefined;
+  }
   const best = reachedHits.reduce((acc, hit) =>
     hit.commit.minutesElapsed < acc.commit.minutesElapsed ? hit : acc,
   );
@@ -45,7 +47,9 @@ function findFastestIndex(hits: MilestoneHit[]): number | undefined {
 /** Compute the spread (max - min elapsed time) among traces that reached a milestone */
 function computeSpread(hits: MilestoneHit[]): number | undefined {
   const times = hits.filter(hasCommit).map((hit) => hit.commit.minutesElapsed);
-  if (times.length < 2) return undefined;
+  if (times.length < 2) {
+    return undefined;
+  }
   return Math.max(...times) - Math.min(...times);
 }
 
@@ -134,7 +138,9 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
             {traces.map((trace, traceIndex) => {
               const colorIdx = (colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length;
               const color = TRACE_COLORS[colorIdx];
-              if (!color) return undefined;
+              if (!color) {
+                return undefined;
+              }
               return (
                 <tr key={trace.id} className="transition-colors hover:bg-envoi-surface">
                   {/* Sticky trace label */}
@@ -156,7 +162,9 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
                   {groups.map((group, groupIdx) =>
                     group.items.map((entry, entryIdx) => {
                       const hit = entry.hits[traceIndex];
-                      if (!hit) return undefined;
+                      if (!hit) {
+                        return undefined;
+                      }
                       const isFastest = traceIndex === entry.fastest;
                       const isLastInGroup = entryIdx === group.items.length - 1;
                       const isLastGroup = groupIdx === groups.length - 1;

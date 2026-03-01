@@ -32,11 +32,15 @@ export function usePersistedState<T>(
 
   // After mount: read localStorage and update if a stored value exists
   useEffect(() => {
-    if (hydrated.current) return;
+    if (hydrated.current) {
+      return;
+    }
     hydrated.current = true;
     try {
       const stored = window.localStorage.getItem(prefixedKey);
-      if (stored === null) return;
+      if (stored === null) {
+        return;
+      }
       const parsed: unknown = JSON.parse(stored);
       if (isSameType(parsed, defaultValue)) {
         setValue(parsed);
@@ -48,7 +52,9 @@ export function usePersistedState<T>(
 
   // Persist to localStorage whenever value changes (skip the initial default)
   useEffect(() => {
-    if (!hydrated.current) return;
+    if (!hydrated.current) {
+      return;
+    }
     try {
       window.localStorage.setItem(prefixedKey, JSON.stringify(value));
     } catch {

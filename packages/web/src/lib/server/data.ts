@@ -2,6 +2,7 @@
  * Server-side data access layer.
  *
  * Queries DuckDB/S3 for real data, falls back to mock when S3 is not configured.
+ * Uses materialized summary tables when available for fast list queries.
  * Import this module only from server components or API route handlers.
  */
 
@@ -9,26 +10,34 @@ import {
   isS3Configured,
   allTracesGlob,
   traceUri,
+  codeSnapshotsUri,
   query,
+  hasSummaryTables,
 } from "./db";
 import {
   reconstructTrajectory,
   summaryRowToTrajectory,
+  summaryTableRowToTrajectory,
+  buildCompareTrajectories,
   parseSuites,
+  toSummaryTableRow,
   type ParquetRow,
   type TrajectorySummaryRow,
 } from "./reconstruct";
-import type { Trajectory, Suite } from "@/lib/types";
+import { cached } from "./cache";
+import type { Trajectory, Suite, CodeSnapshot, FileSnapshot } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Mock fallback (lazy import to avoid bundling when not needed)
 // ---------------------------------------------------------------------------
 
+/** Load all mock trajectories (lazy import) */
 async function getMockTrajectories(): Promise<Trajectory[]> {
   const { generateAllTrajectories } = await import("@/lib/mock");
   return generateAllTrajectories();
 }
 
+/** Load a single mock trajectory by ID (lazy import) */
 async function getMockTrajectoryById(
   id: string,
 ): Promise<Trajectory | undefined> {
@@ -40,6 +49,7 @@ async function getMockTrajectoryById(
 // Escape helpers (prevent SQL injection for identifiers)
 // ---------------------------------------------------------------------------
 
+/** Escape single quotes in SQL string literals */
 function escapeString(value: string): string {
   return value.replace(/'/g, "''");
 }
@@ -59,9 +69,9 @@ function toSummaryRow(row: Record<string, unknown>): TrajectorySummaryRow {
     total_parts: Number(row.total_parts ?? 0),
     total_turns: Number(row.total_turns ?? 0),
     total_tokens: Number(row.total_tokens ?? 0),
-    session_end_reason: row.session_end_reason != null ? String(row.session_end_reason) : undefined,
-    task_params: row.task_params != null ? String(row.task_params) : undefined,
-    suites: row.suites != null ? String(row.suites) : undefined,
+    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
+    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
+    suites: row.suites != undefined ? String(row.suites) : undefined,
   };
 }
 
@@ -69,41 +79,41 @@ function toSummaryRow(row: Record<string, unknown>): TrajectorySummaryRow {
 function toParquetRow(row: Record<string, unknown>): ParquetRow {
   return {
     trajectory_id: String(row.trajectory_id ?? ""),
-    session_id: row.session_id != null ? String(row.session_id) : undefined,
-    agent: row.agent != null ? String(row.agent) : undefined,
-    agent_model: row.agent_model != null ? String(row.agent_model) : undefined,
-    started_at: row.started_at != null ? String(row.started_at) : undefined,
-    environment: row.environment != null ? String(row.environment) : undefined,
-    task_params: row.task_params != null ? String(row.task_params) : undefined,
+    session_id: row.session_id != undefined ? String(row.session_id) : undefined,
+    agent: row.agent != undefined ? String(row.agent) : undefined,
+    agent_model: row.agent_model != undefined ? String(row.agent_model) : undefined,
+    started_at: row.started_at != undefined ? String(row.started_at) : undefined,
+    environment: row.environment != undefined ? String(row.environment) : undefined,
+    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
     part: Number(row.part ?? 0),
-    timestamp: row.timestamp != null ? String(row.timestamp) : undefined,
-    role: row.role != null ? String(row.role) : undefined,
-    part_type: row.part_type != null ? String(row.part_type) : undefined,
-    item_type: row.item_type != null ? String(row.item_type) : undefined,
-    summary: row.summary != null ? String(row.summary) : undefined,
-    duration_ms: row.duration_ms != null ? Number(row.duration_ms) : undefined,
-    git_commit: row.git_commit != null ? String(row.git_commit) : undefined,
-    content: row.content != null ? String(row.content) : undefined,
-    content_token_estimate: row.content_token_estimate != null ? Number(row.content_token_estimate) : undefined,
-    tool_name: row.tool_name != null ? String(row.tool_name) : undefined,
-    tool_status: row.tool_status != null ? String(row.tool_status) : undefined,
-    tool_input: row.tool_input != null ? String(row.tool_input) : undefined,
-    tool_output: row.tool_output != null ? String(row.tool_output) : undefined,
-    tool_error: row.tool_error != null ? String(row.tool_error) : undefined,
-    tool_exit_code: row.tool_exit_code != null ? Number(row.tool_exit_code) : undefined,
-    token_usage: row.token_usage != null ? String(row.token_usage) : undefined,
-    patch: row.patch != null ? String(row.patch) : undefined,
-    repo_checkpoint: row.repo_checkpoint != null ? String(row.repo_checkpoint) : undefined,
-    testing_state: row.testing_state != null ? String(row.testing_state) : undefined,
-    eval_events_delta: row.eval_events_delta != null ? String(row.eval_events_delta) : undefined,
-    turn: row.turn != null ? Number(row.turn) : undefined,
-    session_end_reason: row.session_end_reason != null ? String(row.session_end_reason) : undefined,
-    session_end_total_parts: row.session_end_total_parts != null ? Number(row.session_end_total_parts) : undefined,
-    session_end_total_turns: row.session_end_total_turns != null ? Number(row.session_end_total_turns) : undefined,
-    session_end_final_commit: row.session_end_final_commit != null ? String(row.session_end_final_commit) : undefined,
-    suites: row.suites != null ? String(row.suites) : undefined,
-    files: row.files != null ? String(row.files) : undefined,
-    bundle_uri: row.bundle_uri != null ? String(row.bundle_uri) : undefined,
+    timestamp: row.timestamp != undefined ? String(row.timestamp) : undefined,
+    role: row.role != undefined ? String(row.role) : undefined,
+    part_type: row.part_type != undefined ? String(row.part_type) : undefined,
+    item_type: row.item_type != undefined ? String(row.item_type) : undefined,
+    summary: row.summary != undefined ? String(row.summary) : undefined,
+    duration_ms: row.duration_ms != undefined ? Number(row.duration_ms) : undefined,
+    git_commit: row.git_commit != undefined ? String(row.git_commit) : undefined,
+    content: row.content != undefined ? String(row.content) : undefined,
+    content_token_estimate: row.content_token_estimate != undefined ? Number(row.content_token_estimate) : undefined,
+    tool_name: row.tool_name != undefined ? String(row.tool_name) : undefined,
+    tool_status: row.tool_status != undefined ? String(row.tool_status) : undefined,
+    tool_input: row.tool_input != undefined ? String(row.tool_input) : undefined,
+    tool_output: row.tool_output != undefined ? String(row.tool_output) : undefined,
+    tool_error: row.tool_error != undefined ? String(row.tool_error) : undefined,
+    tool_exit_code: row.tool_exit_code != undefined ? Number(row.tool_exit_code) : undefined,
+    token_usage: row.token_usage != undefined ? String(row.token_usage) : undefined,
+    patch: row.patch != undefined ? String(row.patch) : undefined,
+    repo_checkpoint: row.repo_checkpoint != undefined ? String(row.repo_checkpoint) : undefined,
+    testing_state: row.testing_state != undefined ? String(row.testing_state) : undefined,
+    eval_events_delta: row.eval_events_delta != undefined ? String(row.eval_events_delta) : undefined,
+    turn: row.turn != undefined ? Number(row.turn) : undefined,
+    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
+    session_end_total_parts: row.session_end_total_parts != undefined ? Number(row.session_end_total_parts) : undefined,
+    session_end_total_turns: row.session_end_total_turns != undefined ? Number(row.session_end_total_turns) : undefined,
+    session_end_final_commit: row.session_end_final_commit != undefined ? String(row.session_end_final_commit) : undefined,
+    suites: row.suites != undefined ? String(row.suites) : undefined,
+    files: row.files != undefined ? String(row.files) : undefined,
+    bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
   };
 }
 
@@ -113,6 +123,8 @@ function toParquetRow(row: Record<string, unknown>): ParquetRow {
 
 /**
  * Get all trajectory summaries (lightweight, for list pages).
+ * Uses materialized summary tables when available (fast path),
+ * otherwise falls back to a GROUP BY scan of raw parquet files (slow path).
  * Optionally filter by environment or model.
  */
 export async function getAllTrajectories(opts?: {
@@ -125,9 +137,62 @@ export async function getAllTrajectories(opts?: {
     return getMockTrajectories();
   }
 
-  const glob = allTracesGlob();
+  const cacheKey = `all-trajectories:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
 
-  // Build the trajectory summary query
+  return cached(cacheKey, async () => {
+    // Fast path: use materialized summary tables
+    if (await hasSummaryTables()) {
+      return getAllTrajectoriesFromSummary(opts);
+    }
+    // Slow path: GROUP BY scan of raw parquet files
+    return getAllTrajectoriesFromGlob(opts);
+  });
+}
+
+/**
+ * Fast path: query pre-materialized trajectory_summary table.
+ * Final scores are already embedded — no N+1 queries needed.
+ */
+async function getAllTrajectoriesFromSummary(opts?: {
+  environment?: string;
+  model?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<Trajectory[]> {
+  let sql = `SELECT * FROM trajectory_summary WHERE 1=1`;
+
+  if (opts?.environment) {
+    sql += ` AND environment = '${escapeString(opts.environment)}'`;
+  }
+  if (opts?.model) {
+    sql += ` AND agent_model = '${escapeString(opts.model)}'`;
+  }
+
+  sql += ` ORDER BY started_at DESC`;
+
+  if (opts?.limit) {
+    sql += ` LIMIT ${Number(opts.limit)}`;
+  }
+  if (opts?.offset) {
+    sql += ` OFFSET ${Number(opts.offset)}`;
+  }
+
+  const rawRows = await query(sql);
+  return rawRows.map((row) => summaryTableRowToTrajectory(toSummaryTableRow(row)));
+}
+
+/**
+ * Slow path: GROUP BY scan of raw parquet files + N+1 evaluation queries.
+ * Used when materialized summary tables are not available.
+ */
+async function getAllTrajectoriesFromGlob(opts?: {
+  environment?: string;
+  model?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<Trajectory[]> {
+  const glob = await allTracesGlob();
+
   let sql = `
     WITH summary AS (
       SELECT
@@ -171,9 +236,9 @@ export async function getAllTrajectories(opts?: {
   // For each trajectory, get the final score from the last completed evaluation
   const trajectories: Trajectory[] = [];
   for (const row of summaryRows) {
-    // Try to get final score
     let finalScore: { passed: number; failed: number; total: number } | undefined;
     try {
+      const uri = await traceUri(row.trajectory_id);
       const evalSql = `
         WITH events AS (
           SELECT
@@ -183,7 +248,7 @@ export async function getAllTrajectories(opts?: {
                 '["json"]'
               )
             ) AS event
-          FROM read_parquet('${escapeString(traceUri(row.trajectory_id))}')
+          FROM read_parquet('${escapeString(uri)}')
           WHERE eval_events_delta IS NOT NULL
             AND json_array_length(eval_events_delta) > 0
         )
@@ -227,13 +292,15 @@ export async function getTrajectoryById(
   }
 
   try {
-    const uri = traceUri(id);
+    const uri = await traceUri(id);
     const sql = `
       SELECT * FROM read_parquet('${escapeString(uri)}')
       ORDER BY part
     `;
     const rawRows = await query(sql);
-    if (rawRows.length === 0) return undefined;
+    if (rawRows.length === 0) {
+      return undefined;
+    }
     const rows = rawRows.map(toParquetRow);
     return reconstructTrajectory(rows);
   } catch {
@@ -258,24 +325,25 @@ export async function getTrajectoryEvaluations(
   }[]
 > {
   if (!isS3Configured()) {
-    // Derive from mock trajectory
     const traj = await getMockTrajectoryById(id);
-    if (!traj) return [];
-    return traj.commits.map((c, idx) => ({
-      evalId: `mock-eval-${idx}`,
-      part: idx,
-      passed: c.totalPassed,
-      failed: c.feedback.totalFailed,
-      total: c.totalPassed + c.feedback.totalFailed,
+    if (!traj) {
+      return [];
+    }
+    return traj.commits.map((commit, commitIndex) => ({
+      evalId: `mock-eval-${commitIndex}`,
+      part: commitIndex,
+      passed: commit.totalPassed,
+      failed: commit.feedback.totalFailed,
+      total: commit.totalPassed + commit.feedback.totalFailed,
       suiteResults: Object.fromEntries(
-        Object.entries(c.suiteState).map(([k, v]) => [k, { passed: v, total: 0 }]),
+        Object.entries(commit.suiteState).map(([key, val]) => [key, { passed: val, total: 0 }]),
       ),
-      targetCommit: c.hash,
+      targetCommit: commit.hash,
     }));
   }
 
   try {
-    const uri = traceUri(id);
+    const uri = await traceUri(id);
     const sql = `
       WITH events AS (
         SELECT
@@ -345,27 +413,52 @@ export async function getEnvironments(): Promise<
     ];
   }
 
-  const glob = allTracesGlob();
-  const sql = `
-    SELECT
-      environment,
-      MIN(suites) AS suites,
-      COUNT(DISTINCT trajectory_id) AS trajectory_count,
-      COUNT(DISTINCT agent_model) AS model_count
-    FROM read_parquet('${escapeString(glob)}')
-    GROUP BY environment
-    ORDER BY environment
-  `;
-  const rawRows = await query(sql);
+  return cached("environments", async () => {
+    // Fast path: use summary table
+    if (await hasSummaryTables()) {
+      const sql = `
+        SELECT
+          environment,
+          MIN(suites) AS suites,
+          COUNT(*) AS trajectory_count,
+          COUNT(DISTINCT agent_model) AS model_count
+        FROM trajectory_summary
+        GROUP BY environment
+        ORDER BY environment
+      `;
+      const rawRows = await query(sql);
+      return rawRows.map((row) => ({
+        environment: String(row.environment ?? ""),
+        suites: parseSuites(
+          row.suites !== undefined ? String(row.suites) : undefined,
+        ),
+        trajectoryCount: Number(row.trajectory_count ?? 0),
+        modelCount: Number(row.model_count ?? 0),
+      }));
+    }
 
-  return rawRows.map((row) => ({
-    environment: String(row.environment ?? ""),
-    suites: parseSuites(
-      row.suites !== undefined ? String(row.suites) : undefined,
-    ),
-    trajectoryCount: Number(row.trajectory_count ?? 0),
-    modelCount: Number(row.model_count ?? 0),
-  }));
+    // Slow path: glob scan
+    const glob = await allTracesGlob();
+    const sql = `
+      SELECT
+        environment,
+        MIN(suites) AS suites,
+        COUNT(DISTINCT trajectory_id) AS trajectory_count,
+        COUNT(DISTINCT agent_model) AS model_count
+      FROM read_parquet('${escapeString(glob)}')
+      GROUP BY environment
+      ORDER BY environment
+    `;
+    const rawRows = await query(sql);
+    return rawRows.map((row) => ({
+      environment: String(row.environment ?? ""),
+      suites: parseSuites(
+        row.suites !== undefined ? String(row.suites) : undefined,
+      ),
+      trajectoryCount: Number(row.trajectory_count ?? 0),
+      modelCount: Number(row.model_count ?? 0),
+    }));
+  });
 }
 
 /**
@@ -373,8 +466,8 @@ export async function getEnvironments(): Promise<
  * Can filter by specific IDs or environment.
  *
  * Unlike getAllTrajectories() which returns lightweight summaries,
- * this always returns full trajectories with commit data needed
- * for progress curves and other compare visualizations.
+ * this returns trajectories with commit data needed for progress curves.
+ * Uses materialized summary + evaluation tables when available.
  */
 export async function getCompareTrajectories(opts?: {
   ids?: string[];
@@ -384,23 +477,29 @@ export async function getCompareTrajectories(opts?: {
     const all = await getMockTrajectories();
     if (opts?.ids && opts.ids.length > 0) {
       const idSet = new Set(opts.ids);
-      return all.filter((t) => idSet.has(t.id));
+      return all.filter((traj) => idSet.has(traj.id));
     }
     return all;
   }
 
-  // For compare, we always need full trajectory data (with commits for curves)
+  // Fast path: use summary + evaluation tables
+  if (await hasSummaryTables()) {
+    return getCompareTrajectoriesFromSummary(opts);
+  }
+
+  // Slow path: load full trajectories individually
   if (opts?.ids && opts.ids.length > 0) {
     const trajectories: Trajectory[] = [];
     for (const id of opts.ids) {
-      const t = await getTrajectoryById(id);
-      if (t) trajectories.push(t);
+      const traj = await getTrajectoryById(id);
+      if (traj) {
+        trajectories.push(traj);
+      }
     }
     return trajectories;
   }
 
-  // When no specific IDs given, fetch all trajectory IDs then load each fully
-  const glob = allTracesGlob();
+  const glob = await allTracesGlob();
   const idSql = `
     SELECT DISTINCT trajectory_id
     FROM read_parquet('${escapeString(glob)}')
@@ -410,9 +509,138 @@ export async function getCompareTrajectories(opts?: {
   const trajectories: Trajectory[] = [];
   for (const row of idRows) {
     const id = String(row.trajectory_id ?? "");
-    if (!id) continue;
-    const t = await getTrajectoryById(id);
-    if (t) trajectories.push(t);
+    if (!id) {
+      continue;
+    }
+    const traj = await getTrajectoryById(id);
+    if (traj) {
+      trajectories.push(traj);
+    }
   }
   return trajectories;
+}
+
+/**
+ * Fast path for compare: query summary + evaluation tables in two bulk queries,
+ * then build trajectories in memory via buildCompareTrajectories.
+ */
+async function getCompareTrajectoriesFromSummary(opts?: {
+  ids?: string[];
+  environment?: string;
+}): Promise<Trajectory[]> {
+  let summSql = `SELECT * FROM trajectory_summary WHERE 1=1`;
+  let evalSql = `SELECT * FROM evaluation_summary WHERE 1=1`;
+
+  if (opts?.ids && opts.ids.length > 0) {
+    const idList = opts.ids.map((id) => `'${escapeString(id)}'`).join(", ");
+    summSql += ` AND trajectory_id IN (${idList})`;
+    evalSql += ` AND trajectory_id IN (${idList})`;
+  }
+  if (opts?.environment) {
+    summSql += ` AND environment = '${escapeString(opts.environment)}'`;
+    evalSql += ` AND environment = '${escapeString(opts.environment)}'`;
+  }
+
+  summSql += ` ORDER BY started_at DESC`;
+  evalSql += ` ORDER BY trajectory_id, trigger_part`;
+
+  const [summaryRows, evalRows] = await Promise.all([
+    query(summSql),
+    query(evalSql),
+  ]);
+
+  return buildCompareTrajectories(summaryRows, evalRows);
+}
+
+// ---------------------------------------------------------------------------
+// Code history (Layer 5)
+// ---------------------------------------------------------------------------
+
+/** Raw row from code_snapshots.parquet */
+type CodeSnapshotRow = {
+  commit_hash: string;
+  commit_index: number;
+  file_path: string;
+  status: string;
+  content: string;
+  added_lines: string;
+};
+
+/** Validate a raw query row into a CodeSnapshotRow */
+function toCodeSnapshotRow(row: Record<string, unknown>): CodeSnapshotRow {
+  return {
+    commit_hash: String(row.commit_hash ?? ""),
+    commit_index: Number(row.commit_index ?? 0),
+    file_path: String(row.file_path ?? ""),
+    status: String(row.status ?? ""),
+    content: String(row.content ?? ""),
+    added_lines: String(row.added_lines ?? "[]"),
+  };
+}
+
+/** Parse added_lines JSON string into number[] */
+function parseAddedLines(jsonStr: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is number => typeof item === "number");
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get code history for a trajectory — one CodeSnapshot per commit index.
+ * Returns a map from commit index to CodeSnapshot.
+ * Returns undefined if code_snapshots.parquet does not exist for this trajectory.
+ */
+export async function getCodeHistory(
+  trajectoryId: string,
+): Promise<Record<number, CodeSnapshot> | undefined> {
+  if (!isS3Configured()) {
+    return undefined;
+  }
+
+  const uri = await codeSnapshotsUri(trajectoryId);
+  if (uri === undefined) {
+    return undefined;
+  }
+
+  try {
+    const sql = `
+      SELECT commit_hash, commit_index, file_path, status, content, added_lines
+      FROM read_parquet('${escapeString(uri)}')
+      ORDER BY commit_index, file_path
+    `;
+    const rawRows = await query(sql);
+
+    const result: Record<number, CodeSnapshot> = {};
+
+    for (const raw of rawRows) {
+      const row = toCodeSnapshotRow(raw);
+      const snapshot = result[row.commit_index];
+      if (snapshot === undefined) {
+        result[row.commit_index] = {};
+      }
+
+      const fileSnapshot: FileSnapshot = {
+        lines: row.content.split("\n"),
+        added: parseAddedLines(row.added_lines),
+        touched: row.status === "A" || row.status === "M",
+        isNew: row.status === "A" ? true : undefined,
+      };
+
+      const target = result[row.commit_index];
+      if (target !== undefined) {
+        target[row.file_path] = fileSnapshot;
+      }
+    }
+
+    return result;
+  } catch (error) {
+    console.error(`[data] Failed to load code history for ${trajectoryId}:`, error);
+    return undefined;
+  }
 }

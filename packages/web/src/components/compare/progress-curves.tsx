@@ -9,11 +9,12 @@
 
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useRef } from "react";
 import { AlertCircle, Clock, Hash } from "lucide-react";
 import type { Trajectory, Commit, Suite } from "@/lib/types";
 import { TRACE_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
 import { formatPercent, computeMaxDuration, getXTicks, formatXTick } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type ProgressCurvesProps = {
   traces: Trajectory[];
@@ -35,7 +36,9 @@ const Y_PCT_TICKS = [0, 25, 50, 75, 100];
 
 /** Map minutes elapsed to X pixel position */
 function toX(minutes: number, maxDuration: number): number {
-  if (maxDuration === 0) return MARGIN.left;
+  if (maxDuration === 0) {
+    return MARGIN.left;
+  }
   return MARGIN.left + (minutes / maxDuration) * PLOT_WIDTH;
 }
 
@@ -46,15 +49,17 @@ function toYPct(pct: number): number {
 
 /** Convert raw passed count to percentage */
 function toPct(passed: number, total: number): number {
-  if (total === 0) return 0;
+  if (total === 0) {
+    return 0;
+  }
   return (passed / total) * 100;
 }
 
 /** Build SVG path data for a trace line (using percentage Y) */
 function buildLinePath(commits: Commit[], totalTests: number, maxDuration: number): string {
   return commits
-    .map((commit, i) => {
-      const cmd = i === 0 ? "M" : "L";
+    .map((commit, pointIndex) => {
+      const cmd = pointIndex === 0 ? "M" : "L";
       return `${cmd}${toX(commit.minutesElapsed, maxDuration).toFixed(1)},${toYPct(toPct(commit.totalPassed, totalTests)).toFixed(1)}`;
     })
     .join(" ");
@@ -62,13 +67,17 @@ function buildLinePath(commits: Commit[], totalTests: number, maxDuration: numbe
 
 /** Build SVG path data for the area fill under the curve */
 function buildAreaPath(commits: Commit[], totalTests: number, maxDuration: number): string {
-  if (commits.length === 0) return "";
+  if (commits.length === 0) {
+    return "";
+  }
   const firstCommit = commits[0];
   const lastCommit = commits[commits.length - 1];
-  if (!firstCommit || !lastCommit) return "";
+  if (!firstCommit || !lastCommit) {
+    return "";
+  }
   const lineSegments = commits
-    .map((commit, i) => {
-      const cmd = i === 0 ? "M" : "L";
+    .map((commit, pointIndex) => {
+      const cmd = pointIndex === 0 ? "M" : "L";
       return `${cmd}${toX(commit.minutesElapsed, maxDuration).toFixed(1)},${toYPct(toPct(commit.totalPassed, totalTests)).toFixed(1)}`;
     })
     .join(" ");
@@ -82,28 +91,41 @@ type HoveredPoint = {
   commitIndex: number;
   commit: Commit;
   totalTests: number;
+  /** SVG-space coordinates for crosshair rendering */
   cx: number;
   cy: number;
+  /** Container-relative pixel coordinates for tooltip positioning */
+  screenX: number;
+  screenY: number;
 };
 
 /** Check if all traces share the same suite names */
 function tracesShareSuites(traces: Trajectory[]): boolean {
-  if (traces.length <= 1) return true;
+  if (traces.length <= 1) {
+    return true;
+  }
   const firstSuites = traces[0]?.suites;
-  if (!firstSuites) return false;
-  const firstNames = firstSuites.map((s) => s.name).sort().join(",");
-  for (let i = 1; i < traces.length; i++) {
-    const s = traces[i]?.suites;
-    if (!s) return false;
-    const names = s.map((suite) => suite.name).sort().join(",");
-    if (names !== firstNames) return false;
+  if (!firstSuites) {
+    return false;
+  }
+  const firstNames = firstSuites.map((suite) => suite.name).sort().join(",");
+  for (let traceIdx = 1; traceIdx < traces.length; traceIdx++) {
+    const traceSuites = traces[traceIdx]?.suites;
+    if (!traceSuites) {
+      return false;
+    }
+    const names = traceSuites.map((suite) => suite.name).sort().join(",");
+    if (names !== firstNames) {
+      return false;
+    }
   }
   return true;
 }
 
 export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
-  const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
-  const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | undefined>(undefined);
+  const [hoveredTrace, setHoveredTrace] = useState<number>();
+  const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint>();
+  const chartRef = useRef<HTMLDivElement>(null);
 
   const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
   const xTicks = useMemo(() => getXTicks(maxDuration), [maxDuration]);
@@ -113,9 +135,9 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<SVGSVGElement>) => {
       const svg = event.currentTarget;
-      const rect = svg.getBoundingClientRect();
-      const mouseX = ((event.clientX - rect.left) / rect.width) * VIEW_WIDTH;
-      const mouseY = ((event.clientY - rect.top) / rect.height) * VIEW_HEIGHT;
+      const svgRect = svg.getBoundingClientRect();
+      const mouseX = ((event.clientX - svgRect.left) / svgRect.width) * VIEW_WIDTH;
+      const mouseY = ((event.clientY - svgRect.top) / svgRect.height) * VIEW_HEIGHT;
 
       // Only respond within the plot area
       if (
@@ -129,29 +151,62 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
         return;
       }
 
-      let best: HoveredPoint | undefined;
+      let bestCx = 0;
+      let bestCy = 0;
+      let bestCommit: Commit | undefined;
+      let bestTotal = 0;
+      let bestTraceIdx = 0;
+      let bestCommitIdx = 0;
       let bestDist = Infinity;
 
-      for (let ti = 0; ti < traces.length; ti++) {
-        const trace = traces[ti];
-        if (!trace) continue;
+      for (let traceIdx = 0; traceIdx < traces.length; traceIdx++) {
+        const trace = traces[traceIdx];
+        if (!trace) {
+          continue;
+        }
         const total = trace.totalTests;
-        for (let ci = 0; ci < trace.commits.length; ci++) {
-          const commit = trace.commits[ci];
-          if (!commit) continue;
+        for (let commitIdx = 0; commitIdx < trace.commits.length; commitIdx++) {
+          const commit = trace.commits[commitIdx];
+          if (!commit) {
+            continue;
+          }
           const cx = toX(commit.minutesElapsed, maxDuration);
           const cy = toYPct(toPct(commit.totalPassed, total));
           const dist = Math.sqrt((mouseX - cx) ** 2 + (mouseY - cy) ** 2);
           if (dist < bestDist && dist < 30) {
             bestDist = dist;
-            best = { traceIndex: ti, commitIndex: ci, commit, totalTests: total, cx, cy };
+            bestCx = cx;
+            bestCy = cy;
+            bestCommit = commit;
+            bestTotal = total;
+            bestTraceIdx = traceIdx;
+            bestCommitIdx = commitIdx;
           }
         }
       }
 
-      if (best) {
-        setHoveredPoint(best);
-        setHoveredTrace(best.traceIndex);
+      if (bestCommit) {
+        // Compute container-relative screen coordinates for the tooltip
+        const chartEl = chartRef.current;
+        const chartRect = chartEl?.getBoundingClientRect();
+        const screenX = chartRect
+          ? svgRect.left + (bestCx / VIEW_WIDTH) * svgRect.width - chartRect.left
+          : 0;
+        const screenY = chartRect
+          ? svgRect.top + (bestCy / VIEW_HEIGHT) * svgRect.height - chartRect.top
+          : 0;
+
+        setHoveredPoint({
+          traceIndex: bestTraceIdx,
+          commitIndex: bestCommitIdx,
+          commit: bestCommit,
+          totalTests: bestTotal,
+          cx: bestCx,
+          cy: bestCy,
+          screenX,
+          screenY,
+        });
+        setHoveredTrace(bestTraceIdx);
       } else {
         setHoveredPoint(undefined);
         setHoveredTrace(undefined);
@@ -168,7 +223,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
   return (
     <div className="flex flex-col gap-4">
       {/* SVG Chart */}
-      <div className="rounded border border-envoi-border bg-envoi-bg p-3">
+      <div ref={chartRef} className="relative rounded border border-envoi-border bg-envoi-bg p-3">
         <svg
           viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
           className="w-full"
@@ -215,7 +270,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
 
           {/* Y axis labels (right: absolute count — only when all traces share same totalTests) */}
           {traces.length > 0 &&
-            traces.every((t) => t.totalTests === traces[0]?.totalTests) &&
+            traces.every((trace) => trace.totalTests === traces[0]?.totalTests) &&
             Y_PCT_TICKS.map((pct) => {
               const total = traces[0]?.totalTests ?? 0;
               return (
@@ -266,7 +321,9 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
           {/* Trace area fills (rendered first, behind lines) */}
           {traces.map((trace, traceIndex) => {
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
+            if (!color) {
+              return undefined;
+            }
             return (
               <path
                 key={`area-${trace.id}`}
@@ -280,7 +337,9 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
           {/* Trace lines */}
           {traces.map((trace, traceIndex) => {
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
+            if (!color) {
+              return undefined;
+            }
             return (
               <path
                 key={`line-${trace.id}`}
@@ -297,7 +356,9 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
           {/* Regression dots (red circles) */}
           {traces.map((trace, traceIndex) => {
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
+            if (!color) {
+              return undefined;
+            }
             return trace.commits
               .filter((commit) => commit.isRegression)
               .map((commit) => (
@@ -318,9 +379,13 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
           {/* Endpoint score labels (show % instead of raw count) */}
           {traces.map((trace, traceIndex) => {
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
+            if (!color) {
+              return undefined;
+            }
             const lastCommit = trace.commits[trace.commits.length - 1];
-            if (!lastCommit) return undefined;
+            if (!lastCommit) {
+              return undefined;
+            }
             const pct = toPct(lastCommit.totalPassed, trace.totalTests);
             return (
               <text
@@ -339,12 +404,13 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             );
           })}
 
-          {/* Hover crosshair lines + tooltip */}
+          {/* Hover crosshair lines + highlight dot */}
           {hoveredPoint && (() => {
-            const { traceIndex, commit, totalTests, cx, cy } = hoveredPoint;
+            const { traceIndex, cx, cy } = hoveredPoint;
             const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-            if (!color) return undefined;
-            const pct = toPct(commit.totalPassed, totalTests);
+            if (!color) {
+              return undefined;
+            }
 
             return (
               <g style={{ pointerEvents: "none" }}>
@@ -379,35 +445,36 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                   stroke={T.bg}
                   strokeWidth={2}
                 />
-                {/* Tooltip background + text above the point */}
-                <rect
-                  x={cx - 44}
-                  y={cy - 32}
-                  width={88}
-                  height={24}
-                  rx={4}
-                  fill="#0a0a0a"
-                  opacity={0.9}
-                />
-                <text
-                  x={cx}
-                  y={cy - 16}
-                  textAnchor="middle"
-                  style={{ fontSize: "9px", fill: "#ffffff", fontWeight: 600 }}
-                >
-                  {`${pct.toFixed(1)}% (${commit.totalPassed}/${totalTests})`}
-                </text>
               </g>
             );
           })()}
         </svg>
+
+        {/* Shadcn tooltip positioned above hovered data point */}
+        {hoveredPoint && (
+          <TooltipProvider>
+            <Tooltip open>
+              <TooltipTrigger asChild>
+                <div
+                  className="pointer-events-none absolute h-0 w-0"
+                  style={{ left: hoveredPoint.screenX, top: hoveredPoint.screenY }}
+                />
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={12}>
+                {`${toPct(hoveredPoint.commit.totalPassed, hoveredPoint.totalTests).toFixed(1)}% (${hoveredPoint.commit.totalPassed}/${hoveredPoint.totalTests})`}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
       </div>
 
       {/* Stat cards per trace */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {traces.map((trace, traceIndex) => {
           const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
-          if (!color) return undefined;
+          if (!color) {
+            return undefined;
+          }
           const lastCommit = trace.commits[trace.commits.length - 1];
           const regressionCount = trace.commits.filter((commit) => commit.isRegression).length;
           const maxPassed = Math.max(...trace.commits.map((commit) => commit.totalPassed));
@@ -486,10 +553,10 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                     const suiteColor = SUITE_COLORS[suite.name];
                     return (
                       <div key={suite.name} className="flex items-center gap-2">
-                        <span className="w-[72px] truncate text-[9px] text-envoi-text-dim">
+                        <span className="w-18 truncate text-[9px] text-envoi-text-dim">
                           {suite.name}
                         </span>
-                        <div className="h-[4px] flex-1 rounded-full bg-envoi-border-light">
+                        <div className="h-1 flex-1 rounded-full bg-envoi-border-light">
                           <div
                             className="h-full rounded-full"
                             style={{
@@ -498,7 +565,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                             }}
                           />
                         </div>
-                        <span className="w-[32px] text-right text-[9px] text-envoi-text-dim">
+                        <span className="w-8 text-right text-[9px] text-envoi-text-dim">
                           {passed}
                         </span>
                       </div>

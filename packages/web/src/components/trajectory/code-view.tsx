@@ -9,11 +9,12 @@
  * - Comments (//): #8e8e93
  *
  * Added lines get green background + green left border (3px) + "+" marker.
+ * On file change, scrolls to the first changed line and flashes added lines.
  */
 
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FileSnapshot } from "@/lib/types";
 
 type CodeViewProps = {
@@ -30,7 +31,11 @@ const COLORS = {
   text: "#0a0a0a",
   addedBg: "rgba(16, 185, 129, 0.08)",
   addedBorder: "#10b981",
+  flashBg: "rgba(16, 185, 129, 0.25)",
 } as const;
+
+/** Line height in pixels — used for scroll offset calculation */
+const LINE_HEIGHT = 20;
 
 /** Rust keywords to highlight */
 const KEYWORDS = new Set([
@@ -104,13 +109,34 @@ function highlightLine(line: string): React.ReactNode[] {
 
 export function CodeView({ snapshot, filePath }: CodeViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [flashing, setFlashing] = useState(false);
 
-  /** Reset scroll when file changes */
+  /** Scroll to first added line and trigger flash animation on file change */
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = 0;
+    if (!scrollRef.current || !snapshot) {
+      return undefined;
     }
-  }, [filePath]);
+
+    const firstAdded = snapshot.added.length > 0 ? snapshot.added[0] : undefined;
+    if (firstAdded !== undefined) {
+      /** Scroll to first changed line, centered in viewport */
+      const scrollTarget = Math.max(0, firstAdded * LINE_HEIGHT - scrollRef.current.clientHeight / 3);
+      scrollRef.current.scrollTop = scrollTarget;
+
+      /** Trigger flash animation */
+      setFlashing(true);
+      const timer = setTimeout(() => {
+        setFlashing(false);
+      }, 800);
+      return () => {
+        clearTimeout(timer);
+      };
+    }
+
+    /** No added lines — scroll to top */
+    scrollRef.current.scrollTop = 0;
+    return undefined;
+  }, [filePath, snapshot]);
 
   if (!snapshot || !filePath) {
     return (
@@ -132,10 +158,13 @@ export function CodeView({ snapshot, filePath }: CodeViewProps) {
               key={lineIndex}
               className="flex"
               style={{
-                background: isAdded ? COLORS.addedBg : undefined,
+                background: isAdded
+                  ? (flashing ? COLORS.flashBg : COLORS.addedBg)
+                  : undefined,
                 borderLeft: isAdded
                   ? `3px solid ${COLORS.addedBorder}`
                   : "3px solid transparent",
+                transition: isAdded ? "background 0.6s ease-out" : undefined,
               }}
             >
               {/* Line number gutter */}

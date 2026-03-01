@@ -37,7 +37,9 @@ export function createRng(seed: number): SeededRng {
   function pick<T>(array: readonly T[]): T {
     const idx = Math.floor(next() * array.length);
     const item = array[idx];
-    if (item === undefined) throw new Error("Cannot pick from empty array");
+    if (item === undefined) {
+      throw new Error("Cannot pick from empty array");
+    }
     return item;
   }
 

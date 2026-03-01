@@ -9,6 +9,21 @@ import { getAllTrajectories } from "@/lib/server/data";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
 import { formatPercent, formatDuration, formatDate } from "@/lib/utils";
 
+/** Fixed column widths — shared between header and rows for alignment */
+const COL = {
+  id: "w-[260px] shrink-0",
+  target: "w-[64px] shrink-0",
+  lang: "w-[48px] shrink-0",
+  nl: "w-[40px] shrink-0",
+  started: "w-[140px] shrink-0",
+  duration: "w-[64px] shrink-0",
+  score: "flex-1 min-w-[200px]",
+  commits: "w-[72px] shrink-0",
+} as const;
+
+const HEADER_STYLE = "text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim whitespace-nowrap";
+const CELL_BORDER = "border-r border-envoi-border-light px-3";
+
 export default async function TrajectoryListPage() {
   const allTraces = await getAllTrajectories();
 
@@ -34,31 +49,15 @@ export default async function TrajectoryListPage() {
 
       {/* Column header */}
       <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px]">
-        <span className="min-w-[90px] border-r border-envoi-border-light pr-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          ID
-        </span>
-        <span className="min-w-[56px] border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Target
-        </span>
-        <span className="min-w-[50px] border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Lang
-        </span>
-        <span className="min-w-[120px] whitespace-nowrap border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          NL
-        </span>
-        <span className="min-w-[130px] border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Started
-        </span>
-        <span className="min-w-[70px] border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Duration
-        </span>
-        <span className="flex-1 border-r border-envoi-border-light px-3 text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Score
-        </span>
-        <span className="min-w-[60px] px-3 text-right text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Commits
-        </span>
-        <span className="w-[12px]" />
+        <span className={`${COL.id} ${CELL_BORDER} ${HEADER_STYLE} pl-0`}>ID</span>
+        <span className={`${COL.target} ${CELL_BORDER} ${HEADER_STYLE}`}>Target</span>
+        <span className={`${COL.lang} ${CELL_BORDER} ${HEADER_STYLE}`}>Lang</span>
+        <span className={`${COL.nl} ${CELL_BORDER} ${HEADER_STYLE}`}>NL</span>
+        <span className={`${COL.started} ${CELL_BORDER} ${HEADER_STYLE}`}>Started</span>
+        <span className={`${COL.duration} ${CELL_BORDER} ${HEADER_STYLE}`}>Duration</span>
+        <span className={`${COL.score} ${CELL_BORDER} ${HEADER_STYLE}`}>Score</span>
+        <span className={`${COL.commits} px-3 text-right ${HEADER_STYLE}`}>Commits</span>
+        <span className="w-[12px] shrink-0" />
       </div>
 
       {/* Scrollable body */}
@@ -88,58 +87,58 @@ export default async function TrajectoryListPage() {
                   className="flex items-center border-b border-envoi-border-light px-[14px] py-[10px] transition-colors hover:bg-envoi-surface"
                 >
                   {/* ID */}
-                  <span className="min-w-[90px] truncate border-r border-envoi-border-light pr-3 text-[11px] font-medium text-envoi-text">
+                  <span className={`${COL.id} ${CELL_BORDER} truncate pl-0 text-[11px] font-medium text-envoi-text`}>
                     {trace.id}
                   </span>
 
                   {/* Target */}
-                  <span className="min-w-[56px] border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
+                  <span className={`${COL.target} ${CELL_BORDER} truncate text-[10px] text-envoi-text-dim`}>
                     {(trace.params.target ?? "").split("-")[0]}
                   </span>
 
                   {/* Impl Language */}
-                  <span className="min-w-[50px] border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
+                  <span className={`${COL.lang} ${CELL_BORDER} truncate text-[10px] text-envoi-text-dim`}>
                     {trace.params.implLang ?? ""}
                   </span>
 
                   {/* Natural Language */}
-                  <span className="min-w-[120px] whitespace-nowrap border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-dim">
+                  <span className={`${COL.nl} ${CELL_BORDER} truncate text-[10px] text-envoi-text-dim`}>
                     {trace.params.lang ?? ""}
                   </span>
 
                   {/* Date started */}
-                  <span className="min-w-[130px] border-r border-envoi-border-light px-3 font-mono text-[10px] text-envoi-text-muted">
+                  <span className={`${COL.started} ${CELL_BORDER} whitespace-nowrap font-mono text-[10px] text-envoi-text-muted`}>
                     {formatDate(trace.startedAt)}
                   </span>
 
                   {/* Duration */}
-                  <span className="min-w-[70px] border-r border-envoi-border-light px-3 text-[10px] text-envoi-text-muted">
+                  <span className={`${COL.duration} ${CELL_BORDER} whitespace-nowrap text-[10px] text-envoi-text-muted`}>
                     {formatDuration(lastCommit?.minutesElapsed ?? 0)}
                   </span>
 
                   {/* Progress bar + score */}
-                  <div className="flex flex-1 items-center gap-2 border-r border-envoi-border-light px-3">
-                    <div className="h-[4px] w-[140px] rounded-full bg-envoi-border-light">
+                  <div className={`${COL.score} ${CELL_BORDER} flex items-center gap-2`}>
+                    <div className="h-[4px] w-[140px] shrink-0 rounded-full bg-envoi-border-light">
                       <div
                         className="h-full rounded-full bg-envoi-accent"
                         style={{ width: `${pct}%` }}
                       />
                     </div>
-                    <span className="text-[11px] font-semibold text-envoi-text">
+                    <span className="whitespace-nowrap text-[11px] font-semibold text-envoi-text">
                       {finalPassed}
                     </span>
-                    <span className="text-[9px] text-envoi-text-dim">
+                    <span className="whitespace-nowrap text-[9px] text-envoi-text-dim">
                       {formatPercent(finalPassed, totalTests)}
                     </span>
                   </div>
 
                   {/* Commits count */}
-                  <span className="min-w-[60px] px-3 text-right text-[10px] text-envoi-text-dim">
+                  <span className={`${COL.commits} whitespace-nowrap px-3 text-right text-[10px] text-envoi-text-dim`}>
                     {trace.commits.length} commits
                   </span>
 
                   {/* Arrow */}
-                  <ArrowUpRight size={12} className="shrink-0 text-envoi-text-dim" />
+                  <ArrowUpRight size={12} className="w-[12px] shrink-0 text-envoi-text-dim" />
                 </Link>
               );
             })}

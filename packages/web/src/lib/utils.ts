@@ -16,19 +16,29 @@ export function cn(...inputs: ClassValue[]) {
 export function formatDuration(minutes: number): string {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  if (!hours) return `${mins} min`;
-  if (!mins) return `${hours} hr${hours > 1 ? "s" : ""}`;
+  if (!hours) {
+    return `${mins} min`;
+  }
+  if (!mins) {
+    return `${hours} hr${hours > 1 ? "s" : ""}`;
+  }
   return `${hours} hr${hours > 1 ? "s" : ""} ${mins} min`;
 }
 
 /** Calculate median of a numeric array */
 export function median(values: number[]): number {
-  if (values.length === 0) return 0;
+  if (values.length === 0) {
+    return 0;
+  }
   const sorted = [...values].sort((first, second) => first - second);
   const mid = Math.floor(sorted.length / 2);
   const midVal = sorted[mid];
-  if (midVal === undefined) return 0;
-  if (sorted.length % 2 !== 0) return midVal;
+  if (midVal === undefined) {
+    return 0;
+  }
+  if (sorted.length % 2 !== 0) {
+    return midVal;
+  }
   const prevVal = sorted[mid - 1];
   return prevVal === undefined ? midVal : (prevVal + midVal) / 2;
 }
@@ -39,21 +49,27 @@ export function findMilestone(trace: Trajectory, milestone: MilestoneDef): Commi
     const value = milestone.suite
       ? (commit.suiteState[milestone.suite] ?? 0)
       : commit.totalPassed;
-    if (value >= milestone.threshold) return commit;
+    if (value >= milestone.threshold) {
+      return commit;
+    }
   }
   return undefined;
 }
 
 /** Extract a parameter value from a trajectory by dimension key */
 export function getTrajectoryParam(trace: Trajectory, dimensionKey: string): string {
-  if (dimensionKey === "model") return trace.model;
+  if (dimensionKey === "model") {
+    return trace.model;
+  }
   const value = Object.entries(trace.params).find(([key]) => key === dimensionKey)?.[1];
   return value ?? "\u2014";
 }
 
 /** Group traces by one or more dimension keys, returning sorted groups */
 export function groupTraces(traces: Trajectory[], dimensions: string[]): TrajectoryGroup[] {
-  if (dimensions.length === 0) return [{ key: "all", label: "All Traces", traces }];
+  if (dimensions.length === 0) {
+    return [{ key: "all", label: "All Traces", traces }];
+  }
 
   const map: Record<string, TrajectoryGroup> = {};
   for (const trace of traces) {
@@ -129,27 +145,39 @@ export function computeMaxDuration(traces: Trajectory[]): number {
  * Scales from seconds to weeks without any hardcoded ceiling.
  */
 function niceTickInterval(range: number): number {
-  if (range <= 0) return 1;
+  if (range <= 0) {
+    return 1;
+  }
   // Target ~5 ticks
   const rough = range / 5;
   // "Nice" multipliers: 1, 2, 5 (then 10, 20, 50, etc.)
   const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
   const residual = rough / magnitude;
   let nice: number;
-  if (residual <= 1.5) nice = 1;
-  else if (residual <= 3.5) nice = 2;
-  else if (residual <= 7.5) nice = 5;
-  else nice = 10;
+  if (residual <= 1.5) {
+    nice = 1;
+  }
+  else if (residual <= 3.5) {
+    nice = 2;
+  }
+  else if (residual <= 7.5) {
+    nice = 5;
+  }
+  else {
+    nice = 10;
+  }
   return nice * magnitude;
 }
 
 /** Generate X-axis tick values for a given max duration in minutes */
 export function getXTicks(maxDuration: number): number[] {
-  if (maxDuration <= 0) return [0];
+  if (maxDuration <= 0) {
+    return [0];
+  }
   const interval = niceTickInterval(maxDuration);
   const ticks: number[] = [];
-  for (let t = 0; t <= maxDuration; t += interval) {
-    ticks.push(Math.round(t));
+  for (let tick = 0; tick <= maxDuration; tick += interval) {
+    ticks.push(Math.round(tick));
   }
   // Add final tick if there's remaining space
   const lastTick = ticks[ticks.length - 1];
@@ -161,17 +189,25 @@ export function getXTicks(maxDuration: number): number[] {
 
 /** Format a minute value as a concise label (e.g., "5m", "2h", "3d", "2w") */
 export function formatXTick(minutes: number): string {
-  if (minutes === 0) return "0";
-  if (minutes < 60) return `${Math.round(minutes)}m`;
+  if (minutes === 0) {
+    return "0";
+  }
+  if (minutes < 60) {
+    return `${Math.round(minutes)}m`;
+  }
   if (minutes < 1440) {
-    const h = Math.floor(minutes / 60);
-    const m = Math.round(minutes % 60);
-    return m === 0 ? `${h}h` : `${h}h${m}m`;
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.round(minutes % 60);
+    return mins === 0 ? `${hours}h` : `${hours}h${mins}m`;
   }
   const days = minutes / 1440;
-  if (days < 7) return `${Math.round(days)}d`;
+  if (days < 7) {
+    return `${Math.round(days)}d`;
+  }
   const weeks = days / 7;
-  if (Number.isInteger(Math.round(weeks))) return `${Math.round(weeks)}w`;
+  if (Number.isInteger(Math.round(weeks))) {
+    return `${Math.round(weeks)}w`;
+  }
   return `${Math.round(days)}d`;
 }
 

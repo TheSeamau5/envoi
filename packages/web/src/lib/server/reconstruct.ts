@@ -12,6 +12,8 @@ import type {
   ChangedFile,
   SuiteState,
   Suite,
+  CodeSnapshot,
+  FileSnapshot,
 } from "@/lib/types";
 import { computeTotalTests } from "@/lib/constants";
 
@@ -63,7 +65,9 @@ export type ParquetRow = {
 // ---------------------------------------------------------------------------
 
 function parseJson(value: string | undefined): unknown {
-  if (!value) return undefined;
+  if (!value) {
+    return undefined;
+  }
   try {
     return JSON.parse(value);
   } catch {
@@ -77,7 +81,9 @@ function isRecord(val: unknown): val is Record<string, unknown> {
 }
 
 function toNumber(val: number | bigint | undefined): number {
-  if (val === undefined || val === null) return 0;
+  if (val === undefined) {
+    return 0;
+  }
   return typeof val === "bigint" ? Number(val) : val;
 }
 
@@ -105,13 +111,21 @@ function buildEvaluationsFromRows(
 
   for (const row of rows) {
     const events = parseJson(row.eval_events_delta);
-    if (!Array.isArray(events)) continue;
+    if (!Array.isArray(events)) {
+      continue;
+    }
 
     for (const event of events) {
-      if (typeof event !== "object" || event === null) continue;
-      if (event.kind !== "commit_async") continue;
+      if (typeof event !== "object" || event === null) {
+        continue;
+      }
+      if (event.kind !== "commit_async") {
+        continue;
+      }
       const commit = event.target_commit;
-      if (typeof commit !== "string" || !commit) continue;
+      if (typeof commit !== "string" || !commit) {
+        continue;
+      }
 
       const triggerPart =
         typeof event.trigger_part === "number"
@@ -142,21 +156,34 @@ function buildEvaluationsFromRows(
       }
 
       const rec = evaluations.get(commit);
-      if (!rec) continue;
+      if (!rec) {
+        continue;
+      }
 
       if (typeof event.status === "string" && event.status) {
         rec.status = event.status;
       }
-      if (typeof event.eval_id === "string") rec.evalId = event.eval_id;
-      if (typeof event.trigger_turn === "number")
+      if (typeof event.eval_id === "string") {
+        rec.evalId = event.eval_id;
+      }
+      if (typeof event.trigger_turn === "number") {
         rec.triggerTurn = event.trigger_turn;
-      if (typeof event.passed === "number") rec.passed = event.passed;
-      if (typeof event.failed === "number") rec.failed = event.failed;
-      if (typeof event.total === "number") rec.total = event.total;
+      }
+      if (typeof event.passed === "number") {
+        rec.passed = event.passed;
+      }
+      if (typeof event.failed === "number") {
+        rec.failed = event.failed;
+      }
+      if (typeof event.total === "number") {
+        rec.total = event.total;
+      }
       if (typeof event.suite_results === "object" && event.suite_results) {
         rec.suiteResults = event.suite_results;
       }
-      if (Array.isArray(event.tests)) rec.tests = event.tests;
+      if (Array.isArray(event.tests)) {
+        rec.tests = event.tests;
+      }
     }
   }
 
@@ -172,26 +199,36 @@ function mapPartType(
   _itemType: string | undefined,
   toolName: string | undefined,
 ): Step["type"] {
-  if (partType === "reasoning") return "reasoning";
-  if (partType === "text") return "text";
+  if (partType === "reasoning") {
+    return "reasoning";
+  }
+  if (partType === "text") {
+    return "text";
+  }
 
   if (partType === "function_call" || partType === "tool_call") {
     const name = (toolName ?? "").toLowerCase();
-    if (name.includes("read") || name.includes("cat")) return "file_read";
+    if (name.includes("read") || name.includes("cat")) {
+      return "file_read";
+    }
     if (
       name.includes("write") ||
       name.includes("edit") ||
       name.includes("create") ||
       name.includes("patch")
-    )
+    ) {
       return "file_write";
+    }
     if (
       name.includes("test") ||
       name.includes("envoi") ||
       name.includes("eval")
-    )
+    ) {
       return "test_run";
-    if (name.includes("mcp") || name.includes("server")) return "mcp_call";
+    }
+    if (name.includes("mcp") || name.includes("server")) {
+      return "mcp_call";
+    }
     return "tool_call";
   }
 
@@ -212,7 +249,6 @@ function rowToStep(row: ParquetRow, index: number): Step {
     isError:
       row.tool_status === "error" ||
       (row.tool_exit_code !== undefined &&
-        row.tool_exit_code !== null &&
         row.tool_exit_code !== 0),
     errorMessage: row.tool_error ?? undefined,
     reasoningContent:
@@ -227,7 +263,9 @@ function rowToStep(row: ParquetRow, index: number): Step {
 function extractChangedFiles(
   checkpoint: unknown,
 ): ChangedFile[] {
-  if (!isRecord(checkpoint)) return [];
+  if (!isRecord(checkpoint)) {
+    return [];
+  }
   const cp = checkpoint;
   const files = cp.changed_files;
   const numstat = cp.numstat;
@@ -240,18 +278,17 @@ function extractChangedFiles(
     if (Array.isArray(numstat)) {
       for (const entry of numstat) {
         if (isRecord(entry)) {
-          const e = entry;
-          if (typeof e.path === "string") {
-            numstatMap.set(e.path, {
-              additions: typeof e.additions === "number" ? e.additions : 0,
-              deletions: typeof e.deletions === "number" ? e.deletions : 0,
+          if (typeof entry.path === "string") {
+            numstatMap.set(entry.path, {
+              additions: typeof entry.additions === "number" ? entry.additions : 0,
+              deletions: typeof entry.deletions === "number" ? entry.deletions : 0,
             });
           }
         }
       }
     }
     return files
-      .filter((f): f is string => typeof f === "string")
+      .filter((item): item is string => typeof item === "string")
       .map((path) => {
         const stats = numstatMap.get(path);
         return {
@@ -276,8 +313,29 @@ function extractChangedFiles(
 function extractSuiteName(key: string): string {
   const parts = key.split("/");
   // Pattern: "all/<suite>/<subtest>" — return the suite segment
-  if (parts.length >= 2) return parts[1] ?? key;
+  if (parts.length >= 2) {
+    return parts[1] ?? key;
+  }
   return key;
+}
+
+/**
+ * Narrow an unknown record into the expected suite_results shape.
+ * Each value is validated to have numeric passed/total fields.
+ */
+function narrowSuiteResults(
+  raw: Record<string, unknown>,
+): Record<string, { passed: number; total: number }> {
+  const result: Record<string, { passed: number; total: number }> = {};
+  for (const [key, val] of Object.entries(raw)) {
+    if (isRecord(val)) {
+      result[key] = {
+        passed: typeof val.passed === "number" ? val.passed : 0,
+        total: typeof val.total === "number" ? val.total : 0,
+      };
+    }
+  }
+  return result;
 }
 
 function buildSuiteState(
@@ -305,31 +363,36 @@ function buildSuiteState(
 
 export function parseSuites(suitesJson: string | undefined): Suite[] {
   const parsed = parseJson(suitesJson);
-  if (parsed === undefined || parsed === null) return [];
+  if (parsed === undefined || parsed === null) {
+    return [];
+  }
 
   // suites can be { "suiteName": { "total": N, ... }, ... } or an array
   if (Array.isArray(parsed)) {
     return parsed
       .filter(
-        (s): s is { name: string; total: number } =>
-          typeof s === "object" &&
-          s !== null &&
-          typeof s.name === "string" &&
-          typeof s.total === "number",
+        (element): element is { name: string; total: number } =>
+          typeof element === "object" &&
+          element !== null &&
+          typeof element.name === "string" &&
+          typeof element.total === "number",
       )
-      .map((s) => ({ name: s.name, total: s.total }));
+      .map((suite) => ({ name: suite.name, total: suite.total }));
   }
 
   // Object form: { "all/basics/smoke": { total: 7, ... }, ... }
   // Aggregate by suite name (second path segment)
-  if (!isRecord(parsed)) return [];
+  if (!isRecord(parsed)) {
+    return [];
+  }
   const aggregated = new Map<string, number>();
   for (const [key, val] of Object.entries(parsed)) {
-    if (typeof val !== "object" || val === null) continue;
+    if (typeof val !== "object" || val === null) {
+      continue;
+    }
     const suiteName = extractSuiteName(key);
-    const total = typeof (val as Record<string, unknown>).total === "number"
-      ? (val as Record<string, unknown>).total as number
-      : 0;
+    const record = isRecord(val) ? val : {};
+    const total = typeof record.total === "number" ? record.total : 0;
     aggregated.set(suiteName, (aggregated.get(suiteName) ?? 0) + total);
   }
   return [...aggregated.entries()].map(([name, total]) => ({ name, total }));
@@ -343,12 +406,274 @@ function parseTaskParams(
   taskParamsJson: string | undefined,
 ): Record<string, string> {
   const parsed = parseJson(taskParamsJson);
-  if (!isRecord(parsed)) return {};
+  if (!isRecord(parsed)) {
+    return {};
+  }
   const result: Record<string, string> = {};
   for (const [key, val] of Object.entries(parsed)) {
     result[key] = String(val ?? "");
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Unified diff parsing + code snapshot construction
+// ---------------------------------------------------------------------------
+
+/** A single file's diff within a unified patch */
+type FileDiff = {
+  path: string;
+  isNew: boolean;
+  isDeleted: boolean;
+  hunks: DiffHunk[];
+};
+
+/** A hunk within a unified diff */
+type DiffHunk = {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: string[];
+};
+
+/** Normalize file paths: strip leading /workspace/ or a/ b/ prefixes */
+function normalizePath(rawPath: string): string {
+  let cleaned = rawPath;
+  if (cleaned.startsWith("a/") || cleaned.startsWith("b/")) {
+    cleaned = cleaned.slice(2);
+  }
+  if (cleaned.startsWith("/workspace/")) {
+    cleaned = cleaned.slice("/workspace/".length);
+  }
+  return cleaned;
+}
+
+/** Parse a unified diff string into per-file diffs */
+function parseUnifiedDiff(patchText: string): FileDiff[] {
+  const fileDiffs: FileDiff[] = [];
+  const fileSections = patchText.split(/^diff --git /m);
+
+  for (const section of fileSections) {
+    if (!section.trim()) {
+      continue;
+    }
+
+    const lines = section.split("\n");
+    const headerLine = lines[0] ?? "";
+
+    /** Extract path from "a/path b/path" header */
+    const headerMatch = headerLine.match(/^a\/(.+?) b\/(.+)$/);
+    if (!headerMatch) {
+      continue;
+    }
+    const filePath = normalizePath(headerMatch[2] ?? "");
+    if (!filePath) {
+      continue;
+    }
+
+    let isNew = false;
+    let isDeleted = false;
+    const hunks: DiffHunk[] = [];
+    let lineIdx = 1;
+
+    /** Skip metadata lines until we hit --- or a hunk header */
+    while (lineIdx < lines.length) {
+      const line = lines[lineIdx] ?? "";
+      if (line.startsWith("new file")) {
+        isNew = true;
+      }
+      if (line.startsWith("deleted file")) {
+        isDeleted = true;
+      }
+      if (line.startsWith("---") || line.startsWith("@@")) {
+        break;
+      }
+      lineIdx++;
+    }
+
+    /** Skip --- and +++ lines */
+    if (lineIdx < lines.length && (lines[lineIdx] ?? "").startsWith("---")) {
+      lineIdx++;
+    }
+    if (lineIdx < lines.length && (lines[lineIdx] ?? "").startsWith("+++")) {
+      lineIdx++;
+    }
+
+    /** Parse hunks */
+    while (lineIdx < lines.length) {
+      const line = lines[lineIdx] ?? "";
+      const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+      if (!hunkMatch) {
+        lineIdx++;
+        continue;
+      }
+
+      const hunk: DiffHunk = {
+        oldStart: parseInt(hunkMatch[1] ?? "1", 10),
+        oldCount: parseInt(hunkMatch[2] ?? "1", 10),
+        newStart: parseInt(hunkMatch[3] ?? "1", 10),
+        newCount: parseInt(hunkMatch[4] ?? "1", 10),
+        lines: [],
+      };
+      lineIdx++;
+
+      /** Collect hunk body lines */
+      while (lineIdx < lines.length) {
+        const hunkLine = lines[lineIdx] ?? "";
+        if (
+          hunkLine.startsWith("+") ||
+          hunkLine.startsWith("-") ||
+          hunkLine.startsWith(" ")
+        ) {
+          hunk.lines.push(hunkLine);
+          lineIdx++;
+        } else if (hunkLine.startsWith("\\")) {
+          /** "\ No newline at end of file" — skip */
+          lineIdx++;
+        } else {
+          break;
+        }
+      }
+
+      hunks.push(hunk);
+    }
+
+    /** Skip binary/mode-only changes with no hunks */
+    if (hunks.length > 0) {
+      fileDiffs.push({ path: filePath, isNew, isDeleted, hunks });
+    }
+  }
+
+  return fileDiffs;
+}
+
+/**
+ * Apply a single file diff to the virtual filesystem.
+ * Returns the set of 0-based line indices that were added.
+ */
+function applyFileDiff(
+  fileDiffs: FileDiff,
+  fileSystem: Record<string, string[]>,
+): { addedLines: number[] } {
+  const addedLines: number[] = [];
+
+  if (fileDiffs.isDeleted) {
+    delete fileSystem[fileDiffs.path];
+    return { addedLines };
+  }
+
+  if (fileDiffs.isNew) {
+    /** New file — all "+" lines form the content */
+    const content: string[] = [];
+    for (const hunk of fileDiffs.hunks) {
+      for (const line of hunk.lines) {
+        if (line.startsWith("+")) {
+          addedLines.push(content.length);
+          content.push(line.slice(1));
+        }
+      }
+    }
+    fileSystem[fileDiffs.path] = content;
+    return { addedLines };
+  }
+
+  /** Modified file — apply hunks to existing content */
+  const oldLines = fileSystem[fileDiffs.path] ?? [];
+  const newLines: string[] = [];
+  let oldCursor = 0;
+
+  for (const hunk of fileDiffs.hunks) {
+    /** Copy unchanged lines before this hunk */
+    const hunkOldStart = hunk.oldStart - 1;
+    while (oldCursor < hunkOldStart && oldCursor < oldLines.length) {
+      newLines.push(oldLines[oldCursor] ?? "");
+      oldCursor++;
+    }
+
+    /** Apply hunk lines */
+    for (const line of hunk.lines) {
+      if (line.startsWith("+")) {
+        addedLines.push(newLines.length);
+        newLines.push(line.slice(1));
+      } else if (line.startsWith("-")) {
+        oldCursor++;
+      } else if (line.startsWith(" ")) {
+        newLines.push(line.slice(1));
+        oldCursor++;
+      }
+    }
+  }
+
+  /** Copy remaining lines after last hunk */
+  while (oldCursor < oldLines.length) {
+    newLines.push(oldLines[oldCursor] ?? "");
+    oldCursor++;
+  }
+
+  fileSystem[fileDiffs.path] = newLines;
+  return { addedLines };
+}
+
+/**
+ * Build code snapshots for each commit by applying patches sequentially.
+ * Mutates commit.codeSnapshot in place.
+ */
+function populateCodeSnapshots(
+  sortedRows: ParquetRow[],
+  commits: Commit[],
+): void {
+  /** Virtual filesystem: path → lines */
+  const fileSystem: Record<string, string[]> = {};
+  let rowCursor = 0;
+
+  for (const commit of commits) {
+    const addedInCommit: Record<string, number[]> = {};
+    const touchedInCommit = new Set<string>();
+    const newInCommit = new Set<string>();
+
+    /** Process rows belonging to this commit (one row per step) */
+    const rowCount = commit.steps.length;
+    const endCursor = rowCursor + rowCount;
+
+    while (rowCursor < endCursor && rowCursor < sortedRows.length) {
+      const row = sortedRows[rowCursor];
+      if (row?.patch && row.patch.length > 0) {
+        const fileDiffs = parseUnifiedDiff(row.patch);
+        for (const diff of fileDiffs) {
+          const { addedLines } = applyFileDiff(diff, fileSystem);
+          touchedInCommit.add(diff.path);
+          if (diff.isNew) {
+            newInCommit.add(diff.path);
+          }
+          if (addedLines.length > 0) {
+            const existing = addedInCommit[diff.path];
+            if (existing) {
+              existing.push(...addedLines);
+            } else {
+              addedInCommit[diff.path] = [...addedLines];
+            }
+          }
+        }
+      }
+      rowCursor++;
+    }
+
+    /** Build CodeSnapshot from current filesystem state */
+    const snapshot: CodeSnapshot = {};
+    for (const [filePath, lines] of Object.entries(fileSystem)) {
+      const added = addedInCommit[filePath] ?? [];
+      const fileSnapshot: FileSnapshot = {
+        lines: [...lines],
+        added: added.sort((lineA, lineB) => lineA - lineB),
+        touched: touchedInCommit.has(filePath),
+        isNew: newInCommit.has(filePath) ? true : undefined,
+      };
+      snapshot[filePath] = fileSnapshot;
+    }
+
+    commit.codeSnapshot = snapshot;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +685,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   if (!first) {
     throw new Error("Cannot reconstruct trajectory from empty rows");
   }
-  const sortedRows = [...rows].sort((a, b) => a.part - b.part);
+  const sortedRows = [...rows].sort((rowA, rowB) => rowA.part - rowB.part);
 
   // Parse trajectory-level fields
   const suites = parseSuites(first.suites);
@@ -370,8 +695,8 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // Build evaluations
   const evalMap = buildEvaluationsFromRows(sortedRows);
   const completedEvals = [...evalMap.values()]
-    .filter((e) => e.status === "completed" && e.total > 0)
-    .sort((a, b) => a.part - b.part);
+    .filter((rec) => rec.status === "completed" && rec.total > 0)
+    .sort((recA, recB) => recA.part - recB.part);
 
   // Build commits from evaluation boundaries
   const commits: Commit[] = [];
@@ -379,7 +704,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
 
   if (completedEvals.length === 0) {
     // No evaluations — create a single "commit" containing all steps
-    const steps = sortedRows.map((r, i) => rowToStep(r, i));
+    const steps = sortedRows.map((row, rowIndex) => rowToStep(row, rowIndex));
     const lastSortedRow = sortedRows[sortedRows.length - 1];
     const lastCheckpoint = parseJson(lastSortedRow?.repo_checkpoint);
     commits.push({
@@ -405,7 +730,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       changedFiles: extractChangedFiles(lastCheckpoint),
       codeSnapshot: {},
       phase: 0,
-      tokensUsed: steps.reduce((sum, s) => sum + (s.tokensUsed ?? 0), 0),
+      tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
     });
   } else {
     // Group rows by evaluation boundaries
@@ -416,14 +741,18 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       const commitRows: ParquetRow[] = [];
       while (rowCursor < sortedRows.length) {
         const currentRow = sortedRows[rowCursor];
-        if (!currentRow) break;
+        if (!currentRow) {
+          break;
+        }
         commitRows.push(currentRow);
         rowCursor++;
         // If we've passed the trigger part, stop
-        if (currentRow.part >= evalRec.part) break;
+        if (currentRow.part >= evalRec.part) {
+          break;
+        }
       }
 
-      const steps = commitRows.map((r, i) => rowToStep(r, i));
+      const steps = commitRows.map((row, rowIndex) => rowToStep(row, rowIndex));
       const suiteState = buildSuiteState(evalRec.suiteResults);
       const delta = evalRec.passed - prevTotalPassed;
 
@@ -468,7 +797,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         changedFiles: extractChangedFiles(checkpoint),
         codeSnapshot: {},
         phase: totalTests > 0 ? evalRec.passed / totalTests : 0,
-        tokensUsed: steps.reduce((sum, s) => sum + (s.tokensUsed ?? 0), 0),
+        tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
         evalId: evalRec.evalId,
         targetCommit: evalRec.commit,
       });
@@ -479,7 +808,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     // Remaining rows after the last evaluation
     if (rowCursor < sortedRows.length) {
       const remainingRows = sortedRows.slice(rowCursor);
-      const steps = remainingRows.map((r, i) => rowToStep(r, i));
+      const steps = remainingRows.map((row, rowIndex) => rowToStep(row, rowIndex));
       const lastCheckpoint = parseJson(
         remainingRows[remainingRows.length - 1]?.repo_checkpoint,
       );
@@ -511,10 +840,13 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         changedFiles: extractChangedFiles(lastCheckpoint),
         codeSnapshot: {},
         phase: totalTests > 0 ? prevTotalPassed / totalTests : 0,
-        tokensUsed: steps.reduce((sum, s) => sum + (s.tokensUsed ?? 0), 0),
+        tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
       });
     }
   }
+
+  // Build code snapshots from accumulated patch diffs
+  populateCodeSnapshots(sortedRows, commits);
 
   // Compute duration
   const lastCommit = commits[commits.length - 1];
@@ -631,5 +963,297 @@ export function summaryRowToTrajectory(
     suites: suites.length > 0 ? suites : undefined,
     agentHarness: agent || undefined,
     sessionEndReason: row.session_end_reason ?? undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Summary table row → Trajectory (for materialized summary tables)
+// ---------------------------------------------------------------------------
+
+/**
+ * Row shape from the materialized trajectory_summary table.
+ * Unlike TrajectorySummaryRow, this already contains final_passed/failed/total.
+ */
+export type SummaryTableRow = {
+  trajectory_id: string;
+  environment: string;
+  agent: string;
+  agent_model: string;
+  started_at: string;
+  ended_at: string;
+  total_parts: number | bigint;
+  total_turns: number | bigint;
+  total_tokens: number | bigint;
+  session_end_reason?: string;
+  task_params?: string;
+  suites?: string;
+  final_passed: number;
+  final_failed: number;
+  final_total: number;
+  final_suite_results?: string;
+  bundle_uri?: string;
+};
+
+/**
+ * Convert a materialized summary table row into a Trajectory.
+ * No second query needed — final scores are pre-computed.
+ */
+export function summaryTableRowToTrajectory(
+  row: SummaryTableRow,
+): Trajectory {
+  const suites = parseSuites(row.suites);
+  const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
+  const params = parseTaskParams(row.task_params);
+  const passed = row.final_passed ?? 0;
+  const failed = row.final_failed ?? 0;
+
+  const agent = row.agent ?? "";
+  const agentModel = row.agent_model ?? "";
+  const model = agent ? `${agent}/${agentModel}` : agentModel;
+
+  // Compute duration from started_at and ended_at
+  const startMs = new Date(row.started_at ?? "").getTime();
+  const endMs = new Date(row.ended_at ?? "").getTime();
+  let duration = "";
+  if (!isNaN(startMs) && !isNaN(endMs)) {
+    const totalMinutes = Math.round((endMs - startMs) / 60_000);
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    duration = hours > 0 ? `${hours} hrs ${mins} min` : `${mins} min`;
+  }
+
+  // Parse final suite results for suite state
+  const finalSuiteResults = parseJson(row.final_suite_results);
+  const suiteState = isRecord(finalSuiteResults)
+    ? buildSuiteState(narrowSuiteResults(finalSuiteResults))
+    : {};
+
+  const commit: Commit = {
+    index: 0,
+    hash: "",
+    turn: 0,
+    timestamp: row.started_at ?? "",
+    minutesElapsed: 0,
+    suiteState,
+    totalPassed: passed,
+    delta: 0,
+    isRegression: false,
+    isMilestone: false,
+    feedback: {
+      passedDelta: 0,
+      newlyBroken: 0,
+      newlyFixed: 0,
+      brokenTests: [],
+      totalPassed: passed,
+      totalFailed: failed,
+    },
+    steps: [],
+    changedFiles: [],
+    codeSnapshot: {},
+    phase: totalTests > 0 ? passed / totalTests : 0,
+    tokensUsed: toNumber(row.total_tokens),
+  };
+
+  return {
+    id: row.trajectory_id,
+    model,
+    environment: row.environment ?? "",
+    commits: [commit],
+    totalTests,
+    startedAt: row.started_at ?? "",
+    duration,
+    totalTokens: toNumber(row.total_tokens),
+    cost: 0,
+    params,
+    finalPassed: passed,
+    suites: suites.length > 0 ? suites : undefined,
+    agentHarness: agent || undefined,
+    sessionEndReason: row.session_end_reason ?? undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation summary row → used by compare trajectories
+// ---------------------------------------------------------------------------
+
+/** Row shape from the materialized evaluation_summary table */
+export type EvalSummaryRow = {
+  trajectory_id: string;
+  environment: string;
+  agent_model: string;
+  eval_id: string;
+  target_commit: string;
+  trigger_part: number;
+  trigger_turn?: number;
+  status: string;
+  passed: number;
+  failed: number;
+  total: number;
+  suite_results?: string;
+  queued_at?: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+/**
+ * Build Trajectory objects for the compare page from summary + evaluation rows.
+ * Each evaluation becomes a commit with totalPassed, delta, suiteState, etc.
+ * Steps are empty since the compare page only needs curves, not step detail.
+ */
+export function buildCompareTrajectories(
+  summaryRows: Record<string, unknown>[],
+  evalRows: Record<string, unknown>[],
+): Trajectory[] {
+  // Group eval rows by trajectory
+  const evalsByTrajectory = new Map<string, EvalSummaryRow[]>();
+  for (const raw of evalRows) {
+    const trajectoryId = String(raw.trajectory_id ?? "");
+    const evalRow: EvalSummaryRow = {
+      trajectory_id: trajectoryId,
+      environment: String(raw.environment ?? ""),
+      agent_model: String(raw.agent_model ?? ""),
+      eval_id: String(raw.eval_id ?? ""),
+      target_commit: String(raw.target_commit ?? ""),
+      trigger_part: Number(raw.trigger_part ?? 0),
+      trigger_turn: raw.trigger_turn != undefined ? Number(raw.trigger_turn) : undefined,
+      status: String(raw.status ?? ""),
+      passed: Number(raw.passed ?? 0),
+      failed: Number(raw.failed ?? 0),
+      total: Number(raw.total ?? 0),
+      suite_results: raw.suite_results != undefined ? String(raw.suite_results) : undefined,
+    };
+    const existing = evalsByTrajectory.get(trajectoryId);
+    if (existing) {
+      existing.push(evalRow);
+    } else {
+      evalsByTrajectory.set(trajectoryId, [evalRow]);
+    }
+  }
+
+  const trajectories: Trajectory[] = [];
+  for (const raw of summaryRows) {
+    const tableRow = toSummaryTableRow(raw);
+    const suites = parseSuites(tableRow.suites);
+    const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
+    const params = parseTaskParams(tableRow.task_params);
+
+    const agent = tableRow.agent ?? "";
+    const agentModel = tableRow.agent_model ?? "";
+    const model = agent ? `${agent}/${agentModel}` : agentModel;
+
+    const evals = evalsByTrajectory.get(tableRow.trajectory_id) ?? [];
+    evals.sort((evalA, evalB) => evalA.trigger_part - evalB.trigger_part);
+
+    const commits: Commit[] = [];
+    let prevPassed = 0;
+
+    for (const evalRow of evals) {
+      const suiteResultsParsed = parseJson(evalRow.suite_results);
+      const suiteState = isRecord(suiteResultsParsed)
+        ? buildSuiteState(narrowSuiteResults(suiteResultsParsed))
+        : {};
+      const delta = evalRow.passed - prevPassed;
+
+      commits.push({
+        index: commits.length,
+        hash: evalRow.target_commit,
+        turn: evalRow.trigger_turn ?? commits.length,
+        timestamp: "",
+        minutesElapsed: 0,
+        suiteState,
+        totalPassed: evalRow.passed,
+        delta,
+        isRegression: delta < 0,
+        isMilestone: false,
+        feedback: {
+          passedDelta: delta,
+          newlyBroken: delta < 0 ? Math.abs(delta) : 0,
+          newlyFixed: delta > 0 ? delta : 0,
+          brokenTests: [],
+          totalPassed: evalRow.passed,
+          totalFailed: evalRow.failed,
+        },
+        steps: [],
+        changedFiles: [],
+        codeSnapshot: {},
+        phase: totalTests > 0 ? evalRow.passed / totalTests : 0,
+        tokensUsed: 0,
+        evalId: evalRow.eval_id,
+        targetCommit: evalRow.target_commit,
+      });
+
+      prevPassed = evalRow.passed;
+    }
+
+    // If no evaluations, create a single empty commit
+    if (commits.length === 0) {
+      commits.push({
+        index: 0,
+        hash: "",
+        turn: 0,
+        timestamp: tableRow.started_at ?? "",
+        minutesElapsed: 0,
+        suiteState: {},
+        totalPassed: 0,
+        delta: 0,
+        isRegression: false,
+        isMilestone: false,
+        feedback: {
+          passedDelta: 0,
+          newlyBroken: 0,
+          newlyFixed: 0,
+          brokenTests: [],
+          totalPassed: 0,
+          totalFailed: 0,
+        },
+        steps: [],
+        changedFiles: [],
+        codeSnapshot: {},
+        phase: 0,
+        tokensUsed: 0,
+      });
+    }
+
+    trajectories.push({
+      id: tableRow.trajectory_id,
+      model,
+      environment: tableRow.environment ?? "",
+      commits,
+      totalTests,
+      startedAt: tableRow.started_at ?? "",
+      duration: "",
+      totalTokens: toNumber(tableRow.total_tokens),
+      cost: 0,
+      params,
+      finalPassed: tableRow.final_passed ?? 0,
+      suites: suites.length > 0 ? suites : undefined,
+      agentHarness: agent || undefined,
+      sessionEndReason: tableRow.session_end_reason ?? undefined,
+    });
+  }
+
+  return trajectories;
+}
+
+/** Validate a raw query row into a SummaryTableRow */
+export function toSummaryTableRow(row: Record<string, unknown>): SummaryTableRow {
+  return {
+    trajectory_id: String(row.trajectory_id ?? ""),
+    environment: String(row.environment ?? ""),
+    agent: String(row.agent ?? ""),
+    agent_model: String(row.agent_model ?? ""),
+    started_at: String(row.started_at ?? ""),
+    ended_at: String(row.ended_at ?? ""),
+    total_parts: Number(row.total_parts ?? 0),
+    total_turns: Number(row.total_turns ?? 0),
+    total_tokens: Number(row.total_tokens ?? 0),
+    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
+    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
+    suites: row.suites != undefined ? String(row.suites) : undefined,
+    final_passed: Number(row.final_passed ?? 0),
+    final_failed: Number(row.final_failed ?? 0),
+    final_total: Number(row.final_total ?? 0),
+    final_suite_results: row.final_suite_results != undefined ? String(row.final_suite_results) : undefined,
+    bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
   };
 }

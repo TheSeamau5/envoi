@@ -41,9 +41,15 @@ type TreeNode = {
 
 /** Get the icon for a file based on its extension */
 function getFileIcon(fileName: string) {
-  if (fileName.endsWith(".rs")) return FileCode2;
-  if (fileName.endsWith(".json") || fileName.endsWith(".toml")) return FileJson;
-  if (fileName.endsWith(".sh")) return Terminal;
+  if (fileName.endsWith(".rs")) {
+    return FileCode2;
+  }
+  if (fileName.endsWith(".json") || fileName.endsWith(".toml")) {
+    return FileJson;
+  }
+  if (fileName.endsWith(".sh")) {
+    return Terminal;
+  }
   return FileCode2;
 }
 
@@ -59,7 +65,9 @@ function buildTree(snapshot: CodeSnapshot): TreeNode[] {
 
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const partName = parts[partIndex];
-      if (!partName) continue;
+      if (!partName) {
+        continue;
+      }
       const isFile = partIndex === parts.length - 1;
       const fullPath = parts.slice(0, partIndex + 1).join("/");
 
@@ -91,9 +99,13 @@ function buildTree(snapshot: CodeSnapshot): TreeNode[] {
       if (node.isDirectory) {
         const childTouched = propagateTouched(node.children);
         node.isTouched = childTouched;
-        if (childTouched) anyTouched = true;
+        if (childTouched) {
+          anyTouched = true;
+        }
       } else {
-        if (node.isTouched) anyTouched = true;
+        if (node.isTouched) {
+          anyTouched = true;
+        }
       }
     }
     return anyTouched;
