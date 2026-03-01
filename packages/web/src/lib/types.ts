@@ -145,7 +145,7 @@ export type TrajectoryGroup = {
 export type MilestoneDef = {
   id: string;
   label: string;
-  suite: string | undefined;
+  suite?: string;
   threshold: number;
   /** Grouping key for table column separators (e.g. "overall", "basics") */
   group: string;

@@ -26,7 +26,7 @@ import { T } from "@/lib/tokens";
 
 type FileTreeProps = {
   snapshot: CodeSnapshot;
-  selectedFile: string | undefined;
+  selectedFile?: string;
   onSelectFile: (path: string) => void;
 };
 
@@ -114,7 +114,7 @@ function TreeNodeRow({
 }: {
   node: TreeNode;
   depth: number;
-  selectedFile: string | undefined;
+  selectedFile?: string;
   onSelectFile: (path: string) => void;
   expandedFolders: Set<string>;
   onToggleFolder: (path: string) => void;

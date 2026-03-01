@@ -67,6 +67,3 @@ export const GROUPABLE_DIMENSIONS = [
   { key: "agent", label: "Agent" },
   { key: "sandbox", label: "Sandbox" },
 ] as const;
-
-/** Maximum duration in minutes for chart X axis */
-export const MAX_DURATION = 480;

@@ -12,8 +12,8 @@ import { useState, useMemo } from "react";
 import { Eye, EyeOff, X, Plus, ChevronDown, ChevronRight } from "lucide-react";
 import type { Trajectory, TrajectoryGroup, Commit, Suite } from "@/lib/types";
 import { GROUP_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { GROUPABLE_DIMENSIONS, MAX_DURATION, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
-import { groupTraces, median, formatPercent, formatDuration } from "@/lib/utils";
+import { GROUPABLE_DIMENSIONS, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
+import { groupTraces, median, formatPercent, formatDuration, computeMaxDuration, getXTicks, getYTicks, formatXTick } from "@/lib/utils";
 
 type SetupCompareProps = {
   allTraces: Trajectory[];
@@ -28,8 +28,9 @@ const MARGIN = { top: 20, right: 60, bottom: 40, left: 55 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
-function toX(minutes: number): number {
-  return MARGIN.left + (minutes / MAX_DURATION) * PLOT_WIDTH;
+function toX(minutes: number, maxDuration: number): number {
+  if (maxDuration === 0) return MARGIN.left;
+  return MARGIN.left + (minutes / maxDuration) * PLOT_WIDTH;
 }
 
 function toY(passed: number, totalTests: number): number {
@@ -42,12 +43,12 @@ type MedianPoint = {
   medianPassed: number;
 };
 
-function computeMedianCurve(traces: Trajectory[]): MedianPoint[] {
+function computeMedianCurve(traces: Trajectory[], maxDuration: number): MedianPoint[] {
   if (traces.length === 0) return [];
 
   /** Sample at regular time intervals */
   const numSamples = 48;
-  const stepMinutes = MAX_DURATION / numSamples;
+  const stepMinutes = maxDuration / numSamples;
 
   return Array.from({ length: numSamples + 1 }, (_, sampleIdx) => {
     const targetMinutes = sampleIdx * stepMinutes;
@@ -67,17 +68,17 @@ function computeMedianCurve(traces: Trajectory[]): MedianPoint[] {
 }
 
 /** Build SVG line path from median points */
-function buildMedianLinePath(points: MedianPoint[], totalTests: number): string {
+function buildMedianLinePath(points: MedianPoint[], totalTests: number, maxDuration: number): string {
   return points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG area path from median points */
-function buildMedianAreaPath(points: MedianPoint[], totalTests: number): string {
+function buildMedianAreaPath(points: MedianPoint[], totalTests: number, maxDuration: number): string {
   if (points.length === 0) return "";
   const firstPoint = points[0];
   const lastPoint = points[points.length - 1];
@@ -85,11 +86,11 @@ function buildMedianAreaPath(points: MedianPoint[], totalTests: number): string 
   const lineSegments = points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${toX(lastPoint.minutes).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
-  const bottomLeft = `L${toX(firstPoint.minutes).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomRight = `L${toX(lastPoint.minutes, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomLeft = `L${toX(firstPoint.minutes, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
@@ -100,16 +101,6 @@ function suiteMedianFinal(traces: Trajectory[], suiteName: string): number {
     return lastCommit?.suiteState[suiteName] ?? 0;
   });
   return median(values);
-}
-
-/** X-axis tick generator */
-function getXTicks(): number[] {
-  return Array.from({ length: 9 }, (_, hourIdx) => hourIdx * 60);
-}
-
-/** Y-axis tick generator */
-function getYTicks(totalTests: number): number[] {
-  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * totalTests));
 }
 
 export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalTestsProp }: SetupCompareProps) {
@@ -167,7 +158,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
     });
   }
 
-  const xTicks = getXTicks();
+  const maxDuration = useMemo(() => computeMaxDuration(allTraces), [allTraces]);
+  const xTicks = useMemo(() => getXTicks(maxDuration), [maxDuration]);
   const yTicks = getYTicks(effectiveTotal);
 
   return (
@@ -287,9 +279,9 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             {xTicks.map((tick) => (
               <line
                 key={`x-grid-${tick}`}
-                x1={toX(tick)}
+                x1={toX(tick, maxDuration)}
                 y1={MARGIN.top}
-                x2={toX(tick)}
+                x2={toX(tick, maxDuration)}
                 y2={MARGIN.top + PLOT_HEIGHT}
                 stroke={T.borderLight}
                 strokeWidth={1}
@@ -326,12 +318,12 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             {xTicks.map((tick) => (
               <text
                 key={`x-label-${tick}`}
-                x={toX(tick)}
+                x={toX(tick, maxDuration)}
                 y={MARGIN.top + PLOT_HEIGHT + 20}
                 textAnchor="middle"
                 style={{ fontSize: "9px", fill: T.textDim }}
               >
-                {`${tick / 60}h`}
+                {formatXTick(tick)}
               </text>
             ))}
 
@@ -358,24 +350,24 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             {visibleGroups.map((group, groupIndex) => {
               const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
               if (!color) return undefined;
-              const curve = computeMedianCurve(group.traces);
+              const curve = computeMedianCurve(group.traces, maxDuration);
               const lastPoint = curve[curve.length - 1];
 
               return (
                 <g key={group.key}>
                   <path
-                    d={buildMedianAreaPath(curve, effectiveTotal)}
+                    d={buildMedianAreaPath(curve, effectiveTotal, maxDuration)}
                     fill={color.fill}
                   />
                   <path
-                    d={buildMedianLinePath(curve, effectiveTotal)}
+                    d={buildMedianLinePath(curve, effectiveTotal, maxDuration)}
                     fill="none"
                     stroke={color.line}
                     strokeWidth={1.5}
                   />
                   {lastPoint && (
                     <text
-                      x={toX(lastPoint.minutes) + 6}
+                      x={toX(lastPoint.minutes, maxDuration) + 6}
                       y={toY(lastPoint.medianPassed, effectiveTotal) + 3}
                       style={{ fontSize: "8px", fill: color.line, fontWeight: 700 }}
                     >

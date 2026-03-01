@@ -3,6 +3,11 @@
  * Manages mode toggle (Trace vs Setup), trace selection, tab navigation,
  * sorting, and model filtering.
  *
+ * Sidebar uses lightweight summary data (passed via props from server component).
+ * When traces are selected for comparison, their full trajectory data (with
+ * commit histories) is fetched from /api/compare?ids=... so that progress
+ * curves and other visualizations render correctly against S3-backed data.
+ *
  * Trace colors are stable: each trace is assigned a color index on selection
  * and keeps it even when other traces are deselected. Assignments are persisted
  * to localStorage with graceful error handling for stale/missing trace IDs.
@@ -73,6 +78,22 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   const [mode, setMode] = useState<CompareMode>("traces");
 
   /**
+   * Full trajectory data keyed by trace ID, fetched on demand when selected.
+   * Summary data from allTraces is sufficient for the sidebar; full data
+   * (with commit histories) is needed for progress curves and other tabs.
+   */
+  const [fullTrajectories, setFullTrajectories] = useState<Record<string, Trajectory>>({});
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+
+  /**
+   * All trajectories with full commit data for Setup Compare mode.
+   * Fetched once when the user switches to "setups" mode.
+   */
+  const [allFullTraces, setAllFullTraces] = useState<Trajectory[]>([]);
+  const [loadingAllFull, setLoadingAllFull] = useState(false);
+  const allFullFetched = useRef(false);
+
+  /**
    * colorMap: traceId → colorIndex.
    * Keys are the selected trace IDs; values are their assigned color indices.
    * Initialized with the first 2 traces; hydrated from localStorage on mount.
@@ -127,6 +148,69 @@ export function CompareClient({ allTraces }: CompareClientProps) {
   /** Derive selected IDs from colorMap keys */
   const selectedIds = useMemo(() => Object.keys(colorMap), [colorMap]);
 
+  /** Fetch full trajectory data for newly selected traces */
+  useEffect(() => {
+    const idsToFetch = selectedIds.filter(
+      (id) => !fullTrajectories[id] && !loadingIds.has(id),
+    );
+    if (idsToFetch.length === 0) return;
+
+    setLoadingIds((prev) => {
+      const next = new Set(prev);
+      for (const id of idsToFetch) next.add(id);
+      return next;
+    });
+
+    fetch(`/api/compare?ids=${idsToFetch.join(",")}`)
+      .then((res) => res.json())
+      .then((data: Trajectory[]) => {
+        setFullTrajectories((prev) => {
+          const next = { ...prev };
+          for (const t of data) {
+            next[t.id] = t;
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // On error, silently ignore — traces will show as loading or use summary fallback
+      })
+      .finally(() => {
+        setLoadingIds((prev) => {
+          const next = new Set(prev);
+          for (const id of idsToFetch) next.delete(id);
+          return next;
+        });
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds]);
+
+  /** Fetch all full trajectories when entering Setup Compare mode */
+  useEffect(() => {
+    if (mode !== "setups" || allFullFetched.current || loadingAllFull) return;
+
+    setLoadingAllFull(true);
+    fetch("/api/compare")
+      .then((res) => res.json())
+      .then((data: Trajectory[]) => {
+        setAllFullTraces(data);
+        allFullFetched.current = true;
+        // Also populate fullTrajectories cache for trace mode
+        setFullTrajectories((prev) => {
+          const next = { ...prev };
+          for (const t of data) {
+            next[t.id] = t;
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // On error, fall back to summary data
+      })
+      .finally(() => setLoadingAllFull(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
     if (modelFilter === "all") return allTraces;
@@ -147,14 +231,17 @@ export function CompareClient({ allTraces }: CompareClientProps) {
     return sorted;
   }, [filteredTraces, sortBy]);
 
-  /** Selected traces (ordered by insertion into colorMap) */
+  /** Selected traces for visualizations — uses full trajectory data when available */
   const selectedTraces = useMemo(
     () =>
       selectedIds
-        .map((traceId) => allTraces.find((trace) => trace.id === traceId))
+        .map((traceId) => fullTrajectories[traceId] ?? allTraces.find((trace) => trace.id === traceId))
         .filter((trace): trace is Trajectory => trace !== undefined),
-    [selectedIds, allTraces],
+    [selectedIds, allTraces, fullTrajectories],
   );
+
+  /** Whether any selected traces are still loading their full data */
+  const isLoadingFull = loadingIds.size > 0;
 
   /** Color indices parallel to selectedTraces */
   const colorIndices = useMemo(
@@ -315,10 +402,18 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             onKeyDown={handleSidebarKeyDown}
           >
             {/* Sidebar header */}
-            <div className="border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
+            <div className="flex items-center justify-between border-b border-envoi-border bg-envoi-surface px-[14px] py-[8px]">
               <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 Trajectories ({sortedTraces.length})
               </span>
+              {selectedIds.length > 0 && (
+                <button
+                  onClick={() => setColorMap({})}
+                  className="text-[10px] text-envoi-text-dim transition-colors hover:text-envoi-text"
+                >
+                  Deselect all
+                </button>
+              )}
             </div>
 
             {/* Filter + sort row */}
@@ -491,6 +586,12 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   </span>
                 </div>
               </div>
+            ) : isLoadingFull ? (
+              <div className="flex h-full items-center justify-center">
+                <span className="text-[12px] text-envoi-text-muted">
+                  Loading trajectory data...
+                </span>
+              </div>
             ) : (
               <>
                 {activeTab === "curves" && (
@@ -506,8 +607,14 @@ export function CompareClient({ allTraces }: CompareClientProps) {
             )}
           </div>
         </div>
+      ) : loadingAllFull ? (
+        <div className="flex flex-1 items-center justify-center">
+          <span className="text-[12px] text-envoi-text-muted">
+            Loading trajectory data...
+          </span>
+        </div>
       ) : (
-        <SetupCompare allTraces={allTraces} suites={suites} totalTests={totalTests} />
+        <SetupCompare allTraces={allFullTraces.length > 0 ? allFullTraces : allTraces} suites={suites} totalTests={totalTests} />
       )}
     </div>
   );

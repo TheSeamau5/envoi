@@ -369,8 +369,12 @@ export async function getEnvironments(): Promise<
 }
 
 /**
- * Get trajectories for comparison.
+ * Get trajectories for comparison with full commit histories.
  * Can filter by specific IDs or environment.
+ *
+ * Unlike getAllTrajectories() which returns lightweight summaries,
+ * this always returns full trajectories with commit data needed
+ * for progress curves and other compare visualizations.
  */
 export async function getCompareTrajectories(opts?: {
   ids?: string[];
@@ -385,7 +389,7 @@ export async function getCompareTrajectories(opts?: {
     return all;
   }
 
-  // For compare, we need full trajectory data (with commits for curves)
+  // For compare, we always need full trajectory data (with commits for curves)
   if (opts?.ids && opts.ids.length > 0) {
     const trajectories: Trajectory[] = [];
     for (const id of opts.ids) {
@@ -395,6 +399,20 @@ export async function getCompareTrajectories(opts?: {
     return trajectories;
   }
 
-  // Otherwise fetch all (summary level is usually enough for compare)
-  return getAllTrajectories({ environment: opts?.environment });
+  // When no specific IDs given, fetch all trajectory IDs then load each fully
+  const glob = allTracesGlob();
+  const idSql = `
+    SELECT DISTINCT trajectory_id
+    FROM read_parquet('${escapeString(glob)}')
+    ORDER BY trajectory_id
+  `;
+  const idRows = await query(idSql);
+  const trajectories: Trajectory[] = [];
+  for (const row of idRows) {
+    const id = String(row.trajectory_id ?? "");
+    if (!id) continue;
+    const t = await getTrajectoryById(id);
+    if (t) trajectories.push(t);
+  }
+  return trajectories;
 }

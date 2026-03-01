@@ -23,7 +23,7 @@ type MilestoneTableProps = {
 
 /** Result of looking up a milestone for one trace */
 type MilestoneHit = {
-  commit: Commit | undefined;
+  commit?: Commit;
   traceIndex: number;
 };
 

@@ -107,3 +107,75 @@ export function formatDateTime(isoString: string): string {
     hour12: false,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Chart axis helpers — used by progress-curves, suite-breakdown, setup-compare
+// ---------------------------------------------------------------------------
+
+/** Compute the max duration across traces (raw max, no padding) */
+export function computeMaxDuration(traces: Trajectory[]): number {
+  let max = 0;
+  for (const trace of traces) {
+    const lastCommit = trace.commits[trace.commits.length - 1];
+    if (lastCommit && lastCommit.minutesElapsed > max) {
+      max = lastCommit.minutesElapsed;
+    }
+  }
+  return max <= 0 ? 60 : max;
+}
+
+/**
+ * Pick a "nice" tick interval that yields ~4-8 ticks for the given range.
+ * Scales from seconds to weeks without any hardcoded ceiling.
+ */
+function niceTickInterval(range: number): number {
+  if (range <= 0) return 1;
+  // Target ~5 ticks
+  const rough = range / 5;
+  // "Nice" multipliers: 1, 2, 5 (then 10, 20, 50, etc.)
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
+  const residual = rough / magnitude;
+  let nice: number;
+  if (residual <= 1.5) nice = 1;
+  else if (residual <= 3.5) nice = 2;
+  else if (residual <= 7.5) nice = 5;
+  else nice = 10;
+  return nice * magnitude;
+}
+
+/** Generate X-axis tick values for a given max duration in minutes */
+export function getXTicks(maxDuration: number): number[] {
+  if (maxDuration <= 0) return [0];
+  const interval = niceTickInterval(maxDuration);
+  const ticks: number[] = [];
+  for (let t = 0; t <= maxDuration; t += interval) {
+    ticks.push(Math.round(t));
+  }
+  // Add final tick if there's remaining space
+  const lastTick = ticks[ticks.length - 1];
+  if (lastTick !== undefined && maxDuration - lastTick > interval * 0.3) {
+    ticks.push(Math.ceil(maxDuration / interval) * interval);
+  }
+  return ticks;
+}
+
+/** Format a minute value as a concise label (e.g., "5m", "2h", "3d", "2w") */
+export function formatXTick(minutes: number): string {
+  if (minutes === 0) return "0";
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  if (minutes < 1440) {
+    const h = Math.floor(minutes / 60);
+    const m = Math.round(minutes % 60);
+    return m === 0 ? `${h}h` : `${h}h${m}m`;
+  }
+  const days = minutes / 1440;
+  if (days < 7) return `${Math.round(days)}d`;
+  const weeks = days / 7;
+  if (Number.isInteger(Math.round(weeks))) return `${Math.round(weeks)}w`;
+  return `${Math.round(days)}d`;
+}
+
+/** Generate Y-axis tick values for a total count (5 evenly spaced ticks) */
+export function getYTicks(totalTests: number): number[] {
+  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * totalTests));
+}

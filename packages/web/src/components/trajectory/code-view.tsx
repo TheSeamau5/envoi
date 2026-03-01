@@ -17,8 +17,8 @@ import { useEffect, useRef } from "react";
 import type { FileSnapshot } from "@/lib/types";
 
 type CodeViewProps = {
-  snapshot: FileSnapshot | undefined;
-  filePath: string | undefined;
+  snapshot?: FileSnapshot;
+  filePath?: string;
 };
 
 /** Syntax color tokens */

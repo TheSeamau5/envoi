@@ -21,41 +21,41 @@ import { computeTotalTests } from "@/lib/constants";
 
 export type ParquetRow = {
   trajectory_id: string;
-  session_id: string | undefined;
-  agent: string | undefined;
-  agent_model: string | undefined;
-  started_at: string | undefined;
-  environment: string | undefined;
-  task_params: string | undefined;
+  session_id?: string;
+  agent?: string;
+  agent_model?: string;
+  started_at?: string;
+  environment?: string;
+  task_params?: string;
   part: number;
-  timestamp: string | undefined;
-  role: string | undefined;
-  part_type: string | undefined;
-  item_type: string | undefined;
-  summary: string | undefined;
-  duration_ms: number | bigint | undefined;
-  git_commit: string | undefined;
-  content: string | undefined;
-  content_token_estimate: number | undefined;
-  tool_name: string | undefined;
-  tool_status: string | undefined;
-  tool_input: string | undefined;
-  tool_output: string | undefined;
-  tool_error: string | undefined;
-  tool_exit_code: number | undefined;
-  token_usage: string | undefined;
-  patch: string | undefined;
-  repo_checkpoint: string | undefined;
-  testing_state: string | undefined;
-  eval_events_delta: string | undefined;
-  turn: number | undefined;
-  session_end_reason: string | undefined;
-  session_end_total_parts: number | undefined;
-  session_end_total_turns: number | undefined;
-  session_end_final_commit: string | undefined;
-  suites: string | undefined;
-  files: string | undefined;
-  bundle_uri: string | undefined;
+  timestamp?: string;
+  role?: string;
+  part_type?: string;
+  item_type?: string;
+  summary?: string;
+  duration_ms?: number | bigint;
+  git_commit?: string;
+  content?: string;
+  content_token_estimate?: number;
+  tool_name?: string;
+  tool_status?: string;
+  tool_input?: string;
+  tool_output?: string;
+  tool_error?: string;
+  tool_exit_code?: number;
+  token_usage?: string;
+  patch?: string;
+  repo_checkpoint?: string;
+  testing_state?: string;
+  eval_events_delta?: string;
+  turn?: number;
+  session_end_reason?: string;
+  session_end_total_parts?: number;
+  session_end_total_turns?: number;
+  session_end_final_commit?: string;
+  suites?: string;
+  files?: string;
+  bundle_uri?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ type EvalRecord = {
   evalId: string;
   commit: string;
   part: number;
-  triggerTurn: number | undefined;
+  triggerTurn?: number;
   status: string;
   passed: number;
   failed: number;
@@ -269,12 +269,24 @@ function extractChangedFiles(
 // Suite state from evaluation's suite_results
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract the suite name from a hierarchical key like "all/basics/smoke" → "basics".
+ * Falls back to the full key if it doesn't match the expected pattern.
+ */
+function extractSuiteName(key: string): string {
+  const parts = key.split("/");
+  // Pattern: "all/<suite>/<subtest>" — return the suite segment
+  if (parts.length >= 2) return parts[1] ?? key;
+  return key;
+}
+
 function buildSuiteState(
   suiteResults: Record<string, { passed: number; total: number }>,
 ): SuiteState {
   const state: SuiteState = {};
-  for (const [suiteName, result] of Object.entries(suiteResults)) {
-    state[suiteName] =
+  for (const [key, result] of Object.entries(suiteResults)) {
+    const suiteName = extractSuiteName(key);
+    const passed =
       typeof result === "object" && result !== null
         ? typeof result.passed === "number"
           ? result.passed
@@ -282,6 +294,7 @@ function buildSuiteState(
         : typeof result === "number"
           ? result
           : 0;
+    state[suiteName] = (state[suiteName] ?? 0) + passed;
   }
   return state;
 }
@@ -307,18 +320,19 @@ export function parseSuites(suitesJson: string | undefined): Suite[] {
       .map((s) => ({ name: s.name, total: s.total }));
   }
 
-  // Object form: { suiteName: { total: N, ... } }
+  // Object form: { "all/basics/smoke": { total: 7, ... }, ... }
+  // Aggregate by suite name (second path segment)
   if (!isRecord(parsed)) return [];
-  const entries = Object.entries(parsed);
-  return entries
-    .filter(
-      (entry): entry is [string, Record<string, unknown>] =>
-        typeof entry[1] === "object" && entry[1] !== null,
-    )
-    .map(([name, val]) => ({
-      name,
-      total: typeof val.total === "number" ? val.total : 0,
-    }));
+  const aggregated = new Map<string, number>();
+  for (const [key, val] of Object.entries(parsed)) {
+    if (typeof val !== "object" || val === null) continue;
+    const suiteName = extractSuiteName(key);
+    const total = typeof (val as Record<string, unknown>).total === "number"
+      ? (val as Record<string, unknown>).total as number
+      : 0;
+    aggregated.set(suiteName, (aggregated.get(suiteName) ?? 0) + total);
+  }
+  return [...aggregated.entries()].map(([name, total]) => ({ name, total }));
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +370,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // Build evaluations
   const evalMap = buildEvaluationsFromRows(sortedRows);
   const completedEvals = [...evalMap.values()]
-    .filter((e) => e.status === "completed")
+    .filter((e) => e.status === "completed" && e.total > 0)
     .sort((a, b) => a.part - b.part);
 
   // Build commits from evaluation boundaries
@@ -557,9 +571,9 @@ export type TrajectorySummaryRow = {
   total_parts: number | bigint;
   total_turns: number | bigint;
   total_tokens: number | bigint;
-  session_end_reason: string | undefined;
-  task_params: string | undefined;
-  suites: string | undefined;
+  session_end_reason?: string;
+  task_params?: string;
+  suites?: string;
 };
 
 export function summaryRowToTrajectory(

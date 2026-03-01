@@ -2,18 +2,18 @@
  * Progress Curves — overlaid SVG line chart showing test-pass progress over time.
  * Client component: renders interactive SVG with hover tooltips.
  *
- * X = elapsed time (0–480 min), Y = tests passed (0–totalTests).
+ * X = elapsed time (auto-scaled to data), Y = tests passed (0–totalTests).
  * Each selected trace renders as a line with area fill, plus red dots at regressions.
  */
 
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { AlertCircle, Clock, Hash } from "lucide-react";
 import type { Trajectory, Commit, Suite } from "@/lib/types";
 import { TRACE_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { MAX_DURATION, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
-import { formatDuration, formatPercent } from "@/lib/utils";
+import { TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
+import { formatDuration, formatPercent, computeMaxDuration, getXTicks, getYTicks, formatXTick } from "@/lib/utils";
 
 type ProgressCurvesProps = {
   traces: Trajectory[];
@@ -31,8 +31,9 @@ const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 /** Map minutes elapsed to X pixel position */
-function toX(minutes: number): number {
-  return MARGIN.left + (minutes / MAX_DURATION) * PLOT_WIDTH;
+function toX(minutes: number, maxDuration: number): number {
+  if (maxDuration === 0) return MARGIN.left;
+  return MARGIN.left + (minutes / maxDuration) * PLOT_WIDTH;
 }
 
 /** Map tests passed to Y pixel position */
@@ -41,40 +42,30 @@ function toY(passed: number, totalTests: number): number {
   return MARGIN.top + PLOT_HEIGHT - (passed / totalTests) * PLOT_HEIGHT;
 }
 
-/** Generate X-axis tick values (every hour) */
-function getXTicks(): number[] {
-  return Array.from({ length: 9 }, (_, hourIdx) => hourIdx * 60);
-}
-
-/** Generate Y-axis tick values */
-function getYTicks(totalTests: number): number[] {
-  return Array.from({ length: 5 }, (_, tickIdx) => Math.round((tickIdx / 4) * totalTests));
-}
-
 /** Build SVG path data for a trace line */
-function buildLinePath(commits: Commit[], totalTests: number): string {
+function buildLinePath(commits: Commit[], totalTests: number, maxDuration: number): string {
   return commits
-    .map((commit, pointIdx) => {
-      const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
+    .map((commit, i) => {
+      const cmd = i === 0 ? "M" : "L";
+      return `${cmd}${toX(commit.minutesElapsed, maxDuration).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG path data for the area fill under the curve */
-function buildAreaPath(commits: Commit[], totalTests: number): string {
+function buildAreaPath(commits: Commit[], totalTests: number, maxDuration: number): string {
   if (commits.length === 0) return "";
   const firstCommit = commits[0];
   const lastCommit = commits[commits.length - 1];
   if (!firstCommit || !lastCommit) return "";
   const lineSegments = commits
-    .map((commit, pointIdx) => {
-      const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(commit.minutesElapsed).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
+    .map((commit, i) => {
+      const cmd = i === 0 ? "M" : "L";
+      return `${cmd}${toX(commit.minutesElapsed, maxDuration).toFixed(1)},${toY(commit.totalPassed, totalTests).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${toX(lastCommit.minutesElapsed).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
-  const bottomLeft = `L${toX(firstCommit.minutesElapsed).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomRight = `L${toX(lastCommit.minutesElapsed, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomLeft = `L${toX(firstCommit.minutesElapsed, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
@@ -84,7 +75,8 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
 
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
 
-  const xTicks = getXTicks();
+  const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
+  const xTicks = useMemo(() => getXTicks(maxDuration), [maxDuration]);
   const yTicks = getYTicks(effectiveTotal);
 
   return (
@@ -111,9 +103,9 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
           {xTicks.map((tick) => (
             <line
               key={`x-grid-${tick}`}
-              x1={toX(tick)}
+              x1={toX(tick, maxDuration)}
               y1={MARGIN.top}
-              x2={toX(tick)}
+              x2={toX(tick, maxDuration)}
               y2={MARGIN.top + PLOT_HEIGHT}
               stroke={T.borderLight}
               strokeWidth={1}
@@ -150,12 +142,12 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
           {xTicks.map((tick) => (
             <text
               key={`x-label-${tick}`}
-              x={toX(tick)}
+              x={toX(tick, maxDuration)}
               y={MARGIN.top + PLOT_HEIGHT + 20}
               textAnchor="middle"
               style={{ fontSize: "9px", fill: T.textDim }}
             >
-              {`${tick / 60}h`}
+              {formatXTick(tick)}
             </text>
           ))}
 
@@ -185,7 +177,7 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
             return (
               <path
                 key={`area-${trace.id}`}
-                d={buildAreaPath(trace.commits, effectiveTotal)}
+                d={buildAreaPath(trace.commits, effectiveTotal, maxDuration)}
                 fill={color.fill}
                 opacity={hoveredTrace !== undefined && hoveredTrace !== traceIndex ? 0.3 : 1}
               />
@@ -199,7 +191,7 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
             return (
               <path
                 key={`line-${trace.id}`}
-                d={buildLinePath(trace.commits, effectiveTotal)}
+                d={buildLinePath(trace.commits, effectiveTotal, maxDuration)}
                 fill="none"
                 stroke={color.line}
                 strokeWidth={hoveredTrace === traceIndex ? 2.5 : 1.5}
@@ -220,7 +212,7 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
               .map((commit) => (
                 <circle
                   key={`reg-${trace.id}-${commit.index}`}
-                  cx={toX(commit.minutesElapsed)}
+                  cx={toX(commit.minutesElapsed, maxDuration)}
                   cy={toY(commit.totalPassed, effectiveTotal)}
                   r={3}
                   fill={T.red}
@@ -244,7 +236,7 @@ export function ProgressCurves({ traces, colorIndices, suites: suitesProp, total
             return (
               <text
                 key={`label-${trace.id}`}
-                x={toX(lastCommit.minutesElapsed) + 6}
+                x={toX(lastCommit.minutesElapsed, maxDuration) + 6}
                 y={toY(lastCommit.totalPassed, effectiveTotal) + 3}
                 style={{
                   fontSize: "9px",

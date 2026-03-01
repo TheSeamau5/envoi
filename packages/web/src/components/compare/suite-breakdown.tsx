@@ -8,11 +8,11 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import type { Trajectory, Commit, Suite } from "@/lib/types";
 import { TRACE_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { SUITES as DEFAULT_SUITES, MAX_DURATION } from "@/lib/constants";
-import { formatPercent } from "@/lib/utils";
+import { SUITES as DEFAULT_SUITES } from "@/lib/constants";
+import { formatPercent, computeMaxDuration } from "@/lib/utils";
 
 type SuiteBreakdownProps = {
   traces: Trajectory[];
@@ -29,8 +29,9 @@ const MINI_PLOT_W = MINI_WIDTH - MINI_MARGIN.left - MINI_MARGIN.right;
 const MINI_PLOT_H = MINI_HEIGHT - MINI_MARGIN.top - MINI_MARGIN.bottom;
 
 /** Map minutes to X in mini chart */
-function miniToX(minutes: number): number {
-  return MINI_MARGIN.left + (minutes / MAX_DURATION) * MINI_PLOT_W;
+function miniToX(minutes: number, maxDuration: number): number {
+  if (maxDuration === 0) return MINI_MARGIN.left;
+  return MINI_MARGIN.left + (minutes / maxDuration) * MINI_PLOT_W;
 }
 
 /** Map suite passed count to Y in mini chart */
@@ -39,18 +40,18 @@ function miniToY(passed: number, suiteTotal: number): number {
 }
 
 /** Build SVG line path for a trace within a single suite */
-function buildSuiteLinePath(commits: Commit[], suiteName: string, suiteTotal: number): string {
+function buildSuiteLinePath(commits: Commit[], suiteName: string, suiteTotal: number, maxDuration: number): string {
   return commits
     .map((commit, pointIdx) => {
       const passed = commit.suiteState[suiteName] ?? 0;
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${miniToX(commit.minutesElapsed).toFixed(1)},${miniToY(passed, suiteTotal).toFixed(1)}`;
+      return `${cmd}${miniToX(commit.minutesElapsed, maxDuration).toFixed(1)},${miniToY(passed, suiteTotal).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG area path for a trace within a single suite */
-function buildSuiteAreaPath(commits: Commit[], suiteName: string, suiteTotal: number): string {
+function buildSuiteAreaPath(commits: Commit[], suiteName: string, suiteTotal: number, maxDuration: number): string {
   if (commits.length === 0) return "";
   const firstCommit = commits[0];
   const lastCommit = commits[commits.length - 1];
@@ -59,11 +60,11 @@ function buildSuiteAreaPath(commits: Commit[], suiteName: string, suiteTotal: nu
     .map((commit, pointIdx) => {
       const passed = commit.suiteState[suiteName] ?? 0;
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${miniToX(commit.minutesElapsed).toFixed(1)},${miniToY(passed, suiteTotal).toFixed(1)}`;
+      return `${cmd}${miniToX(commit.minutesElapsed, maxDuration).toFixed(1)},${miniToY(passed, suiteTotal).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${miniToX(lastCommit.minutesElapsed).toFixed(1)},${miniToY(0, suiteTotal).toFixed(1)}`;
-  const bottomLeft = `L${miniToX(firstCommit.minutesElapsed).toFixed(1)},${miniToY(0, suiteTotal).toFixed(1)}`;
+  const bottomRight = `L${miniToX(lastCommit.minutesElapsed, maxDuration).toFixed(1)},${miniToY(0, suiteTotal).toFixed(1)}`;
+  const bottomLeft = `L${miniToX(firstCommit.minutesElapsed, maxDuration).toFixed(1)},${miniToY(0, suiteTotal).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
@@ -75,13 +76,15 @@ function MiniSuiteChart({
   colorIndices,
   hoveredTrace,
   onHover,
+  maxDuration,
 }: {
   suiteName: string;
   suiteTotal: number;
   traces: Trajectory[];
   colorIndices?: number[];
-  hoveredTrace: number | undefined;
-  onHover: (index: number | undefined) => void;
+  hoveredTrace?: number;
+  onHover: (index?: number) => void;
+  maxDuration: number;
 }) {
   const suiteColor = SUITE_COLORS[suiteName];
   const yTicks = [0, Math.round(suiteTotal / 2), suiteTotal];
@@ -134,7 +137,7 @@ function MiniSuiteChart({
           textAnchor="start"
           style={{ fontSize: "7px", fill: T.textDim }}
         >
-          0h
+          0
         </text>
         <text
           x={MINI_WIDTH - MINI_MARGIN.right}
@@ -142,7 +145,7 @@ function MiniSuiteChart({
           textAnchor="end"
           style={{ fontSize: "7px", fill: T.textDim }}
         >
-          8h
+          {maxDuration < 60 ? `${maxDuration}m` : `${Math.round(maxDuration / 60)}h`}
         </text>
 
         {/* Area fills */}
@@ -152,7 +155,7 @@ function MiniSuiteChart({
           return (
             <path
               key={`area-${trace.id}`}
-              d={buildSuiteAreaPath(trace.commits, suiteName, suiteTotal)}
+              d={buildSuiteAreaPath(trace.commits, suiteName, suiteTotal, maxDuration)}
               fill={traceColor.fill}
               opacity={hoveredTrace !== undefined && hoveredTrace !== traceIndex ? 0.3 : 1}
             />
@@ -166,7 +169,7 @@ function MiniSuiteChart({
           return (
             <path
               key={`line-${trace.id}`}
-              d={buildSuiteLinePath(trace.commits, suiteName, suiteTotal)}
+              d={buildSuiteLinePath(trace.commits, suiteName, suiteTotal, maxDuration)}
               fill="none"
               stroke={traceColor.line}
               strokeWidth={hoveredTrace === traceIndex ? 2 : 1.2}
@@ -188,7 +191,7 @@ function MiniSuiteChart({
           return (
             <text
               key={`endpoint-${trace.id}`}
-              x={miniToX(lastCommit.minutesElapsed) + 3}
+              x={miniToX(lastCommit.minutesElapsed, maxDuration) + 3}
               y={miniToY(passed, suiteTotal) + 2}
               style={{ fontSize: "7px", fill: traceColor.line, fontWeight: 700 }}
               opacity={hoveredTrace !== undefined && hoveredTrace !== traceIndex ? 0.3 : 1}
@@ -205,6 +208,7 @@ function MiniSuiteChart({
 export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: SuiteBreakdownProps) {
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const [hoveredTrace, setHoveredTrace] = useState<number | undefined>(undefined);
+  const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -219,6 +223,7 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
             colorIndices={colorIndices}
             hoveredTrace={hoveredTrace}
             onHover={setHoveredTrace}
+            maxDuration={maxDuration}
           />
         ))}
       </div>
