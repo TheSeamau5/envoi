@@ -149,8 +149,8 @@ function getXTimeTicks(totalMinutes: number): number[] {
     ticks.push(tick);
   }
   // Include the end if it's not already close to the last tick
-  const lastTick = ticks[ticks.length - 1]!;
-  if (totalMinutes - lastTick > intervalMinutes * 0.4) {
+  const lastTick = ticks[ticks.length - 1];
+  if (lastTick !== undefined && totalMinutes - lastTick > intervalMinutes * 0.4) {
     ticks.push(totalMinutes);
   }
   return ticks;
@@ -283,8 +283,9 @@ export function ProgressCurve({
         />
 
         {/* Percentage label above selected commit */}
-        {commits[selectedIndex] && (() => {
-          const commit = commits[selectedIndex]!;
+        {(() => {
+          const commit = commits[selectedIndex];
+          if (!commit) return undefined;
           const xPos = toX(selectedIndex, commits.length);
           const yPos = toY(getYValue(commit, activeSuite), yMax);
           const pct = Math.round((getYValue(commit, activeSuite) / yMax) * 100);

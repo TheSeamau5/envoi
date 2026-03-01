@@ -58,7 +58,8 @@ function buildTree(snapshot: CodeSnapshot): TreeNode[] {
     let currentLevel = root;
 
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
-      const partName = parts[partIndex]!;
+      const partName = parts[partIndex];
+      if (!partName) continue;
       const isFile = partIndex === parts.length - 1;
       const fullPath = parts.slice(0, partIndex + 1).join("/");
 

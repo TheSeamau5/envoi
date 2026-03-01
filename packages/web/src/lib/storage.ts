@@ -14,6 +14,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 /** Prefix all envoi localStorage keys to avoid collisions */
 const STORAGE_PREFIX = "envoi:";
 
+/** Type guard: validates that runtime typeof matches the sample value */
+function isSameType<T>(value: unknown, sample: T): value is T {
+  return typeof value === typeof sample;
+}
+
 /** React hook that persists state to localStorage */
 export function usePersistedState<T>(
   key: string,
@@ -32,9 +37,9 @@ export function usePersistedState<T>(
     try {
       const stored = window.localStorage.getItem(prefixedKey);
       if (stored === null) return;
-      const parsed = JSON.parse(stored) as unknown;
-      if (typeof parsed === typeof defaultValue) {
-        setValue(parsed as T);
+      const parsed: unknown = JSON.parse(stored);
+      if (isSameType(parsed, defaultValue)) {
+        setValue(parsed);
       }
     } catch {
       // Bad data — keep default
@@ -53,13 +58,8 @@ export function usePersistedState<T>(
 
   const setPersistedValue = useCallback(
     (valueOrUpdater: T | ((prev: T) => T)) => {
-      setValue((prev) => {
-        const next =
-          typeof valueOrUpdater === "function"
-            ? (valueOrUpdater as (prev: T) => T)(prev)
-            : valueOrUpdater;
-        return next;
-      });
+      // React's setValue handles function vs value discrimination internally
+      setValue(valueOrUpdater);
     },
     [],
   );

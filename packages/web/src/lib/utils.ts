@@ -5,7 +5,7 @@
 
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import type { Trajectory, TrajectoryGroup, MilestoneDef, Commit, TrajectoryParams } from "./types";
+import type { Trajectory, TrajectoryGroup, MilestoneDef, Commit } from "./types";
 
 /** Merge Tailwind classes with deduplication */
 export function cn(...inputs: ClassValue[]) {
@@ -26,7 +26,11 @@ export function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((first, second) => first - second);
   const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0 ? sorted[mid]! : ((sorted[mid - 1]! + sorted[mid]!) / 2);
+  const midVal = sorted[mid];
+  if (midVal === undefined) return 0;
+  if (sorted.length % 2 !== 0) return midVal;
+  const prevVal = sorted[mid - 1];
+  return prevVal === undefined ? midVal : (prevVal + midVal) / 2;
 }
 
 /** Find the first commit where a milestone threshold is reached */
@@ -43,8 +47,8 @@ export function findMilestone(trace: Trajectory, milestone: MilestoneDef): Commi
 /** Extract a parameter value from a trajectory by dimension key */
 export function getTrajectoryParam(trace: Trajectory, dimensionKey: string): string {
   if (dimensionKey === "model") return trace.model;
-  const paramKey = dimensionKey as keyof TrajectoryParams;
-  return trace.params[paramKey] ?? "\u2014";
+  const value = Object.entries(trace.params).find(([key]) => key === dimensionKey)?.[1];
+  return value ?? "\u2014";
 }
 
 /** Group traces by one or more dimension keys, returning sorted groups */

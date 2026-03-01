@@ -35,7 +35,10 @@ export function createRng(seed: number): SeededRng {
   }
 
   function pick<T>(array: readonly T[]): T {
-    return array[Math.floor(next() * array.length)]!;
+    const idx = Math.floor(next() * array.length);
+    const item = array[idx];
+    if (item === undefined) throw new Error("Cannot pick from empty array");
+    return item;
   }
 
   return { next, nextInt, nextBool, pick };
@@ -44,5 +47,5 @@ export function createRng(seed: number): SeededRng {
 /** Generate a hex hash string of given length */
 export function generateHash(rng: SeededRng, length = 8): string {
   const chars = "0123456789abcdef";
-  return Array.from({ length }, () => chars[Math.floor(rng.next() * 16)]!).join("");
+  return Array.from({ length }, () => chars.charAt(Math.floor(rng.next() * 16))).join("");
 }

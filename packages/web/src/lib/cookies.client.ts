@@ -18,7 +18,8 @@ export function setLayoutCookie(
     dividerPct: COOKIE_DIVIDER_PCT,
     sidebarCollapsed: COOKIE_SIDEBAR_COLLAPSED,
   };
-  const name = cookieNames[key]!;
+  const name = cookieNames[key];
+  if (!name) return;
   const encoded = encodeURIComponent(String(value));
   document.cookie = `${name}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
 }

@@ -141,7 +141,9 @@ export function TrajectoryDetail({
           handleSelectCommit(commits.length - 1);
           break;
         case "Escape":
-          (event.target as HTMLElement).blur();
+          if (event.target instanceof HTMLElement) {
+            event.target.blur();
+          }
           break;
       }
     },
@@ -300,6 +302,7 @@ export function TrajectoryDetail({
                   isSelected={commit.index === selectedIndex}
                   onSelect={handleSelectCommit}
                   activeSuite={activeSuite}
+                  suites={suites}
                 />
               ))}
             </div>

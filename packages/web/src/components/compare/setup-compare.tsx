@@ -79,8 +79,9 @@ function buildMedianLinePath(points: MedianPoint[], totalTests: number): string 
 /** Build SVG area path from median points */
 function buildMedianAreaPath(points: MedianPoint[], totalTests: number): string {
   if (points.length === 0) return "";
-  const firstPoint = points[0]!;
-  const lastPoint = points[points.length - 1]!;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  if (!firstPoint || !lastPoint) return "";
   const lineSegments = points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
@@ -215,7 +216,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
         </div>
         <div className="flex-1 overflow-y-auto">
           {groups.map((group, groupIndex) => {
-            const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length]!;
+            const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+            if (!color) return undefined;
             const isHidden = hiddenGroups.has(group.key);
             const medianFinal = median(group.traces.map((trace) => trace.finalPassed));
 
@@ -354,7 +356,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
             {/* Group curves */}
             {visibleGroups.map((group, groupIndex) => {
-              const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length]!;
+              const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+              if (!color) return undefined;
               const curve = computeMedianCurve(group.traces);
               const lastPoint = curve[curve.length - 1];
 
@@ -402,7 +405,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               Total
             </span>
             {visibleGroups.map((group, groupIndex) => {
-              const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length]!;
+              const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+              if (!color) return undefined;
               return (
                 <span
                   key={group.key}
@@ -438,7 +442,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                   {suite.total}
                 </span>
                 {visibleGroups.map((group, groupIndex) => {
-                  const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length]!;
+                  const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+                  if (!color) return undefined;
                   const medianVal = suiteMedianFinal(group.traces, suite.name);
                   const pct = (medianVal / suite.total) * 100;
                   return (
@@ -475,7 +480,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
           </div>
 
           {groups.map((group: TrajectoryGroup, groupIndex: number) => {
-            const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length]!;
+            const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+            if (!color) return undefined;
             const isExpanded = expandedGroups.has(group.key);
             const medianFinal = median(group.traces.map((trace) => trace.finalPassed));
             const lastCommits: Commit[] = group.traces

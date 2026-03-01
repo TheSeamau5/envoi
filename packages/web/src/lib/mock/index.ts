@@ -65,7 +65,8 @@ function buildCodeEvolution(numCommits: number, rng: SeededRng): CodeSnapshot[] 
           const numToInsert = Math.min(1 + Math.floor(rng.next() * 4), pool.length);
           const startIdx = Math.floor(rng.next() * pool.length);
           const lines = pool.slice(startIdx, startIdx + numToInsert);
-          const fileLines = currentCode[file]!;
+          const fileLines = currentCode[file] ?? [];
+        currentCode[file] = fileLines;
           const insertAt = Math.max(1, fileLines.length - 1 - Math.floor(rng.next() * 3));
           fileLines.splice(insertAt, 0, ...lines);
           for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
@@ -344,46 +345,46 @@ function generateTrajectoryFromConfig(
 
     // Suite progression with unlocking rules
     // basics unlocks first
-    if (phase > 0.05 * speedFactor && suiteState["basics"]! < 35) {
+    if (phase > 0.05 * speedFactor && (suiteState["basics"] ?? 0) < 35) {
       const gain = Math.min(
-        35 - suiteState["basics"]!,
+        35 - (suiteState["basics"] ?? 0),
         Math.floor(rng.next() * 8 + 2),
       );
       if (rng.next() > 0.3 * plateauFactor) {
-        suiteState["basics"] = Math.min(35, suiteState["basics"]! + gain);
+        suiteState["basics"] = Math.min(35, (suiteState["basics"] ?? 0) + gain);
       }
     }
 
     // wacct unlocks after basics > 15
-    if (phase > 0.15 * speedFactor && suiteState["basics"]! > 15) {
+    if (phase > 0.15 * speedFactor && (suiteState["basics"] ?? 0) > 15) {
       const maxWacct = Math.floor(
         1559 * finalCeiling * Math.min(1, phase / (0.7 * speedFactor)),
       );
       const gain = Math.floor(rng.next() * 45 + 5);
       if (rng.next() > 0.4 * plateauFactor) {
-        suiteState["wacct"] = Math.min(maxWacct, suiteState["wacct"]! + gain);
+        suiteState["wacct"] = Math.min(maxWacct, (suiteState["wacct"] ?? 0) + gain);
       }
     }
 
     // c_testsuite unlocks after wacct > 300
-    if (phase > 0.3 * speedFactor && suiteState["wacct"]! > 300) {
+    if (phase > 0.3 * speedFactor && (suiteState["wacct"] ?? 0) > 300) {
       const maxCts = Math.floor(
         220 * finalCeiling * Math.min(1, phase / (0.8 * speedFactor)),
       );
       const gain = Math.floor(rng.next() * 12 + 1);
       if (rng.next() > 0.45 * plateauFactor) {
-        suiteState["c_testsuite"] = Math.min(maxCts, suiteState["c_testsuite"]! + gain);
+        suiteState["c_testsuite"] = Math.min(maxCts, (suiteState["c_testsuite"] ?? 0) + gain);
       }
     }
 
     // torture unlocks after c_testsuite > 60
-    if (phase > 0.55 * speedFactor && suiteState["c_testsuite"]! > 60) {
+    if (phase > 0.55 * speedFactor && (suiteState["c_testsuite"] ?? 0) > 60) {
       const maxTorture = Math.floor(
         370 * finalCeiling * Math.min(1, phase / (0.9 * speedFactor)),
       );
       const gain = Math.floor(rng.next() * 8 + 1);
       if (rng.next() > 0.5 * plateauFactor) {
-        suiteState["torture"] = Math.min(maxTorture, suiteState["torture"]! + gain);
+        suiteState["torture"] = Math.min(maxTorture, (suiteState["torture"] ?? 0) + gain);
       }
     }
 
@@ -392,16 +393,16 @@ function generateTrajectoryFromConfig(
       phase > 0.2 && phase < 0.8 && rng.next() < regressionProbability;
     if (isRegression) {
       const wacctLoss = Math.floor(rng.next() * 80 + 20);
-      suiteState["wacct"] = Math.max(0, suiteState["wacct"]! - wacctLoss);
+      suiteState["wacct"] = Math.max(0, (suiteState["wacct"] ?? 0) - wacctLoss);
       if (rng.next() > 0.5) {
         const ctsLoss = Math.floor(rng.next() * 15);
-        suiteState["c_testsuite"] = Math.max(0, suiteState["c_testsuite"]! - ctsLoss);
+        suiteState["c_testsuite"] = Math.max(0, (suiteState["c_testsuite"] ?? 0) - ctsLoss);
       }
     }
 
     // Clamp to suite totals
     for (const suite of SUITES) {
-      suiteState[suite.name] = Math.min(suite.total, Math.max(0, suiteState[suite.name]!));
+      suiteState[suite.name] = Math.min(suite.total, Math.max(0, suiteState[suite.name] ?? 0));
     }
 
     totalPassed = SUITES.reduce(
@@ -415,7 +416,7 @@ function generateTrajectoryFromConfig(
     const isMilestone =
       (suiteState["basics"] === 35 &&
         (prevCommit?.suiteState["basics"] ?? 0) < 35) ||
-      (suiteState["c_testsuite"]! > 200 &&
+      ((suiteState["c_testsuite"] ?? 0) > 200 &&
         (prevCommit?.suiteState["c_testsuite"] ?? 0) <= 200);
     const milestoneLabel =
       suiteState["basics"] === 35 &&
@@ -484,7 +485,8 @@ function generateTrajectoryFromConfig(
     });
   }
 
-  const finalPassed = commits.length > 0 ? commits[commits.length - 1]!.totalPassed : 0;
+  const lastCommit = commits[commits.length - 1];
+  const finalPassed = lastCommit ? lastCommit.totalPassed : 0;
   const hours = Math.floor(durationMinutes / 60);
   const mins = durationMinutes % 60;
   const durationStr =

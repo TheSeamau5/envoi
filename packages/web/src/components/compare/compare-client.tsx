@@ -94,7 +94,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
       const validIds = new Set(allTraces.map((t) => t.id));
       const cleaned: Record<string, number> = {};
-      for (const [id, colorIdx] of Object.entries(parsed as Record<string, unknown>)) {
+      for (const [id, colorIdx] of Object.entries(parsed)) {
         if (validIds.has(id) && typeof colorIdx === "number" && colorIdx >= 0) {
           cleaned[id] = colorIdx;
         }
@@ -231,7 +231,9 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           setFocusedIndex(Math.max(0, sortedTraces.length - 1));
           break;
         case "Escape":
-          (event.target as HTMLElement).blur();
+          if (event.target instanceof HTMLElement) {
+            event.target.blur();
+          }
           break;
       }
     },
@@ -396,7 +398,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 const isSelected = colorIdx >= 0;
                 const isFocused = traceIndex === focusedIndex;
                 const color = isSelected
-                  ? TRACE_COLORS[colorIdx % TRACE_COLORS.length]!
+                  ? TRACE_COLORS[colorIdx % TRACE_COLORS.length]
                   : undefined;
 
                 return (
@@ -405,10 +407,10 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     ref={isFocused ? focusedRowRef : undefined}
                     className="flex w-full items-center gap-[10px] border-b border-envoi-border-light px-[14px] py-[10px] text-left transition-colors hover:bg-envoi-surface"
                     style={{
-                      borderLeft: isSelected
-                        ? `3px solid ${color!.line}`
+                      borderLeft: color
+                        ? `3px solid ${color.line}`
                         : "3px solid transparent",
-                      background: isSelected ? color!.fill : undefined,
+                      background: color?.fill,
                       cursor: "pointer",
                       outline: isFocused ? `2px solid ${T.accent}` : "none",
                       outlineOffset: -2,
@@ -422,8 +424,8 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     <span
                       className="flex h-[16px] w-[16px] shrink-0 items-center justify-center rounded-[3px] border"
                       style={{
-                        borderColor: isSelected ? color!.line : T.border,
-                        background: isSelected ? color!.line : "transparent",
+                        borderColor: color ? color.line : T.border,
+                        background: color ? color.line : "transparent",
                       }}
                     >
                       {isSelected && (
@@ -495,7 +497,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   <ProgressCurves traces={selectedTraces} colorIndices={colorIndices} suites={suites} totalTests={totalTests} />
                 )}
                 {activeTab === "milestones" && (
-                  <MilestoneTable traces={selectedTraces} colorIndices={colorIndices} />
+                  <MilestoneTable traces={selectedTraces} colorIndices={colorIndices} suites={suites} />
                 )}
                 {activeTab === "suites" && (
                   <SuiteBreakdown traces={selectedTraces} colorIndices={colorIndices} suites={suites} />

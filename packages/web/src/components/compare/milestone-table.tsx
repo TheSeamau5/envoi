@@ -9,15 +9,16 @@
  */
 
 import { Star, Minus } from "lucide-react";
-import type { Trajectory, Commit } from "@/lib/types";
+import type { Trajectory, Commit, Suite, MilestoneDef } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
-import { MILESTONES } from "@/lib/constants";
+import { MILESTONES as DEFAULT_MILESTONES, SUITES as DEFAULT_SUITES, computeMilestones } from "@/lib/constants";
 import { findMilestone, formatDuration } from "@/lib/utils";
 
 type MilestoneTableProps = {
   traces: Trajectory[];
   /** Stable color index for each trace (parallel to `traces` array) */
   colorIndices?: number[];
+  suites?: Suite[];
 };
 
 /** Result of looking up a milestone for one trace */
@@ -26,28 +27,31 @@ type MilestoneHit = {
   traceIndex: number;
 };
 
+/** Type guard for hits with a defined commit */
+function hasCommit(hit: MilestoneHit): hit is MilestoneHit & { commit: Commit } {
+  return hit.commit !== undefined;
+}
+
 /** Find which trace index reached the milestone fastest */
 function findFastestIndex(hits: MilestoneHit[]): number | undefined {
-  const reachedHits = hits.filter((hit) => hit.commit !== undefined);
+  const reachedHits = hits.filter(hasCommit);
   if (reachedHits.length === 0) return undefined;
   const best = reachedHits.reduce((acc, hit) =>
-    hit.commit!.minutesElapsed < acc.commit!.minutesElapsed ? hit : acc,
+    hit.commit.minutesElapsed < acc.commit.minutesElapsed ? hit : acc,
   );
   return best.traceIndex;
 }
 
 /** Compute the spread (max - min elapsed time) among traces that reached a milestone */
 function computeSpread(hits: MilestoneHit[]): number | undefined {
-  const times = hits
-    .filter((hit) => hit.commit !== undefined)
-    .map((hit) => hit.commit!.minutesElapsed);
+  const times = hits.filter(hasCommit).map((hit) => hit.commit.minutesElapsed);
   if (times.length < 2) return undefined;
   return Math.max(...times) - Math.min(...times);
 }
 
 /** Pre-compute all milestone hits for all traces */
-function buildHitsGrid(traces: Trajectory[]) {
-  return MILESTONES.map((milestone) => {
+function buildHitsGrid(traces: Trajectory[], milestones: MilestoneDef[]) {
+  return milestones.map((milestone) => {
     const hits = traces.map((trace, traceIndex) => ({
       commit: findMilestone(trace, milestone),
       traceIndex,
@@ -70,8 +74,10 @@ function buildGroups(grid: ReturnType<typeof buildHitsGrid>) {
   return groups;
 }
 
-export function MilestoneTable({ traces, colorIndices }: MilestoneTableProps) {
-  const grid = buildHitsGrid(traces);
+export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: MilestoneTableProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const milestones = suitesProp ? computeMilestones(effectiveSuites) : DEFAULT_MILESTONES;
+  const grid = buildHitsGrid(traces, milestones);
   const groups = buildGroups(grid);
 
   return (
@@ -126,7 +132,9 @@ export function MilestoneTable({ traces, colorIndices }: MilestoneTableProps) {
           <tbody>
             {/* One row per trace */}
             {traces.map((trace, traceIndex) => {
-              const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length]!;
+              const colorIdx = (colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length;
+              const color = TRACE_COLORS[colorIdx];
+              if (!color) return undefined;
               return (
                 <tr key={trace.id} className="transition-colors hover:bg-envoi-surface">
                   {/* Sticky trace label */}
@@ -147,7 +155,8 @@ export function MilestoneTable({ traces, colorIndices }: MilestoneTableProps) {
                   {/* Milestone cells */}
                   {groups.map((group, groupIdx) =>
                     group.items.map((entry, entryIdx) => {
-                      const hit = entry.hits[traceIndex]!;
+                      const hit = entry.hits[traceIndex];
+                      if (!hit) return undefined;
                       const isFastest = traceIndex === entry.fastest;
                       const isLastInGroup = entryIdx === group.items.length - 1;
                       const isLastGroup = groupIdx === groups.length - 1;

@@ -6,8 +6,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Commit } from "@/lib/types";
-import { SUITES } from "@/lib/constants";
+import type { Commit, Suite } from "@/lib/types";
+import { SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
 import { Star, TrendingDown } from "lucide-react";
 import {
@@ -21,9 +21,11 @@ type CommitRowProps = {
   isSelected: boolean;
   onSelect: (index: number) => void;
   activeSuite: string;
+  suites?: Suite[];
 };
 
-export function CommitRow({ commit, isSelected, onSelect, activeSuite }: CommitRowProps) {
+export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp }: CommitRowProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const rowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,8 +46,8 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite }: CommitR
 
   const suitesToShow =
     activeSuite === "all"
-      ? SUITES
-      : SUITES.filter((suite) => suite.name === activeSuite);
+      ? effectiveSuites
+      : effectiveSuites.filter((suite) => suite.name === activeSuite);
 
   return (
     <div
