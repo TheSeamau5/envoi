@@ -22,22 +22,17 @@ An envoi environment is a Python file with decorated functions:
 
 ```python
 import envoi
-
-@envoi.setup
-async def build(submission: envoi.Documents):
-    """Receive source code and compile it."""
-    workdir = envoi.session_path()
-    await envoi.run(f"cp -r {submission.dir}/. {workdir}")
-    result = await envoi.run("make", cwd=str(workdir))
-    if result.exit_code != 0:
-        raise RuntimeError(f"Build failed:\n{result.stderr}")
+from solution import square
 
 @envoi.test
-async def hello_world():
-    """Compile and run a hello world program."""
-    workdir = envoi.session_path()
-    result = await envoi.run(f"{workdir}/cc tests/hello.c -o /tmp/test && /tmp/test")
-    return {"passed": result.stdout == "hello", "stdout": result.stdout}
+async def test_square():
+    """Does the function square 5 correctly?"""
+    return {"passed": square(5) == 25}
+
+@envoi.test
+async def test_negative():
+    """Does it handle negative numbers?"""
+    return {"passed": square(-3) == 9}
 ```
 
 When you run `envoi-runtime --file environment.py`, this becomes a FastAPI server. A client connects, uploads source code, and gets back test results as JSON.
@@ -61,11 +56,10 @@ import envoi
 
 @envoi.test
 async def adds_correctly():
-    result = await envoi.run("echo $((1 + 1))")
-    return {"passed": result.stdout == "2"}
+    return {"passed": 1 + 1 == 2}
 ```
 
-Tests must be `async def`. They can return any JSON-serializable value.
+Tests must be `async def`. They can return any JSON-serializable value. For tests that need to run shell commands (compiling code, executing binaries), use `envoi.run()`.
 
 ### Test suites
 

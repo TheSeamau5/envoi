@@ -17,8 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages \
-    "envoi @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+RUN uv pip install --system \
+    "envoi-ai @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
     "httpx>=0.27.0" \
     "pydantic>=2.0.0"
 

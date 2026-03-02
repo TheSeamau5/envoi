@@ -47,30 +47,37 @@ When you fix a bug, write a test that reproduces it FIRST, then fix it. That tes
 
 ## Testing Mechanics
 
-Create a `tests/` directory in your workspace. Put each test as a `.c` file. Write a `run_tests.sh` script that compiles each one with `./cc`, runs it, and compares the output against gcc. Something like:
+Create a `tests/` directory in your workspace. Put each test as a `.c` file. Write a `run_tests.sh` script that compiles each one with `./cc`, runs it, and compares both stdout and exit code against gcc. This is how the real evaluation harness determines pass/fail — your output and exit code must match gcc exactly.
 
 ```bash
 #!/bin/bash
 PASS=0; FAIL=0
 for f in tests/*.c; do
-    # Compile with your compiler
-    ./cc "$f" -o /tmp/mine 2>/dev/null
-    mine_status=$?
-    # Compile with gcc for reference
+    name=$(basename "$f")
+    # Compile with gcc (reference)
     gcc "$f" -o /tmp/ref 2>/dev/null
-    # Compare outputs
-    mine_out=$(/tmp/mine 2>/dev/null; echo "EXIT:$?")
-    ref_out=$(/tmp/ref 2>/dev/null; echo "EXIT:$?")
-    if [ "$mine_out" = "$ref_out" ] && [ $mine_status -eq 0 ]; then
+    ref_out=$(/tmp/ref 2>/dev/null)
+    ref_exit=$?
+    # Compile with your compiler
+    if ! ./cc "$f" -o /tmp/mine 2>/tmp/cc_stderr; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL $name: compilation failed"
+        cat /tmp/cc_stderr
+        continue
+    fi
+    # Run and compare
+    mine_out=$(/tmp/mine 2>/dev/null)
+    mine_exit=$?
+    if [ "$mine_out" = "$ref_out" ] && [ "$mine_exit" = "$ref_exit" ]; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))
-        echo "FAIL: $f"
-        echo "  expected: $ref_out"
-        echo "  got:      $mine_out"
+        echo "FAIL $name"
+        [ "$mine_out" != "$ref_out" ] && echo "  stdout: expected $(echo "$ref_out" | head -c 200), got $(echo "$mine_out" | head -c 200)"
+        [ "$mine_exit" != "$ref_exit" ] && echo "  exit: expected $ref_exit, got $mine_exit"
     fi
 done
-echo "$PASS passed, $FAIL failed"
+echo "$PASS passed, $FAIL failed out of $((PASS + FAIL))"
 ```
 
 Run this after every change. No exceptions.

@@ -26,9 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 # Python packages (same as sandbox_image.pip_install in runner.py)
-RUN pip3 install --break-system-packages \
-        "envoi @ git+https://github.com/TheSeamau5/envoi.git" \
+RUN uv pip install --system \
+        "envoi-ai @ git+https://github.com/TheSeamau5/envoi.git" \
         "httpx>=0.27.0" \
         "opencode-ai>=0.1.0a36" \
         "pypdfium2>=4.30.0" \

@@ -19,9 +19,15 @@ __RUNTIME_EXPORTS__
 # Ensure envoi SDK is installed in the sandbox
 if ! python3 -c "import envoi" 2>/dev/null; then
     echo "[setup] installing envoi SDK"
-    pip3 install --break-system-packages \
-        "envoi @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
-        2>&1 | tail -1
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --system \
+            "envoi-ai @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
+            2>&1 | tail -1
+    else
+        pip3 install --break-system-packages \
+            "envoi-ai @ git+https://github.com/TheSeamau5/envoi.git@main#subdirectory=packages/envoi" \
+            2>&1 | tail -1
+    fi
 fi
 
 echo "[setup] starting envoi runtime on :8000"
