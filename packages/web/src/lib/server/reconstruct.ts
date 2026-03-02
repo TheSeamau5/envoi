@@ -577,6 +577,27 @@ function mergeSuitesFromEvals(
   return [...totals.entries()].map(([name, total]) => ({ name, total }));
 }
 
+/**
+ * Deduplicate evals targeting the same git commit.
+ * When multiple evals run on the same commit (re-evaluations, overlapping
+ * async evals), keep only the most complete result — the one with the
+ * highest `total` (most suites completed). This prevents phantom regressions
+ * caused by suite timeouts varying between eval runs.
+ */
+function deduplicateEvalsByCommit(evals: EvalRecord[]): EvalRecord[] {
+  const bestByCommit = new Map<string, EvalRecord>();
+  for (const evalRec of evals) {
+    const existing = bestByCommit.get(evalRec.commit);
+    if (!existing || evalRec.total > existing.total) {
+      bestByCommit.set(evalRec.commit, evalRec);
+    }
+  }
+  // Preserve the original chronological order (sorted by part)
+  return evals.filter(
+    (evalRec) => bestByCommit.get(evalRec.commit) === evalRec,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Parse task_params
 // ---------------------------------------------------------------------------
@@ -882,12 +903,19 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const suites = mergeSuitesFromEvals(parseSuites(first.suites), completedEvals);
   const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
 
+  // Deduplicate evals on the same git commit: keep only the most complete
+  // result (highest total). Multiple evals can target the same commit when
+  // the agent re-evaluates without changing code, or when async evals
+  // overlap. Without dedup, phantom regressions appear when a suite times
+  // out in one eval but not another.
+  const deduped = deduplicateEvalsByCommit(completedEvals);
+
   // Build commits from evaluation boundaries
   const commits: Commit[] = [];
   let prevTotalPassed = 0;
   let prevSuiteState: SuiteState = {};
 
-  if (completedEvals.length === 0) {
+  if (deduped.length === 0) {
     // No evaluations — create a single "commit" containing all steps
     const steps = sortedRows
       .map((row, rowIndex) => rowToStep(row, rowIndex))
@@ -927,7 +955,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     // Group rows by evaluation boundaries
     let rowCursor = 0;
 
-    for (const evalRec of completedEvals) {
+    for (const evalRec of deduped) {
       // Collect rows from cursor up to and including the eval trigger part
       const commitRows: ParquetRow[] = [];
       while (rowCursor < sortedRows.length) {
@@ -1070,7 +1098,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   );
 
   // Final passed from last completed evaluation
-  const lastEval = completedEvals[completedEvals.length - 1];
+  const lastEval = deduped[deduped.length - 1];
   const finalPassed = lastEval ? lastEval.passed : 0;
 
   // Model string
