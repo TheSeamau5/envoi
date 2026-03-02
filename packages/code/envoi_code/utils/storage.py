@@ -77,10 +77,17 @@ def save_trace_parquet(
     if not allow_empty and turn_count == 0 and part_count == 0:
         return
 
+    # Merge suite_results across all evaluations to build the most complete
+    # picture.  Individual evals may have partial results when suites timeout,
+    # so taking the union ensures the suite definition reflects the full
+    # environment rather than one eval's partial snapshot.
     suites: dict[str, Any] = {}
     for eval_rec in trace.evaluations.values():
-        if eval_rec.suite_results:
-            suites = eval_rec.suite_results
+        if not eval_rec.suite_results:
+            continue
+        for key, val in eval_rec.suite_results.items():
+            if key not in suites:
+                suites[key] = val
 
     rows = agent_trace_to_rows(
         trace,

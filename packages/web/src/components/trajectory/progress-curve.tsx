@@ -274,7 +274,17 @@ export function ProgressCurve({
 
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
-  const yMax = getYMax(activeSuite, effectiveSuites, effectiveTotal);
+
+  /** Safeguard: ensure y-axis is never less than the max observed data point.
+   *  This handles legacy trajectories where suites may reflect partial eval results. */
+  let maxObserved = 0;
+  for (const commit of commits) {
+    const value = getYValue(commit, activeSuite);
+    if (value > maxObserved) {
+      maxObserved = value;
+    }
+  }
+  const yMax = Math.max(getYMax(activeSuite, effectiveSuites, effectiveTotal), maxObserved);
   const yTicks = getYTicks(yMax);
   const lastCommit = commits[commits.length - 1];
   const totalMinutes = lastCommit?.minutesElapsed ?? 0;

@@ -7,10 +7,11 @@
 
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import type { Trajectory } from "@/lib/types";
+import { isPossiblyLive } from "@/lib/use-live-trajectory";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
 import { formatPercent, formatDate, needsYear } from "@/lib/utils";
 
@@ -75,8 +76,89 @@ function groupByEnvironmentThenModel(traces: Trajectory[]): GroupedTrajectories 
   return sorted;
 }
 
-export function TrajectoryList({ trajectories }: TrajectoryListProps) {
+/** Poll every 30 seconds while any trajectory is live */
+const LIST_POLL_MS = 30_000;
+
+/**
+ * Check sandbox status for a list of trajectory IDs.
+ * Returns the set of IDs that are confirmed running.
+ */
+async function checkLiveTrajectories(trajectoryIds: string[]): Promise<Set<string>> {
+  const liveIds = new Set<string>();
+  await Promise.allSettled(
+    trajectoryIds.map(async (trajectoryId) => {
+      const response = await fetch(
+        `/api/trajectories/${encodeURIComponent(trajectoryId)}/sandbox-status`,
+      );
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      if (data.running === true) {
+        liveIds.add(trajectoryId);
+      }
+    }),
+  );
+  return liveIds;
+}
+
+export function TrajectoryList({ trajectories: initialTrajectories }: TrajectoryListProps) {
+  const [trajectories, setTrajectories] = useState(initialTrajectories);
   const [activeTab, setActiveTab] = useState<Tab>("active");
+  const [liveIds, setLiveIds] = useState<Set<string>>(new Set());
+  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+
+  /** Trajectories without sessionEndReason that might be live */
+  const candidateIds = useMemo(
+    () => trajectories.filter((trace) => isPossiblyLive(trace)).map((trace) => trace.id),
+    [trajectories],
+  );
+
+  const hasLive = liveIds.size > 0;
+
+  /** Check sandbox status for candidates */
+  const checkLiveness = useCallback(async () => {
+    if (candidateIds.length === 0) {
+      setLiveIds(new Set());
+      return;
+    }
+    const confirmed = await checkLiveTrajectories(candidateIds);
+    setLiveIds(confirmed);
+  }, [candidateIds]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/trajectories?bust=${Date.now()}`);
+      if (!response.ok) {
+        return;
+      }
+      const data: Trajectory[] = await response.json();
+      setTrajectories(data);
+    } catch {
+      /* network errors are transient */
+    }
+  }, []);
+
+  /** Immediate fresh fetch on mount, then check liveness */
+  useEffect(() => {
+    refresh().then(() => checkLiveness());
+  }, [refresh, checkLiveness]);
+
+  /** Poll every 30s while any trajectory is live */
+  useEffect(() => {
+    if (!hasLive) {
+      return;
+    }
+    intervalRef.current = setInterval(async () => {
+      await refresh();
+      await checkLiveness();
+    }, LIST_POLL_MS);
+    return () => {
+      if (intervalRef.current !== undefined) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, [hasLive, refresh, checkLiveness]);
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];
@@ -84,14 +166,15 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
     for (const trace of trajectories) {
       const hasScore = trace.finalPassed > 0;
       const hasSubstantialWork = trace.commits.length >= 3;
-      if (hasScore || hasSubstantialWork) {
+      const live = liveIds.has(trace.id);
+      if (hasScore || hasSubstantialWork || live) {
         active.push(trace);
       } else {
         failed.push(trace);
       }
     }
     return { activeTraces: active, failedTraces: failed };
-  }, [trajectories]);
+  }, [trajectories, liveIds]);
 
   const currentTraces = activeTab === "active" ? activeTraces : failedTraces;
   const grouped = useMemo(() => groupByEnvironmentThenModel(currentTraces), [currentTraces]);
@@ -170,11 +253,13 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
                   {traces.map((trace) => {
                     const lastCommit = trace.commits[trace.commits.length - 1];
                     const finalPassed = lastCommit?.totalPassed ?? 0;
-                    const totalTests = trace.suites
-                      ? computeTotalTests(trace.suites)
-                      : TOTAL_TESTS;
+                    const totalTests = Math.max(
+                      trace.suites ? computeTotalTests(trace.suites) : TOTAL_TESTS,
+                      finalPassed,
+                    );
                     const pct = totalTests > 0 ? (finalPassed / totalTests) * 100 : 0;
                     const evalCount = lastCommit?.evalId ? Number(lastCommit.evalId) : 0;
+                    const live = liveIds.has(trace.id);
 
                     return (
                       <Link
@@ -182,9 +267,17 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
                         href={`/trajectory/${trace.id}`}
                         className="flex items-center border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
                       >
-                        {/* ID */}
-                        <span className={`${COL.id} ${CELL_BORDER} truncate pl-0 text-[13px] font-medium text-envoi-text`}>
-                          {trace.id}
+                        {/* ID + live badge */}
+                        <span className={`${COL.id} ${CELL_BORDER} flex items-center gap-[6px] pl-0`}>
+                          {live && (
+                            <span className="relative flex h-[7px] w-[7px] shrink-0">
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
+                              <span className="relative inline-flex h-[7px] w-[7px] rounded-full bg-emerald-500" />
+                            </span>
+                          )}
+                          <span className="truncate text-[13px] font-medium text-envoi-text">
+                            {trace.id}
+                          </span>
                         </span>
 
                         {/* Target */}

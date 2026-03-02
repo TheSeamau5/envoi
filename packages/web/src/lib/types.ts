@@ -134,6 +134,10 @@ export type Trajectory = {
   sessionId?: string;
   /** Why the session ended (e.g. "solved", "timeout", "agent_error") */
   sessionEndReason?: string;
+  /** Provider-specific sandbox identifier for liveness checks */
+  sandboxId?: string;
+  /** Sandbox provider name (e.g. "modal", "e2b") */
+  sandboxProvider?: string;
 };
 
 /** A group of trajectories sharing some dimension */

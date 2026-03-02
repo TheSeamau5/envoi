@@ -58,6 +58,8 @@ export type ParquetRow = {
   suites?: string;
   files?: string;
   bundle_uri?: string;
+  sandbox_id?: string;
+  sandbox_provider?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1051,8 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     agentHarness: agent || undefined,
     sessionId: first.session_id ?? undefined,
     sessionEndReason: first.session_end_reason ?? undefined,
+    sandboxId: first.sandbox_id ?? undefined,
+    sandboxProvider: first.sandbox_provider ?? undefined,
   };
 }
 

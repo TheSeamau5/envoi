@@ -1,9 +1,9 @@
 /**
- * Simple time-based in-memory cache for API responses.
+ * Stale-while-revalidate in-memory cache for API responses.
  *
- * Prevents redundant DuckDB queries when multiple users load the dashboard
- * within the same TTL window. The cache is process-scoped and survives
- * across requests but is cleared on server restart.
+ * Always returns immediately — if the entry is stale the caller still gets the
+ * old data while a background revalidation refreshes the cache for the next
+ * request.  This keeps page loads fast even when the underlying query is slow.
  */
 
 type CacheEntry<T> = {
@@ -12,11 +12,13 @@ type CacheEntry<T> = {
 };
 
 const store = new Map<string, CacheEntry<unknown>>();
+const revalidating = new Set<string>();
 const DEFAULT_TTL_MS = 5 * 60_000; // 5 minutes
 
 /**
- * Return a cached value if fresh, otherwise compute and cache the result.
- * The key should encode all query parameters that affect the result.
+ * Return cached data immediately.  If expired, kick off a background
+ * revalidation so the next caller gets fresh data (stale-while-revalidate).
+ * On a complete cache miss the first call awaits the fetch.
  */
 export async function cached<T>(
   key: string,
@@ -26,7 +28,14 @@ export async function cached<T>(
   const now = Date.now();
   const existing = store.get(key);
 
-  if (existing && now - existing.timestamp < ttlMs) {
+  if (existing) {
+    if (now - existing.timestamp >= ttlMs && !revalidating.has(key)) {
+      revalidating.add(key);
+      fn()
+        .then((data) => store.set(key, { data, timestamp: Date.now() }))
+        .catch(() => {})
+        .finally(() => revalidating.delete(key));
+    }
     return existing.data as T;
   }
 

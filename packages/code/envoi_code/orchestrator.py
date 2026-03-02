@@ -3436,6 +3436,8 @@ async def execute_trajectory_main(
         agent_trace.agent_model = resolved_model
         agent_trace.run_metadata = run_metadata
         agent_trace.session_end = None
+        agent_trace.sandbox_id = sandbox.sandbox_id
+        agent_trace.sandbox_provider = sandbox.name
         initial_part_count = get_trace_last_part(agent_trace)
         initial_turn_count = get_trace_last_turn(agent_trace)
         trace_latest_commit = get_trace_latest_commit(agent_trace)
@@ -3455,6 +3457,8 @@ async def execute_trajectory_main(
             agent_model=resolved_model,
             started_at=datetime.now(UTC).isoformat(),
             run_metadata=run_metadata,
+            sandbox_id=sandbox.sandbox_id,
+            sandbox_provider=sandbox.name,
         )
 
     save_trace_parquet(

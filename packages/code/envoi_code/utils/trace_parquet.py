@@ -70,6 +70,8 @@ TRACE_SCHEMA = pa.schema([
     ("suites", pa.string()),
     ("artifacts", pa.string()),
     ("bundle_uri", pa.string()),
+    ("sandbox_id", pa.string()),
+    ("sandbox_provider", pa.string()),
 ])
 
 SCALAR_PART_KEYS = (
@@ -219,6 +221,8 @@ def agent_trace_to_rows(
             "suites": suites_json,
             "artifacts": artifacts_json,
             "bundle_uri": bundle_uri,
+            "sandbox_id": trace.sandbox_id,
+            "sandbox_provider": trace.sandbox_provider,
         })
     return rows
 
@@ -457,6 +461,8 @@ def rows_to_trace_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "agent": first.get("agent"),
         "agent_model": first.get("agent_model"),
         "started_at": first.get("started_at"),
+        "sandbox_id": first.get("sandbox_id"),
+        "sandbox_provider": first.get("sandbox_provider"),
         "parts": parts,
         "turns": turns,
         "evaluations": evaluations,

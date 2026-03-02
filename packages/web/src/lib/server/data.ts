@@ -126,6 +126,8 @@ function toParquetRow(row: Record<string, unknown>): ParquetRow {
     suites: row.suites != undefined ? String(row.suites) : undefined,
     files: row.files != undefined ? String(row.files) : undefined,
     bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
+    sandbox_id: row.sandbox_id != undefined ? String(row.sandbox_id) : undefined,
+    sandbox_provider: row.sandbox_provider != undefined ? String(row.sandbox_provider) : undefined,
   };
 }
 
@@ -144,21 +146,25 @@ export async function getAllTrajectories(opts?: {
   model?: string;
   limit?: number;
   offset?: number;
+  fresh?: boolean;
 }): Promise<Trajectory[]> {
   if (!isS3Configured()) {
     return getMockTrajectories();
   }
 
-  const cacheKey = `all-trajectories:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
-
-  return cached(cacheKey, async () => {
-    // Fast path: use materialized summary tables
+  const fetch = async () => {
     if (await hasSummaryTables()) {
       return getAllTrajectoriesFromSummary(opts);
     }
-    // Slow path: GROUP BY scan of raw parquet files
     return getAllTrajectoriesFromGlob(opts);
-  });
+  };
+
+  if (opts?.fresh) {
+    return fetch();
+  }
+
+  const cacheKey = `all-trajectories:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
+  return cached(cacheKey, fetch);
 }
 
 /**

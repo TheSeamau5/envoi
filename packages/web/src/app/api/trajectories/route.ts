@@ -20,11 +20,13 @@ export async function GET(request: NextRequest) {
       ? Number(searchParams.get("offset"))
       : undefined;
 
+    const fresh = searchParams.has("bust");
     const trajectories = await getAllTrajectories({
       environment,
       model,
       limit,
       offset,
+      fresh,
     });
 
     return NextResponse.json(trajectories);

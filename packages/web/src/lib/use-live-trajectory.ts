@@ -1,7 +1,12 @@
 /**
- * Hook that polls for fresh trajectory data when the trajectory is live
- * (still running — no sessionEndReason yet and recent activity). Stops
- * polling once the trajectory completes or goes stale.
+ * Hook that polls for fresh trajectory data when the trajectory is live.
+ *
+ * Liveness is determined by querying the sandbox provider (Modal / E2B) via
+ * the /api/trajectories/:id/sandbox-status endpoint.  This is the source of
+ * truth — no timestamp heuristics needed.
+ *
+ * If sessionEndReason is already present the trajectory is definitely done
+ * and we skip the sandbox check entirely.
  */
 
 "use client";
@@ -13,35 +18,36 @@ import type { Trajectory } from "@/lib/types";
 const POLL_INTERVAL_MS = 30_000;
 
 /**
- * If the last commit is older than this, the trajectory is considered dead
- * even without a sessionEndReason (handles abrupt kills where the
- * orchestrator didn't get to write final state).
+ * Quick client-side check: if sessionEndReason is present, it's done.
+ * If absent, we need to ask the sandbox provider.
+ * This is used for optimistic UI — the real answer comes from the API.
  */
-const STALE_THRESHOLD_MS = 3 * 60_000;
+export function isPossiblyLive(trajectory: Trajectory): boolean {
+  return !trajectory.sessionEndReason;
+}
 
-/** Whether a trajectory is still in progress */
-export function isLiveTrajectory(trajectory: Trajectory): boolean {
-  if (trajectory.sessionEndReason) {
+/**
+ * Check sandbox status via the server endpoint (queries the actual provider).
+ * Returns true if the sandbox is still running, false otherwise.
+ */
+async function checkSandboxStatus(trajectoryId: string): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `/api/trajectories/${encodeURIComponent(trajectoryId)}/sandbox-status`,
+    );
+    if (!response.ok) {
+      return false;
+    }
+    const data = await response.json();
+    return data.running === true;
+  } catch {
     return false;
   }
-
-  const lastCommit = trajectory.commits[trajectory.commits.length - 1];
-  if (!lastCommit) {
-    return false;
-  }
-
-  const lastActivityMs = new Date(lastCommit.timestamp).getTime();
-  if (isNaN(lastActivityMs)) {
-    return false;
-  }
-
-  return Date.now() - lastActivityMs < STALE_THRESHOLD_MS;
 }
 
 /**
  * Returns the latest trajectory data, polling every 30 seconds while live.
- * Liveness is determined by both sessionEndReason and data freshness —
- * a trajectory that stops producing commits for 3 minutes is considered dead.
+ * Liveness is determined by querying the sandbox provider.
  */
 export function useLiveTrajectory(initial: Trajectory): {
   trajectory: Trajectory;
@@ -50,11 +56,12 @@ export function useLiveTrajectory(initial: Trajectory): {
 } {
   const [trajectory, setTrajectory] = useState(initial);
   const [lastRefreshed, setLastRefreshed] = useState(() => new Date());
-  const [isLive, setIsLive] = useState(() => isLiveTrajectory(initial));
+  const [live, setLive] = useState(() => isPossiblyLive(initial));
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     try {
+      /** Fetch latest trajectory data */
       const response = await fetch(
         `/api/trajectories/${encodeURIComponent(initial.id)}?bust=${Date.now()}`,
       );
@@ -64,16 +71,29 @@ export function useLiveTrajectory(initial: Trajectory): {
       const data: Trajectory = await response.json();
       setTrajectory(data);
       setLastRefreshed(new Date());
-      setIsLive(isLiveTrajectory(data));
+
+      /** If sessionEndReason appeared, we're done */
+      if (data.sessionEndReason) {
+        setLive(false);
+        return;
+      }
+
+      /** Ask the sandbox provider if it's still running */
+      const running = await checkSandboxStatus(initial.id);
+      setLive(running);
     } catch {
       /** Network errors are transient — silently retry on next interval */
     }
   }, [initial.id]);
 
-  /** Re-evaluate liveness on every poll tick (even without new data,
-   *  the wall clock advances so a stale trajectory will flip to not-live) */
+  /** Immediate fresh fetch on mount — server data may be stale from cache */
   useEffect(() => {
-    if (!isLive) {
+    refresh();
+  }, [refresh]);
+
+  /** Poll every 30s while live */
+  useEffect(() => {
+    if (!live) {
       return;
     }
 
@@ -83,7 +103,7 @@ export function useLiveTrajectory(initial: Trajectory): {
         clearInterval(intervalRef.current);
       }
     };
-  }, [isLive, refresh]);
+  }, [live, refresh]);
 
-  return { trajectory, isLive, lastRefreshed };
+  return { trajectory, isLive: live, lastRefreshed };
 }

@@ -89,6 +89,11 @@ class Sandbox(Protocol):
         """Provider name, e.g. 'modal' or 'e2b'."""
         ...
 
+    @property
+    def sandbox_id(self) -> str:
+        """Provider-specific sandbox identifier for reconnection and status checks."""
+        ...
+
     async def run(
         self,
         cmd: str,

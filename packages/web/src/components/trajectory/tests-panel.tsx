@@ -19,7 +19,7 @@ type TestsPanelProps = {
 
 export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
   const effectiveSuites = suites ?? DEFAULT_SUITES;
-  const effectiveTotal = totalTests ?? DEFAULT_TOTAL_TESTS;
+  const effectiveTotal = Math.max(totalTests ?? DEFAULT_TOTAL_TESTS, commit.totalPassed);
   const overallPercent = formatPercent(commit.totalPassed, effectiveTotal);
 
   return (

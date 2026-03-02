@@ -38,6 +38,10 @@ class ModalSandbox:
     def name(self) -> str:
         return "modal"
 
+    @property
+    def sandbox_id(self) -> str:
+        return self._inner.object_id
+
     @staticmethod
     def capabilities() -> SandboxCapabilities:
         return SandboxCapabilities(

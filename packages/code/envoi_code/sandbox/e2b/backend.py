@@ -53,6 +53,10 @@ class E2BSandbox:
     def name(self) -> str:
         return "e2b"
 
+    @property
+    def sandbox_id(self) -> str:
+        return self._inner.sandbox_id
+
     @staticmethod
     def capabilities() -> SandboxCapabilities:
         provider_max = 86400
