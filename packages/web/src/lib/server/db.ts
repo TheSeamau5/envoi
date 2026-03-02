@@ -11,6 +11,7 @@
 
 import { DuckDBInstance } from "@duckdb/node-api";
 import { execSync } from "child_process";
+import { statSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { stat, mkdir, readdir } from "node:fs/promises";
 import path from "path";
 
@@ -138,14 +139,43 @@ async function hasLocalCache(): Promise<boolean> {
   }
 }
 
-// Run sync eagerly when this module is first imported
+/**
+ * Sync cooldown: only re-sync from S3 if >5 minutes since last sync.
+ * Uses a timestamp file so the cooldown survives across Next.js module reloads.
+ */
+const SYNC_COOLDOWN_MS = 5 * 60_000; // 5 minutes
+const SYNC_STAMP_PATH = path.resolve(process.cwd(), ".cache", "last-s3-sync");
 let synced = false;
+
+function isSyncFresh(): boolean {
+  try {
+    const st = statSync(SYNC_STAMP_PATH);
+    return Date.now() - st.mtimeMs < SYNC_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+
+function touchSyncStamp(): void {
+  try {
+    mkdirSync(path.dirname(SYNC_STAMP_PATH), { recursive: true });
+    writeFileSync(SYNC_STAMP_PATH, String(Date.now()));
+  } catch {
+    // non-critical
+  }
+}
+
 function ensureSynced(): void {
   if (synced) {
     return;
   }
   synced = true;
+  // Skip S3 sync if we synced recently (survives module reloads)
+  if (isSyncFresh()) {
+    return;
+  }
   syncFromS3();
+  touchSyncStamp();
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +481,12 @@ export async function hasSummaryTables(): Promise<boolean> {
  */
 export async function refreshData(): Promise<void> {
   synced = false;
+  // Delete sync stamp so ensureSynced actually runs
+  try {
+    unlinkSync(SYNC_STAMP_PATH);
+  } catch {
+    // file may not exist
+  }
   ensureSynced();
   const db = await getDb();
   await loadSummaryTables(db);

@@ -295,10 +295,16 @@ function rowToStep(row: ParquetRow, index: number): Step {
     detail = deduplicateLines(detail);
     summary = deduplicateSummary(summary);
 
-    // Handle structured reasoning JSON (e.g. {"type":"reasoning","summary":[],"content":[]})
-    const parsedContent = parseJson(detail);
-    if (isRecord(parsedContent) && parsedContent.type === "reasoning") {
-      const rawContent = parsedContent.content;
+    // Handle structured reasoning JSON in both detail and summary fields
+    // The ingestion pipeline may store {"type":"reasoning","summary":[],"content":[]}
+    // in either field.
+    for (const source of [detail, summary]) {
+      const parsed = parseJson(source);
+      if (!isRecord(parsed) || parsed.type !== "reasoning") {
+        continue;
+      }
+
+      const rawContent = parsed.content;
       if (Array.isArray(rawContent)) {
         detail = rawContent
           .filter((item): item is string => typeof item === "string")
@@ -309,17 +315,18 @@ function rowToStep(row: ParquetRow, index: number): Step {
         detail = "";
       }
 
-      const rawSummary = parsedContent.summary;
+      const rawSummary = parsed.summary;
       if (Array.isArray(rawSummary)) {
         const joined = rawSummary
           .filter((item): item is string => typeof item === "string")
           .join("\n");
-        if (joined.length > 0) {
-          summary = joined;
-        }
-      } else if (typeof rawSummary === "string" && rawSummary.length > 0) {
+        summary = joined;
+      } else if (typeof rawSummary === "string") {
         summary = rawSummary;
+      } else {
+        summary = "";
       }
+      break;
     }
 
     // Treat literal "[]" summary as empty

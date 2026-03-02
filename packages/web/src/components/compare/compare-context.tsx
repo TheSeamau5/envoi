@@ -96,15 +96,9 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
   /**
    * colorMap: traceId → colorIndex.
    * Keys are the selected trace IDs; values are their assigned color indices.
-   * Initialized with the first 2 traces; hydrated from localStorage on mount.
+   * Starts empty; hydrated from localStorage on mount.
    */
-  const [colorMap, setColorMap] = useState<Record<string, number>>(() => {
-    const initial: Record<string, number> = {};
-    allTraces.slice(0, 2).forEach((trace, traceIndex) => {
-      initial[trace.id] = traceIndex;
-    });
-    return initial;
-  });
+  const [colorMap, setColorMap] = useState<Record<string, number>>({});
 
   /** Hydrate from localStorage (once, on mount) */
   useEffect(() => {

@@ -60,6 +60,25 @@ const STEP_CONFIG: Record<
   message: { icon: MessageSquare, color: T.stepMessage, label: "MESSAGE" },
 };
 
+/** Format milliseconds into a human-friendly duration */
+function formatDuration(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
 /** Section label used in expanded content */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -303,14 +322,16 @@ function StepRow({
 
           {/* Summary */}
           <div className="mt-[2px] text-[13px] leading-[18px] text-envoi-text">
-            {step.summary}
+            {step.summary || (step.type === "reasoning" ? (
+              <span className="italic text-envoi-text-muted">Reasoning not shown</span>
+            ) : step.summary)}
           </div>
 
           {/* Metadata line */}
           {(step.durationMs !== undefined || step.tokensUsed !== undefined) && (
             <div className="mt-[2px] flex items-center gap-[8px] text-[13px] text-envoi-text-dim">
               {step.durationMs !== undefined && (
-                <span>{step.durationMs}ms</span>
+                <span>{formatDuration(step.durationMs)}</span>
               )}
               {step.tokensUsed !== undefined && (
                 <span>{step.tokensUsed.toLocaleString()} tokens</span>

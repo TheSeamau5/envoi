@@ -12,7 +12,7 @@ type CacheEntry<T> = {
 };
 
 const store = new Map<string, CacheEntry<unknown>>();
-const DEFAULT_TTL_MS = 30_000; // 30 seconds
+const DEFAULT_TTL_MS = 5 * 60_000; // 5 minutes
 
 /**
  * Return a cached value if fresh, otherwise compute and cache the result.
