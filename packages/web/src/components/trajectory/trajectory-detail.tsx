@@ -274,12 +274,12 @@ export function TrajectoryDetail({
           />
 
           {/* Suite filter pills */}
-          <div className="flex items-center gap-[4px] border-b border-envoi-border px-[14px] py-[6px]">
+          <div className="flex flex-nowrap items-center gap-[4px] overflow-x-auto border-b border-envoi-border px-[14px] py-[6px]">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   onClick={() => setActiveSuite("all")}
-                  className={`rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
+                  className={`shrink-0 rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
                     activeSuite === "all"
                       ? "bg-envoi-text text-white"
                       : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -295,7 +295,7 @@ export function TrajectoryDetail({
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => setActiveSuite(suite.name)}
-                    className={`rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
+                    className={`shrink-0 rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
                       activeSuite === suite.name
                         ? "bg-envoi-text text-white"
                         : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"

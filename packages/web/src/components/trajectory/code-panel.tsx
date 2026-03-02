@@ -34,6 +34,10 @@ export function CodePanel({ commit }: CodePanelProps) {
     ? commit.codeSnapshot[selectedFile]
     : undefined;
 
+  const changedFile = selectedFile
+    ? commit.changedFiles.find((file) => file.path === selectedFile)
+    : undefined;
+
   return (
     <div className="flex flex-1 overflow-hidden">
       <FileTree
@@ -41,7 +45,12 @@ export function CodePanel({ commit }: CodePanelProps) {
         selectedFile={selectedFile}
         onSelectFile={setSelectedFile}
       />
-      <CodeView snapshot={fileSnapshot} filePath={selectedFile} />
+      <CodeView
+        snapshot={fileSnapshot}
+        filePath={selectedFile}
+        additions={changedFile?.additions}
+        deletions={changedFile?.deletions}
+      />
     </div>
   );
 }

@@ -294,6 +294,39 @@ function rowToStep(row: ParquetRow, index: number): Step {
   if (row.part_type === "reasoning") {
     detail = deduplicateLines(detail);
     summary = deduplicateSummary(summary);
+
+    // Handle structured reasoning JSON (e.g. {"type":"reasoning","summary":[],"content":[]})
+    const parsedContent = parseJson(detail);
+    if (isRecord(parsedContent) && parsedContent.type === "reasoning") {
+      const rawContent = parsedContent.content;
+      if (Array.isArray(rawContent)) {
+        detail = rawContent
+          .filter((item): item is string => typeof item === "string")
+          .join("\n");
+      } else if (typeof rawContent === "string") {
+        detail = rawContent;
+      } else {
+        detail = "";
+      }
+
+      const rawSummary = parsedContent.summary;
+      if (Array.isArray(rawSummary)) {
+        const joined = rawSummary
+          .filter((item): item is string => typeof item === "string")
+          .join("\n");
+        if (joined.length > 0) {
+          summary = joined;
+        }
+      } else if (typeof rawSummary === "string" && rawSummary.length > 0) {
+        summary = rawSummary;
+      }
+    }
+
+    // Treat literal "[]" summary as empty
+    if (summary === "[]") {
+      summary = "";
+    }
+
     reasoningContent = detail || undefined;
   }
 
@@ -313,6 +346,18 @@ function rowToStep(row: ParquetRow, index: number): Step {
     errorMessage: row.tool_error ?? undefined,
     reasoningContent,
   };
+}
+
+/** Check whether a step has no meaningful content to display */
+function isEmptyStep(step: Step): boolean {
+  if (step.type !== "reasoning") {
+    return false;
+  }
+  return (
+    step.summary.length === 0 &&
+    step.detail.length === 0 &&
+    step.reasoningContent === undefined
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +808,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
 
   if (completedEvals.length === 0) {
     // No evaluations — create a single "commit" containing all steps
-    const steps = sortedRows.map((row, rowIndex) => rowToStep(row, rowIndex));
+    const steps = sortedRows
+      .map((row, rowIndex) => rowToStep(row, rowIndex))
+      .filter((step) => !isEmptyStep(step))
+      .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
     const lastSortedRow = sortedRows[sortedRows.length - 1];
     const lastCheckpoint = parseJson(lastSortedRow?.repo_checkpoint);
     commits.push({
@@ -811,7 +859,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         }
       }
 
-      const steps = commitRows.map((row, rowIndex) => rowToStep(row, rowIndex));
+      const steps = commitRows
+        .map((row, rowIndex) => rowToStep(row, rowIndex))
+        .filter((step) => !isEmptyStep(step))
+        .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
       const suiteState = buildSuiteState(evalRec.suiteResults);
       const delta = evalRec.passed - prevTotalPassed;
 
@@ -867,7 +918,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     // Remaining rows after the last evaluation
     if (rowCursor < sortedRows.length) {
       const remainingRows = sortedRows.slice(rowCursor);
-      const steps = remainingRows.map((row, rowIndex) => rowToStep(row, rowIndex));
+      const steps = remainingRows
+        .map((row, rowIndex) => rowToStep(row, rowIndex))
+        .filter((step) => !isEmptyStep(step))
+        .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
       const lastCheckpoint = parseJson(
         remainingRows[remainingRows.length - 1]?.repo_checkpoint,
       );

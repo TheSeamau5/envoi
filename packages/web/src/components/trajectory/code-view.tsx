@@ -20,6 +20,8 @@ import type { FileSnapshot } from "@/lib/types";
 type CodeViewProps = {
   snapshot?: FileSnapshot;
   filePath?: string;
+  additions?: number;
+  deletions?: number;
 };
 
 /** Syntax color tokens */
@@ -107,7 +109,7 @@ function highlightLine(line: string): React.ReactNode[] {
   return tokens;
 }
 
-export function CodeView({ snapshot, filePath }: CodeViewProps) {
+export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [flashing, setFlashing] = useState(false);
 
@@ -148,8 +150,38 @@ export function CodeView({ snapshot, filePath }: CodeViewProps) {
 
   const addedSet = new Set(snapshot.added);
 
+  const hasStats = (additions !== undefined && additions > 0) ||
+    (deletions !== undefined && deletions > 0);
+
   return (
-    <div ref={scrollRef} className="flex-1 overflow-auto">
+    <div ref={scrollRef} className="flex flex-1 flex-col overflow-auto">
+      {/* File diff stats */}
+      {hasStats && (
+        <div
+          className="sticky top-0 z-10 flex items-center gap-[8px] border-b px-[12px] py-[4px]"
+          style={{
+            borderColor: "#f0f0f0",
+            background: "#fafafa",
+          }}
+        >
+          {additions !== undefined && additions > 0 && (
+            <span
+              className="text-[10px] font-semibold"
+              style={{ color: COLORS.addedBorder }}
+            >
+              +{additions}
+            </span>
+          )}
+          {deletions !== undefined && deletions > 0 && (
+            <span
+              className="text-[10px] font-semibold"
+              style={{ color: "#ef4444" }}
+            >
+              &minus;{deletions}
+            </span>
+          )}
+        </div>
+      )}
       <div style={{ fontFamily: "var(--font-mono), 'JetBrains Mono', monospace" }}>
         {snapshot.lines.map((line, lineIndex) => {
           const isAdded = addedSet.has(lineIndex);

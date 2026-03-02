@@ -142,10 +142,6 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         )}
       </div>
 
-      {/* Changed files count */}
-      <span className="min-w-[28px] text-right text-[9px] text-envoi-text-dim">
-        {commit.changedFiles.length}f
-      </span>
     </div>
   );
 }

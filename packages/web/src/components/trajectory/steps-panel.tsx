@@ -188,6 +188,18 @@ function TestExpanded({ step }: { step: Step }) {
   );
 }
 
+/** Expanded content for text / spawn / message steps */
+function TextExpanded({ step }: { step: Step }) {
+  return (
+    <div className="mt-[8px] flex flex-col gap-[8px]">
+      <div className="flex flex-col gap-[4px]">
+        <SectionLabel>Full Text</SectionLabel>
+        <MonoBox maxHeight={400}>{step.detail}</MonoBox>
+      </div>
+    </div>
+  );
+}
+
 /** Pick the right expanded content for a step type */
 function ExpandedContent({ step }: { step: Step }) {
   switch (step.type) {
@@ -201,6 +213,10 @@ function ExpandedContent({ step }: { step: Step }) {
       return <FileExpanded step={step} />;
     case "test_run":
       return <TestExpanded step={step} />;
+    case "text":
+    case "spawn":
+    case "message":
+      return <TextExpanded step={step} />;
     default:
       return undefined;
   }
@@ -321,7 +337,12 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
   const hasProgress = feedback.passedDelta > 0;
   const isNeutral = !hasRegression && !hasProgress;
 
-  const bgColor = hasRegression ? T.redBg : hasProgress ? T.greenBg : T.surface;
+  /** Opaque backgrounds for the sticky banner — prevents text bleed-through from scrolling content */
+  const bgColor = hasRegression
+    ? "#fef2f2"
+    : hasProgress
+      ? "#f0fdf9"
+      : T.surface;
   const textColor = hasRegression
     ? T.redDark
     : hasProgress
@@ -394,15 +415,17 @@ export function StepsPanel({ commit }: StepsPanelProps) {
 
       <FeedbackBanner commit={commit} />
 
-      {/* Step list */}
+      {/* Step list — filter out steps with no displayable content */}
       <div key={commit.index}>
-        {commit.steps.map((step, stepIndex) => (
-          <StepRow
-            key={`${commit.index}-${step.index}`}
-            step={step}
-            stepIndex={stepIndex}
-          />
-        ))}
+        {commit.steps
+          .filter((step) => step.summary.length > 0 || step.detail.length > 0)
+          .map((step, stepIndex) => (
+            <StepRow
+              key={`${commit.index}-${step.index}`}
+              step={step}
+              stepIndex={stepIndex}
+            />
+          ))}
       </div>
     </div>
   );
