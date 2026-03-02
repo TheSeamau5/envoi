@@ -5,10 +5,6 @@
  * faded after. Red dots for regressions, gold dots for milestones.
  * X-axis shows elapsed time labels (minutes or hours).
  *
- * Optional reasoning density overlay (toggled via metric selector): a
- * translucent area chart on a secondary Y-axis showing reasoning tokens
- * per commit. Hidden by default to keep the primary view clean.
- *
  * The SVG uses a viewBox and scales uniformly via the default
  * preserveAspectRatio — dots stay circular, text stays proportional.
  *
@@ -17,7 +13,6 @@
 
 "use client";
 
-import { useState } from "react";
 import type { Commit, Suite } from "@/lib/types";
 import { T } from "@/lib/tokens";
 import { TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
@@ -42,10 +37,6 @@ const VIEW_HEIGHT = 260;
 const MARGIN = { top: 14, right: 44, bottom: 28, left: 48 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
-
-/** Color for the reasoning density overlay */
-const REASONING_COLOR = "rgba(37, 99, 235, 0.15)";
-const REASONING_STROKE = "rgba(37, 99, 235, 0.35)";
 
 /** Get Y-axis max based on active suite filter */
 function getYMax(activeSuite: string, suites: Suite[], totalTests: number): number {
@@ -87,14 +78,6 @@ function timeToX(minutes: number, totalMinutes: number): number {
   }
   const ratio = Math.min(1, minutes / totalMinutes);
   return MARGIN.left + ratio * PLOT_WIDTH;
-}
-
-/** Map a reasoning token value to Y pixel position using the secondary axis */
-function toReasoningY(value: number, maxReasoningTokens: number): number {
-  if (maxReasoningTokens === 0) {
-    return MARGIN.top + PLOT_HEIGHT;
-  }
-  return MARGIN.top + PLOT_HEIGHT - (value / maxReasoningTokens) * PLOT_HEIGHT;
 }
 
 /** Build SVG line path from commits */
@@ -141,60 +124,6 @@ function buildAreaPath(
   const firstX = toX(0, commits.length);
 
   return `${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} L${firstX.toFixed(1)},${bottomY.toFixed(1)} Z`;
-}
-
-/** Compute reasoning tokens for a commit by summing tokensUsed from reasoning steps */
-function getReasoningTokens(commit: Commit): number {
-  let total = 0;
-  for (const step of commit.steps) {
-    if (step.type === "reasoning" && step.tokensUsed) {
-      total += step.tokensUsed;
-    }
-  }
-  return total;
-}
-
-/** Build SVG area path for reasoning density overlay */
-function buildReasoningAreaPath(
-  commits: Commit[],
-  maxReasoningTokens: number,
-): string {
-  if (commits.length === 0 || maxReasoningTokens === 0) {
-    return "";
-  }
-
-  const lineSegments = commits
-    .map((commit, pointIndex) => {
-      const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = toX(pointIndex, commits.length);
-      const yPos = toReasoningY(getReasoningTokens(commit), maxReasoningTokens);
-      return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
-    })
-    .join(" ");
-
-  const bottomY = MARGIN.top + PLOT_HEIGHT;
-  const lastX = toX(commits.length - 1, commits.length);
-  const firstX = toX(0, commits.length);
-
-  return `${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} L${firstX.toFixed(1)},${bottomY.toFixed(1)} Z`;
-}
-
-/** Build SVG line path for reasoning density */
-function buildReasoningLinePath(
-  commits: Commit[],
-  maxReasoningTokens: number,
-): string {
-  if (maxReasoningTokens === 0) {
-    return "";
-  }
-  return commits
-    .map((commit, pointIndex) => {
-      const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = toX(pointIndex, commits.length);
-      const yPos = toReasoningY(getReasoningTokens(commit), maxReasoningTokens);
-      return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
-    })
-    .join(" ");
 }
 
 /** Generate Y-axis tick values */
@@ -247,21 +176,7 @@ function getXTimeTicks(totalMinutes: number): number[] {
   return ticks;
 }
 
-/** Format token count as compact string (e.g., "12K", "1.5M") */
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    return `${(tokens / 1_000_000).toFixed(1)}M`;
-  }
-  if (tokens >= 1_000) {
-    return `${(tokens / 1_000).toFixed(0)}K`;
-  }
-  return String(tokens);
-}
-
-/** Metric options for the chart overlay */
-type MetricMode = "none" | "reasoning";
-
-/** Interactive SVG progress curve with optional reasoning density overlay */
+/** Interactive SVG progress curve */
 export function ProgressCurve({
   commits,
   selectedIndex,
@@ -270,8 +185,6 @@ export function ProgressCurve({
   suites: suitesProp,
   totalTests: totalTestsProp,
 }: ProgressCurveProps) {
-  const [metricMode, setMetricMode] = useState<MetricMode>("none");
-
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
 
@@ -289,21 +202,6 @@ export function ProgressCurve({
   const lastCommit = commits[commits.length - 1];
   const totalMinutes = lastCommit?.minutesElapsed ?? 0;
   const xTimeTicks = getXTimeTicks(totalMinutes);
-
-  /** Compute max reasoning tokens across all commits for secondary Y-axis scaling */
-  let maxReasoningTokens = 0;
-  let hasReasoningData = false;
-  for (const commit of commits) {
-    const reasoningTokens = getReasoningTokens(commit);
-    if (reasoningTokens > 0) {
-      hasReasoningData = true;
-      if (reasoningTokens > maxReasoningTokens) {
-        maxReasoningTokens = reasoningTokens;
-      }
-    }
-  }
-
-  const showReasoning = metricMode === "reasoning" && hasReasoningData;
 
   return (
     <div className="w-full px-[6px] pt-[6px] pb-[2px]">
@@ -382,22 +280,6 @@ export function ProgressCurve({
             </text>
           );
         })}
-
-        {/* Reasoning density overlay — only shown when metric toggle is active */}
-        {showReasoning && (
-          <>
-            <path
-              d={buildReasoningAreaPath(commits, maxReasoningTokens)}
-              fill={REASONING_COLOR}
-            />
-            <path
-              d={buildReasoningLinePath(commits, maxReasoningTokens)}
-              fill="none"
-              stroke={REASONING_STROKE}
-              strokeWidth={0.8}
-            />
-          </>
-        )}
 
         {/* Filled area up to selection */}
         <path
@@ -482,54 +364,12 @@ export function ProgressCurve({
               onClick={() => onSelect(dotIndex)}
             >
               <title>
-                {`Turn ${commit.turn} (${formatTimeLabel(commit.minutesElapsed)}): ${getYValue(commit, activeSuite)} passed (${commit.delta >= 0 ? "+" : ""}${commit.delta})${showReasoning ? ` | Reasoning: ${formatTokenCount(getReasoningTokens(commit))} tokens` : ""}`}
+                {`Turn ${commit.turn} (${formatTimeLabel(commit.minutesElapsed)}): ${getYValue(commit, activeSuite)} passed (${commit.delta >= 0 ? "+" : ""}${commit.delta})`}
               </title>
             </circle>
           );
         })}
-
-        {/* Legend — only when reasoning overlay is active */}
-        {showReasoning && (
-          <g>
-            <rect
-              x={MARGIN.left + 4}
-              y={MARGIN.top + 2}
-              width={8}
-              height={8}
-              rx={1}
-              fill={REASONING_COLOR}
-              stroke={REASONING_STROKE}
-              strokeWidth={0.5}
-            />
-            <text
-              x={MARGIN.left + 16}
-              y={MARGIN.top + 9}
-              style={{ fontSize: "8px", fill: T.textDim }}
-            >
-              Reasoning density (tokens/commit)
-            </text>
-          </g>
-        )}
       </svg>
-
-      {/* Metric toggle — only shown when reasoning data exists */}
-      {hasReasoningData && (
-        <div className="flex items-center gap-[6px] px-[6px] pt-[4px]">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-            Overlay:
-          </span>
-          <button
-            onClick={() => setMetricMode(metricMode === "none" ? "reasoning" : "none")}
-            className={`rounded-full px-[8px] py-[1px] text-[11px] font-semibold transition-colors ${
-              metricMode === "reasoning"
-                ? "bg-blue-100 text-blue-700"
-                : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light"
-            }`}
-          >
-            Reasoning density
-          </button>
-        </div>
-      )}
     </div>
   );
 }

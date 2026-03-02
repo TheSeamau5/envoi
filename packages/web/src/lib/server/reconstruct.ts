@@ -499,6 +499,51 @@ function buildBrokenTests(
 }
 
 // ---------------------------------------------------------------------------
+// Filter empty commits and recompute deltas
+// ---------------------------------------------------------------------------
+
+/**
+ * Filter out commits with no steps and recompute sequential deltas.
+ * Empty commits represent re-evaluations of unchanged code; any score
+ * differences are eval noise, not agent progress.
+ */
+function filterEmptyCommits(commits: Commit[]): Commit[] {
+  const filtered = commits.filter((commit) => commit.steps.length > 0);
+  if (filtered.length === 0) {
+    return commits;
+  }
+
+  let prevTotalPassed = 0;
+  let prevSuiteState: SuiteState = {};
+
+  for (let commitIdx = 0; commitIdx < filtered.length; commitIdx++) {
+    const commit = filtered[commitIdx];
+    if (!commit) {
+      continue;
+    }
+
+    commit.index = commitIdx;
+    const delta = commit.totalPassed - prevTotalPassed;
+    commit.delta = delta;
+    commit.isRegression = delta < 0;
+    commit.feedback = {
+      ...commit.feedback,
+      passedDelta: delta,
+      newlyBroken: delta < 0 ? Math.abs(delta) : 0,
+      newlyFixed: delta > 0 ? delta : 0,
+      brokenTests: delta < 0
+        ? buildBrokenTests(prevSuiteState, commit.suiteState)
+        : [],
+    };
+
+    prevTotalPassed = commit.totalPassed;
+    prevSuiteState = commit.suiteState;
+  }
+
+  return filtered;
+}
+
+// ---------------------------------------------------------------------------
 // Parse suites from the Parquet data
 // ---------------------------------------------------------------------------
 
@@ -1083,8 +1128,13 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // Build code snapshots from accumulated patch diffs
   populateCodeSnapshots(sortedRows, commits);
 
+  // Filter out empty commits (no steps) and recompute deltas.
+  // Empty commits represent re-evaluations of unchanged code; any score
+  // differences are eval noise, not agent progress.
+  const filteredCommits = filterEmptyCommits(commits);
+
   // Compute duration
-  const lastCommit = commits[commits.length - 1];
+  const lastCommit = filteredCommits[filteredCommits.length - 1];
   const durationMinutes = lastCommit?.minutesElapsed ?? 0;
   const hours = Math.floor(durationMinutes / 60);
   const mins = durationMinutes % 60;
@@ -1110,7 +1160,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     id: first.trajectory_id,
     model,
     environment: deriveEnvironment(first.environment, suites, first.task_params),
-    commits,
+    commits: filteredCommits,
     totalTests,
     startedAt: first.started_at ?? "",
     duration,
@@ -1434,6 +1484,23 @@ export type EvalSummaryRow = {
  * Each evaluation becomes a commit with totalPassed, delta, suiteState, etc.
  * Steps are empty since the compare page only needs curves, not step detail.
  */
+/**
+ * Deduplicate compare eval rows targeting the same git commit.
+ * Keeps the eval with the highest total (most suites completed).
+ */
+function deduplicateCompareEvalsByCommit(evals: EvalSummaryRow[]): EvalSummaryRow[] {
+  const bestByCommit = new Map<string, EvalSummaryRow>();
+  for (const evalRow of evals) {
+    const existing = bestByCommit.get(evalRow.target_commit);
+    if (!existing || evalRow.total > existing.total) {
+      bestByCommit.set(evalRow.target_commit, evalRow);
+    }
+  }
+  return evals.filter(
+    (evalRow) => bestByCommit.get(evalRow.target_commit) === evalRow,
+  );
+}
+
 export function buildCompareTrajectories(
   summaryRows: Record<string, unknown>[],
   evalRows: Record<string, unknown>[],
@@ -1475,8 +1542,9 @@ export function buildCompareTrajectories(
     const agentModel = tableRow.agent_model ?? "";
     const model = agent ? `${agent}/${agentModel}` : agentModel;
 
-    const evals = evalsByTrajectory.get(tableRow.trajectory_id) ?? [];
-    evals.sort((evalA, evalB) => evalA.trigger_part - evalB.trigger_part);
+    const rawEvals = evalsByTrajectory.get(tableRow.trajectory_id) ?? [];
+    rawEvals.sort((evalA, evalB) => evalA.trigger_part - evalB.trigger_part);
+    const evals = deduplicateCompareEvalsByCommit(rawEvals);
 
     // Merge suite_results from all evals to recover full suite definitions
     const evalRecordsForMerge = evals
