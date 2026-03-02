@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 from pathlib import Path
@@ -228,10 +229,14 @@ async def main(
         if non_preemptible
         else modal_run_trajectory
     )
+    call = None
     try:
-        # Stream image build + remote execution logs to the local terminal.
+        # Use spawn + get instead of remote so we hold a handle we can cancel
+        # when the user presses Ctrl+C.  Without this, the remote function
+        # (and its sandbox) keeps running on Modal even after the local
+        # process exits.
         with modal.enable_output():
-            result = await runner.remote.aio(
+            call = await runner.spawn.aio(
                 agent=normalized_agent,
                 model=model,
                 max_parts=max_parts,
@@ -250,7 +255,26 @@ async def main(
                 sandbox_cpu=sandbox_cpu,
                 sandbox_memory_mb=sandbox_memory_mb,
             )
+            result = await call.get.aio()
         print(f"Completed trajectory: {result}")
+    except KeyboardInterrupt:
+        print("[modal] interrupt received; cancelling remote function", flush=True)
+        if call is not None:
+            try:
+                await call.cancel.aio()
+                print("[modal] remote function cancelled", flush=True)
+            except Exception:
+                pass
+        raise
+    except asyncio.CancelledError:
+        print("[modal] cancelled; stopping remote function", flush=True)
+        if call is not None:
+            try:
+                await call.cancel.aio()
+                print("[modal] remote function cancelled", flush=True)
+            except Exception:
+                pass
+        raise
     except Exception as e:
         message = str(e).strip()
         if not message:
