@@ -1,5 +1,8 @@
-Build a REAL C compiler in Rust from scratch.
-This is EXTREMELY IMPORTANT: no cheating, no wrappers, no shortcuts.
+Build a REAL C compiler in Rust from scratch. One that could eventually compile Doom.
+
+You are not building a toy. You are building a compiler that handles real C: structs, pointers, arrays, the preprocessor, all of it. The test suites you are evaluated against include hundreds of programs from the c-testsuite conformance tests, the "Writing a C Compiler" book tests, and a subset of the GCC torture tests. A compiler that can pass all of them is a compiler that can compile real software.
+
+No cheating, no wrappers, no shortcuts.
 Do NOT call or wrap cc/gcc/clang/tcc.
 Do NOT use saltwater or ANY existing C compiler implementation.
 Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
@@ -12,27 +15,75 @@ Your submission must include:
 
 Interface: ./cc input.c -o output
 
-Do not rely on external testing tools.
-Create and run your own local tests in the workspace (small focused C programs and shell scripts).
+Your goal is to pass ALL test suites. Work methodically. Start small, build up.
 
-Testing strategy:
-1. Write small local tests for each feature before/while implementing it
-2. Run local tests frequently after each change
-3. When tests fail: read the error output carefully, fix the code, rerun
-4. After fixing, rerun previously passing local tests to check for regressions
-5. Commit after each meaningful change
+## How to Work
 
-Your goal is to pass ALL test suites. Work methodically.
+You are doing extreme programming. Test-driven development. Red-green-refactor.
+
+The discipline is simple:
+
+1. Write a tiny C program that exercises ONE thing your compiler should handle.
+2. Compile it with `./cc`. Watch it fail.
+3. Fix the compiler until that test passes.
+4. Run ALL your previous tests. Make sure nothing broke.
+5. Only then move on to the next feature.
+
+Never move on from a broken test. If something fails, stay on it until it passes. Do not start implementing the next feature while a previous test is red. The whole point is that your test suite is always green except for the one thing you are actively working on.
+
+Your tests accumulate. By the end, you should have a large collection of small C programs that cover every feature you have implemented. This is your regression suite. Run it constantly.
+
+## One Thing at a Time
+
+Do NOT try to implement multiple features in parallel. Do NOT do a big refactor while also adding a new feature. Do NOT move to the next thing when the current thing is broken.
+
+The sequence matters:
+- Get the simplest possible program working first: `int main() { return 0; }`
+- Then arithmetic: `return 1 + 2;`
+- Then variables, then control flow, then functions, then pointers, then strings, etc.
+- Each feature builds on the previous ones. If you skip ahead, you will waste time debugging interactions between features that are all broken at once.
+
+When you fix a bug, write a test that reproduces it FIRST, then fix it. That test stays in your suite forever.
+
+## Testing Mechanics
+
+Create a `tests/` directory in your workspace. Put each test as a `.c` file. Write a `run_tests.sh` script that compiles each one with `./cc`, runs it, and compares the output against gcc. Something like:
+
+```bash
+#!/bin/bash
+PASS=0; FAIL=0
+for f in tests/*.c; do
+    # Compile with your compiler
+    ./cc "$f" -o /tmp/mine 2>/dev/null
+    mine_status=$?
+    # Compile with gcc for reference
+    gcc "$f" -o /tmp/ref 2>/dev/null
+    # Compare outputs
+    mine_out=$(/tmp/mine 2>/dev/null; echo "EXIT:$?")
+    ref_out=$(/tmp/ref 2>/dev/null; echo "EXIT:$?")
+    if [ "$mine_out" = "$ref_out" ] && [ $mine_status -eq 0 ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $f"
+        echo "  expected: $ref_out"
+        echo "  got:      $mine_out"
+    fi
+done
+echo "$PASS passed, $FAIL failed"
+```
+
+Run this after every change. No exceptions.
 
 ## Recommended Architecture
 
-Structure your compiler as separate modules:
+Only `src/main.rs` is required. Beyond that, organize however you see fit. A common starting point:
 - `src/main.rs` — CLI entry point, file I/O, pipeline
 - `src/lexer.rs` — tokenization
 - `src/parser.rs` — AST construction
 - `src/codegen.rs` — x86_64 assembly generation
 
-Keep files under 1000 lines. When a module grows too large, split it.
+Add as many modules as you need. When a file gets hard to navigate, split it.
 
 ## Debug Artifacts (REQUIRED)
 
@@ -56,18 +107,17 @@ significant change. Structure:
 # Progress
 
 ## Current Status
-- Tests passing: <suite> X/Y
+- Tests passing: X/Y (run_tests.sh)
 - Current focus: <what you're working on>
 
 ## What Works
-- <list of working components>
+- <list of working features with test coverage>
+
+## What's Broken
+- <current failing test and what you're doing about it>
 
 ## What I've Tried That Failed
 - [Turn ~N] <description of failed approach>
-
-## Current Plan
-1. <next item>
-2. <next item>
 ```
 
 This helps you remember what you've tried across many turns.

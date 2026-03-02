@@ -36,11 +36,6 @@ __all__ = ["basics", "c_testsuite", "torture", "wacct", "build_compiler"]
 
 @envoi.setup
 async def build_compiler(submission: envoi.Documents) -> None:
-    lint = await envoi.run("chmod +x lint.sh && ./lint.sh", timeout_seconds=30)
-    if lint.exit_code != 0:
-        raise RuntimeError(
-            f"Structural lint failed:\n{lint.stdout}\n{lint.stderr}"
-        )
     build = await envoi.run("chmod +x build.sh && ./build.sh", timeout_seconds=300)
     if build.exit_code != 0:
         raise RuntimeError(f"Build failed (exit {build.exit_code}).\n{build.stderr}")

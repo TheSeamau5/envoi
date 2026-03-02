@@ -26,9 +26,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
 
-# Workspace files: AGENTS.md for agent onboarding, lint.sh for structural checks
+# Workspace files: AGENTS.md for agent onboarding
 COPY workspace/AGENTS.md /workspace/AGENTS.md
-COPY lint.sh /environment/lint.sh
 
 # Bake fixtures into the image to avoid per-run sync costs.
 RUN set -eux; \
