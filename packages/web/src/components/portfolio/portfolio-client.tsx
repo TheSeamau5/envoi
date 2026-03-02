@@ -30,7 +30,7 @@ function rankColor(rank: number): string {
 export function PortfolioClient({ rows, environments }: PortfolioClientProps) {
   if (rows.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center text-[11px] text-envoi-text-dim">
+      <div className="flex flex-1 items-center justify-center text-[13px] text-envoi-text-dim">
         No portfolio data available
       </div>
     );
@@ -40,7 +40,7 @@ export function PortfolioClient({ rows, environments }: PortfolioClientProps) {
     <div className="flex-1 overflow-auto">
       {/* Rankings table */}
       <div className="overflow-auto">
-        <table className="w-full border-collapse text-[10px]">
+        <table className="w-full border-collapse text-[12px]">
           <thead>
             <tr>
               <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted">
@@ -100,7 +100,7 @@ export function PortfolioClient({ rows, environments }: PortfolioClientProps) {
                             background: T.greenDark,
                           }}
                         />
-                        <span className="text-[9px] text-envoi-text-muted">
+                        <span className="text-[13px] text-envoi-text-muted">
                           {(passRate * 100).toFixed(0)}%
                         </span>
                       </div>

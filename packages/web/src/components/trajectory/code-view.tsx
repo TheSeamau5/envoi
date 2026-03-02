@@ -131,7 +131,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
 
   if (!snapshot || !filePath) {
     return (
-      <div className="flex flex-1 items-center justify-center text-[11px] text-envoi-text-dim">
+      <div className="flex flex-1 items-center justify-center text-[13px] text-envoi-text-dim">
         Select a file to view its contents
       </div>
     );
@@ -155,7 +155,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
         >
           {additions !== undefined && additions > 0 && (
             <span
-              className="text-[10px] font-semibold"
+              className="text-[12px] font-semibold"
               style={{ color: T.diffAddedBorder }}
             >
               +{additions}
@@ -163,7 +163,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
           )}
           {deletions !== undefined && deletions > 0 && (
             <span
-              className="text-[10px] font-semibold"
+              className="text-[12px] font-semibold"
               style={{ color: T.red }}
             >
               &minus;{deletions}
@@ -194,7 +194,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
                 style={{
                   width: 44,
                   padding: "0 8px 0 0",
-                  fontSize: 10,
+                  fontSize: 12,
                   lineHeight: "20px",
                 }}
               >
@@ -206,7 +206,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
                 className="shrink-0 select-none text-center"
                 style={{
                   width: 16,
-                  fontSize: 10,
+                  fontSize: 12,
                   lineHeight: "20px",
                   color: isAdded ? T.diffAddedBorder : "transparent",
                 }}
@@ -218,7 +218,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
               <pre
                 className="flex-1 whitespace-pre"
                 style={{
-                  fontSize: 11,
+                  fontSize: 13,
                   lineHeight: "20px",
                   color: T.text,
                   margin: 0,

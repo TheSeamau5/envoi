@@ -488,23 +488,23 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
             >
               <div className="mb-2 flex items-center gap-2">
                 <span
-                  className="flex h-5 w-5 items-center justify-center rounded text-[10px] font-bold text-white"
+                  className="flex h-5 w-5 items-center justify-center rounded text-[12px] font-bold text-white"
                   style={{ background: color.line }}
                 >
                   {color.label}
                 </span>
-                <span className="truncate text-[10px] text-envoi-text-muted">
+                <span className="truncate text-[12px] text-envoi-text-muted">
                   {trace.model}
                 </span>
               </div>
 
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1 text-[10px] text-envoi-text-dim">
+                  <span className="flex items-center gap-1 text-[12px] text-envoi-text-dim">
                     <Hash size={10} />
                     Final
                   </span>
-                  <span className="text-[11px] font-semibold">
+                  <span className="text-[13px] font-semibold">
                     {formatPercent(lastCommit?.totalPassed ?? 0, trace.totalTests)}
                     <span className="text-envoi-text-dim">
                       {" "}({lastCommit?.totalPassed ?? 0}/{trace.totalTests})
@@ -512,11 +512,11 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1 text-[10px] text-envoi-text-dim">
+                  <span className="flex items-center gap-1 text-[12px] text-envoi-text-dim">
                     <Hash size={10} />
                     Peak
                   </span>
-                  <span className="text-[11px] font-semibold">
+                  <span className="text-[13px] font-semibold">
                     {formatPercent(maxPassed, trace.totalTests)}
                     <span className="text-envoi-text-dim">
                       {" "}({maxPassed}/{trace.totalTests})
@@ -524,19 +524,19 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1 text-[10px] text-envoi-text-dim">
+                  <span className="flex items-center gap-1 text-[12px] text-envoi-text-dim">
                     <Clock size={10} />
                     Duration
                   </span>
-                  <span className="text-[11px] font-semibold">{trace.duration}</span>
+                  <span className="text-[13px] font-semibold">{trace.duration}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1 text-[10px] text-envoi-text-dim">
+                  <span className="flex items-center gap-1 text-[12px] text-envoi-text-dim">
                     <AlertCircle size={10} />
                     Regressions
                   </span>
                   <span
-                    className="text-[11px] font-semibold"
+                    className="text-[13px] font-semibold"
                     style={{ color: regressionCount > 0 ? T.red : T.text }}
                   >
                     {regressionCount}
@@ -553,7 +553,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                     const suiteColor = SUITE_COLORS[suite.name];
                     return (
                       <div key={suite.name} className="flex items-center gap-2">
-                        <span className="w-18 truncate text-[9px] text-envoi-text-dim">
+                        <span className="w-18 truncate text-[13px] text-envoi-text-dim">
                           {suite.name}
                         </span>
                         <div className="h-1 flex-1 rounded-full bg-envoi-border-light">
@@ -565,7 +565,7 @@ export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
                             }}
                           />
                         </div>
-                        <span className="w-8 text-right text-[9px] text-envoi-text-dim">
+                        <span className="w-8 text-right text-[13px] text-envoi-text-dim">
                           {passed}
                         </span>
                       </div>

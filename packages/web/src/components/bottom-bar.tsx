@@ -17,7 +17,7 @@ export function BottomBar({ suites, totalTests }: BottomBarProps) {
   const effectiveSuites = suites ?? DEFAULT_SUITES;
   const effectiveTotal = totalTests ?? DEFAULT_TOTAL_TESTS;
   return (
-    <div className="flex h-7.5 shrink-0 items-center border-t border-envoi-border bg-envoi-bg px-5 text-[10px] text-envoi-text-dim">
+    <div className="flex h-7.5 shrink-0 items-center border-t border-envoi-border bg-envoi-bg px-5 text-[12px] text-envoi-text-dim">
       <span>
         {effectiveTotal} tests &middot; {effectiveSuites.length} suites
       </span>

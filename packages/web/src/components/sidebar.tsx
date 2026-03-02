@@ -15,7 +15,6 @@ import {
   Grid3x3,
   LayoutDashboard,
   Terminal,
-  FileSearch,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
@@ -33,7 +32,6 @@ const NAV_ITEMS = [
   { href: "/difficulty", label: "Difficulty", icon: Grid3x3 },
   { href: "/portfolio", label: "Portfolio", icon: LayoutDashboard },
   { href: "/query", label: "Query", icon: Terminal },
-  { href: "/templates", label: "Templates", icon: FileSearch },
 ] as const;
 
 type SidebarProps = {
@@ -94,7 +92,7 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
           const linkContent = (
             <Link
               href={item.href}
-              className={`flex items-center ${collapsed ? "justify-center" : "gap-2"} px-3 py-2 text-[11px] transition-colors ${
+              className={`flex items-center ${collapsed ? "justify-center" : "gap-2"} px-3 py-2 text-[13px] transition-colors ${
                 isActive
                   ? collapsed
                     ? "text-envoi-accent"

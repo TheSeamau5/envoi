@@ -204,6 +204,11 @@ async function getAllTrajectoriesFromGlob(opts?: {
 }): Promise<Trajectory[]> {
   const glob = await allTracesGlob();
 
+  /**
+   * Single query that computes trajectory summaries AND final evaluation scores
+   * via a LEFT JOIN on the evaluations view. No N+1 queries.
+   * Also computes duration from MIN/MAX started_at timestamps and eval count.
+   */
   let sql = `
     WITH summary AS (
       SELECT
@@ -212,6 +217,7 @@ async function getAllTrajectoriesFromGlob(opts?: {
         environment,
         MIN(agent) AS agent,
         MIN(started_at) AS started_at,
+        MAX(started_at) AS ended_at,
         MAX(part) + 1 AS total_parts,
         MAX(turn) AS total_turns,
         SUM(content_token_estimate) AS total_tokens,
@@ -220,19 +226,37 @@ async function getAllTrajectoriesFromGlob(opts?: {
         MIN(suites) AS suites
       FROM read_parquet('${escapeString(glob)}')
       GROUP BY trajectory_id, agent_model, environment
+    ),
+    best_eval AS (
+      SELECT
+        trajectory_id,
+        MAX(passed) AS best_passed,
+        MAX(failed) AS best_failed,
+        MAX(total) AS best_total,
+        COUNT(*) AS eval_count
+      FROM evaluations
+      WHERE status = 'completed'
+      GROUP BY trajectory_id
     )
-    SELECT * FROM summary
+    SELECT
+      s.*,
+      b.best_passed,
+      b.best_failed,
+      b.best_total,
+      b.eval_count
+    FROM summary s
+    LEFT JOIN best_eval b ON b.trajectory_id = s.trajectory_id
     WHERE 1=1
   `;
 
   if (opts?.environment) {
-    sql += ` AND environment = '${escapeString(opts.environment)}'`;
+    sql += ` AND s.environment = '${escapeString(opts.environment)}'`;
   }
   if (opts?.model) {
-    sql += ` AND agent_model = '${escapeString(opts.model)}'`;
+    sql += ` AND s.agent_model = '${escapeString(opts.model)}'`;
   }
 
-  sql += ` ORDER BY started_at DESC`;
+  sql += ` ORDER BY s.started_at DESC`;
 
   if (opts?.limit) {
     sql += ` LIMIT ${Number(opts.limit)}`;
@@ -242,54 +266,24 @@ async function getAllTrajectoriesFromGlob(opts?: {
   }
 
   const rawRows = await query(sql);
-  const summaryRows = rawRows.map(toSummaryRow);
 
-  // For each trajectory, get the final score from the last completed evaluation
-  const trajectories: Trajectory[] = [];
-  for (const row of summaryRows) {
-    let finalScore: { passed: number; failed: number; total: number } | undefined;
-    try {
-      const uri = await traceUri(row.trajectory_id);
-      const evalSql = `
-        WITH events AS (
-          SELECT
-            unnest(
-              from_json_strict(
-                eval_events_delta,
-                '["json"]'
-              )
-            ) AS event
-          FROM read_parquet('${escapeString(uri)}')
-          WHERE eval_events_delta IS NOT NULL
-            AND json_array_length(eval_events_delta) > 0
-        )
-        SELECT
-          CAST(json_extract(event, '$.passed') AS INTEGER) AS passed,
-          CAST(json_extract(event, '$.failed') AS INTEGER) AS failed,
-          CAST(json_extract(event, '$.total') AS INTEGER) AS total
-        FROM events
-        WHERE json_extract_string(event, '$.status') = 'completed'
-          AND json_extract_string(event, '$.kind') = 'commit_async'
-        ORDER BY CAST(json_extract(event, '$.trigger_part') AS INTEGER) DESC
-        LIMIT 1
-      `;
-      const evalRawRows = await query(evalSql);
-      const evalRow = evalRawRows[0];
-      if (evalRow) {
-        finalScore = {
-          passed: Number(evalRow.passed ?? 0),
-          failed: Number(evalRow.failed ?? 0),
-          total: Number(evalRow.total ?? 0),
-        };
-      }
-    } catch {
-      // Skip final score on error
-    }
+  return rawRows.map((row) => {
+    const summaryRow = toSummaryRow(row);
+    const finalScore = row.best_passed !== undefined && row.best_passed !== null
+      ? {
+          passed: Number(row.best_passed ?? 0),
+          failed: Number(row.best_failed ?? 0),
+          total: Number(row.best_total ?? 0),
+        }
+      : undefined;
 
-    trajectories.push(summaryRowToTrajectory(row, finalScore));
-  }
-
-  return trajectories;
+    return summaryRowToTrajectory(
+      summaryRow,
+      finalScore,
+      String(row.ended_at ?? ""),
+      Number(row.eval_count ?? 0),
+    );
+  });
 }
 
 /**

@@ -176,7 +176,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
       <div className="flex w-65 shrink-0 flex-col border-r border-envoi-border">
         {/* Dimension chips header */}
         <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Group By
           </span>
         </div>
@@ -189,7 +189,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               <button
                 key={dimKey}
                 onClick={() => removeDimension(dimKey)}
-                className="flex items-center gap-1 rounded-[3px] bg-envoi-accent-bg px-2 py-0.75 text-[10px] font-medium whitespace-nowrap text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
+                className="flex items-center gap-1 rounded-[3px] bg-envoi-accent-bg px-2 py-0.75 text-[12px] font-medium whitespace-nowrap text-envoi-accent-dark transition-colors hover:bg-envoi-accent/10"
               >
                 {dimDef?.label ?? dimKey}
                 <X size={9} />
@@ -210,7 +210,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
         {/* Group list */}
         <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Groups ({groups.length})
           </span>
         </div>
@@ -240,10 +240,10 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
                   {/* Label + stats */}
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate text-[11px] font-medium text-envoi-text">
+                    <span className="truncate text-[13px] font-medium text-envoi-text">
                       {group.label}
                     </span>
-                    <span className="text-[9px] text-envoi-text-dim">
+                    <span className="text-[13px] text-envoi-text-dim">
                       {group.traces.length} traces &middot; med {Math.round(medianFinal)} passed
                     </span>
                   </div>
@@ -266,7 +266,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
       <div className="flex flex-1 flex-col overflow-y-auto p-4">
         {/* Median progress curves */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg p-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Median Progress Curves
           </div>
           <svg
@@ -381,7 +381,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                     <text
                       x={toX(lastPoint.minutes, maxDuration) + 6}
                       y={toY(lastPoint.medianPassed, effectiveTotal) + 3}
-                      style={{ fontSize: "8px", fill: color.line, fontWeight: 700 }}
+                      style={{ fontSize: "10px", fill: color.line, fontWeight: 700 }}
                     >
                       {Math.round(lastPoint.medianPassed)}
                     </text>
@@ -395,17 +395,17 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
         {/* Per-suite median table */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg">
           <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Per-Suite Medians
             </span>
           </div>
 
           {/* Table header */}
           <div className="flex items-center border-b border-envoi-border px-3.5 py-2">
-            <span className="min-w-25 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            <span className="min-w-25 text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Suite
             </span>
-            <span className="min-w-12.5 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            <span className="min-w-12.5 text-right text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Total
             </span>
             {visibleGroups.map((group, groupIndex) => {
@@ -416,7 +416,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               return (
                 <span
                   key={group.key}
-                  className="flex min-w-40 flex-1 items-center gap-1 border-l border-envoi-border-light pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
+                  className="flex min-w-40 flex-1 items-center gap-1 border-l border-envoi-border-light pl-4 text-[12px] font-semibold uppercase tracking-[0.08em]"
                   style={{ color: color.line }}
                 >
                   <span
@@ -437,14 +437,14 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                 key={suite.name}
                 className="flex items-center border-b border-envoi-border-light px-3.5 py-2 transition-colors hover:bg-envoi-surface"
               >
-                <span className="flex min-w-25 items-center gap-2 text-[11px] font-medium text-envoi-text">
+                <span className="flex min-w-25 items-center gap-2 text-[13px] font-medium text-envoi-text">
                   <span
                     className="h-1.5 w-1.5 rounded-full"
                     style={{ background: suiteColor?.color ?? T.textMuted }}
                   />
                   {suite.name}
                 </span>
-                <span className="min-w-12.5 text-right text-[11px] text-envoi-text-muted">
+                <span className="min-w-12.5 text-right text-[13px] text-envoi-text-muted">
                   {suite.total}
                 </span>
                 {visibleGroups.map((group, groupIndex) => {
@@ -465,10 +465,10 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                           style={{ width: `${pct}%`, background: color.line }}
                         />
                       </div>
-                      <span className="text-[11px] font-semibold" style={{ color: color.line }}>
+                      <span className="text-[13px] font-semibold" style={{ color: color.line }}>
                         {Math.round(medianVal)}
                       </span>
-                      <span className="text-[9px] text-envoi-text-dim">
+                      <span className="text-[13px] text-envoi-text-dim">
                         {formatPercent(medianVal, suite.total)}
                       </span>
                     </div>
@@ -482,7 +482,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
         {/* Group -> Trace breakdown table */}
         <div className="rounded border border-envoi-border bg-envoi-bg">
           <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Group Breakdown
             </span>
           </div>
@@ -517,13 +517,13 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                     className="h-2 w-2 shrink-0 rounded-full"
                     style={{ background: color.line }}
                   />
-                  <span className="flex-1 truncate text-[11px] font-medium text-envoi-text">
+                  <span className="flex-1 truncate text-[13px] font-medium text-envoi-text">
                     {group.label}
                   </span>
-                  <span className="text-[10px] text-envoi-text-dim">
+                  <span className="text-[12px] text-envoi-text-dim">
                     {group.traces.length} traces
                   </span>
-                  <span className="text-[10px] text-envoi-text-muted">
+                  <span className="text-[12px] text-envoi-text-muted">
                     med {Math.round(medianFinal)} &middot; {formatDuration(Math.round(medianDuration))}
                   </span>
                 </button>
@@ -538,13 +538,13 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                           key={trace.id}
                           className="flex items-center gap-3 border-b border-envoi-border-light px-3.5 py-2 pl-9.5"
                         >
-                          <span className="min-w-20 truncate text-[10px] font-medium text-envoi-text">
+                          <span className="min-w-20 truncate text-[12px] font-medium text-envoi-text">
                             {trace.id}
                           </span>
-                          <span className="min-w-25 truncate text-[10px] text-envoi-text-muted">
+                          <span className="min-w-25 truncate text-[12px] text-envoi-text-muted">
                             {trace.model}
                           </span>
-                          <span className="text-[10px] text-envoi-text-muted">
+                          <span className="text-[12px] text-envoi-text-muted">
                             {trace.duration}
                           </span>
                           <div className="flex flex-1 items-center gap-2">
@@ -557,10 +557,10 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                                 }}
                               />
                             </div>
-                            <span className="text-[10px] font-semibold text-envoi-text">
+                            <span className="text-[12px] font-semibold text-envoi-text">
                               {lastTraceCommit?.totalPassed ?? 0}
                             </span>
-                            <span className="text-[9px] text-envoi-text-dim">
+                            <span className="text-[13px] text-envoi-text-dim">
                               / {effectiveTotal}
                             </span>
                           </div>
@@ -592,7 +592,7 @@ function AddDimensionButton({
     <>
       <button
         onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-0.75 rounded-[3px] border border-envoi-border px-1.5 py-0.75 text-[10px] text-envoi-text-dim transition-colors hover:bg-envoi-surface hover:text-envoi-text"
+        className="flex items-center gap-0.75 rounded-[3px] border border-envoi-border px-1.5 py-0.75 text-[12px] text-envoi-text-dim transition-colors hover:bg-envoi-surface hover:text-envoi-text"
       >
         <Plus size={9} />
         Add
@@ -606,7 +606,7 @@ function AddDimensionButton({
                 onAdd(dim.key);
                 setOpen(false);
               }}
-              className="flex w-full items-center px-3 py-1.5 text-[10px] whitespace-nowrap text-envoi-text transition-colors hover:bg-envoi-surface"
+              className="flex w-full items-center px-3 py-1.5 text-[12px] whitespace-nowrap text-envoi-text transition-colors hover:bg-envoi-surface"
             >
               {dim.label}
             </button>

@@ -353,7 +353,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
         <div className="flex items-center gap-0.5 rounded-sm border border-envoi-border p-0.5">
           <button
             onClick={() => setMode("traces")}
-            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[10px] font-semibold transition-colors"
+            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[12px] font-semibold transition-colors"
             style={{
               background: mode === "traces" ? T.text : "transparent",
               color: mode === "traces" ? T.bg : T.textMuted,
@@ -364,7 +364,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           </button>
           <button
             onClick={() => setMode("setups")}
-            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[10px] font-semibold transition-colors"
+            className="flex items-center gap-1.5 rounded-[3px] px-3 py-1.25 text-[12px] font-semibold transition-colors"
             style={{
               background: mode === "setups" ? T.text : "transparent",
               color: mode === "setups" ? T.bg : T.textMuted,
@@ -385,7 +385,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
-                  className="flex items-center gap-1.25 rounded-[3px] px-3 py-1.25 text-[10px] font-medium transition-colors"
+                  className="flex items-center gap-1.25 rounded-[3px] px-3 py-1.25 text-[12px] font-medium transition-colors"
                   style={{
                     background: isActive ? T.accentBg : "transparent",
                     color: isActive ? T.accentDark : T.textMuted,
@@ -402,7 +402,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
         {/* Selection count badge (trace mode) */}
         {mode === "traces" && (
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-[10px] text-envoi-text-dim">
+            <span className="text-[12px] text-envoi-text-dim">
               {selectedTraces.length} selected
             </span>
           </div>
@@ -421,13 +421,13 @@ export function CompareClient({ allTraces }: CompareClientProps) {
           >
             {/* Sidebar header */}
             <div className="flex items-center justify-between border-b border-envoi-border bg-envoi-surface px-3.5 py-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+              <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
                 Trajectories ({sortedTraces.length})
               </span>
               {selectedIds.length > 0 && (
                 <button
                   onClick={() => setColorMap({})}
-                  className="text-[10px] text-envoi-text-dim transition-colors hover:text-envoi-text"
+                  className="text-[12px] text-envoi-text-dim transition-colors hover:text-envoi-text"
                 >
                   Deselect all
                 </button>
@@ -440,7 +440,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
               <Select value={modelFilter} onValueChange={setModelFilter}>
                 <SelectTrigger
                   size="sm"
-                  className="h-auto max-w-35 gap-1 rounded-[3px] border-none bg-transparent px-1.5 py-0.75 text-[9px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text [&>span]:truncate"
+                  className="h-auto max-w-35 gap-1 rounded-[3px] border-none bg-transparent px-1.5 py-0.75 text-[13px] font-medium text-envoi-text-dim shadow-none hover:bg-envoi-border-light hover:text-envoi-text [&>span]:truncate"
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -450,7 +450,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 >
                   <SelectItem
                     value="all"
-                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    className="text-[12px] text-envoi-text focus:bg-envoi-surface"
                   >
                     All models
                   </SelectItem>
@@ -458,7 +458,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                     <SelectItem
                       key={model}
                       value={model}
-                      className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                      className="text-[12px] text-envoi-text focus:bg-envoi-surface"
                     >
                       {model}
                     </SelectItem>
@@ -471,7 +471,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
               {/* Sort dropdown */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex shrink-0 items-center gap-0.75 rounded-[3px] px-1.5 py-0.75 text-[9px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
+                  <button className="flex shrink-0 items-center gap-0.75 rounded-[3px] px-1.5 py-0.75 text-[13px] font-medium text-envoi-text-dim transition-colors hover:bg-envoi-border-light hover:text-envoi-text">
                     <ArrowUpDown size={9} />
                     {sortBy === "score" ? "Score" : "Date"}
                   </button>
@@ -482,7 +482,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                 >
                   <DropdownMenuItem
                     onClick={() => setSortBy("score")}
-                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    className="text-[12px] text-envoi-text focus:bg-envoi-surface"
                     style={{
                       fontWeight: sortBy === "score" ? 600 : 400,
                       color: sortBy === "score" ? T.accent : T.text,
@@ -492,7 +492,7 @@ export function CompareClient({ allTraces }: CompareClientProps) {
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => setSortBy("date")}
-                    className="text-[10px] text-envoi-text focus:bg-envoi-surface"
+                    className="text-[12px] text-envoi-text focus:bg-envoi-surface"
                     style={{
                       fontWeight: sortBy === "date" ? 600 : 400,
                       color: sortBy === "date" ? T.accent : T.text,
@@ -548,13 +548,13 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
                     {/* Trace info */}
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="truncate text-[11px] font-medium text-envoi-text">
+                      <span className="truncate text-[13px] font-medium text-envoi-text">
                         {trace.id}
                       </span>
-                      <span className="truncate text-[9px] text-envoi-text-dim">
+                      <span className="truncate text-[13px] text-envoi-text-dim">
                         {trace.model}
                       </span>
-                      <span className="text-[9px] text-envoi-text-dim">
+                      <span className="text-[13px] text-envoi-text-dim">
                         {formatDate(trace.startedAt)}
                       </span>
                       {/* Score bar */}
@@ -571,10 +571,10 @@ export function CompareClient({ allTraces }: CompareClientProps) {
 
                     {/* Score */}
                     <div className="flex shrink-0 flex-col items-end gap-0.5">
-                      <span className="text-[11px] font-semibold text-envoi-text">
+                      <span className="text-[13px] font-semibold text-envoi-text">
                         {trace.finalPassed}
                       </span>
-                      <span className="text-[9px] text-envoi-text-dim">
+                      <span className="text-[13px] text-envoi-text-dim">
                         {formatPercent(trace.finalPassed, totalTests)}
                       </span>
                     </div>

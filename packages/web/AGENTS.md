@@ -57,7 +57,7 @@ This file contains all rules, conventions, and architectural context for AI agen
 - Monospace everything (JetBrains Mono)
 - Orange accent (#f97316) for active/selected states
 - White + light gray backgrounds, no dark mode
-- ALL CAPS section headers (10px, letter-spacing 0.08em)
+- ALL CAPS section headers (12px, letter-spacing 0.08em)
 - Information-dense, power-user focused
 - Bottom status bar with green dot
 

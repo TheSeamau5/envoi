@@ -102,8 +102,8 @@ function MiniSuiteChart({
           className="h-1.5 w-1.5 rounded-full"
           style={{ background: suiteColor?.color ?? T.textMuted }}
         />
-        <span className="text-[10px] font-semibold text-envoi-text">{suiteName}</span>
-        <span className="text-[9px] text-envoi-text-dim">{suiteTotal} tests</span>
+        <span className="text-[12px] font-semibold text-envoi-text">{suiteName}</span>
+        <span className="text-[13px] text-envoi-text-dim">{suiteTotal} tests</span>
       </div>
       <svg
         viewBox={`0 0 ${MINI_WIDTH} ${MINI_HEIGHT}`}
@@ -130,7 +130,7 @@ function MiniSuiteChart({
             x={MINI_MARGIN.left - 4}
             y={miniToY(tick, suiteTotal) + 3}
             textAnchor="end"
-            style={{ fontSize: "7px", fill: T.textDim }}
+            style={{ fontSize: "9px", fill: T.textDim }}
           >
             {tick}
           </text>
@@ -141,7 +141,7 @@ function MiniSuiteChart({
           x={MINI_MARGIN.left}
           y={MINI_HEIGHT - 4}
           textAnchor="start"
-          style={{ fontSize: "7px", fill: T.textDim }}
+          style={{ fontSize: "9px", fill: T.textDim }}
         >
           0
         </text>
@@ -149,7 +149,7 @@ function MiniSuiteChart({
           x={MINI_WIDTH - MINI_MARGIN.right}
           y={MINI_HEIGHT - 4}
           textAnchor="end"
-          style={{ fontSize: "7px", fill: T.textDim }}
+          style={{ fontSize: "9px", fill: T.textDim }}
         >
           {maxDuration < 60 ? `${maxDuration}m` : `${Math.round(maxDuration / 60)}h`}
         </text>
@@ -207,7 +207,7 @@ function MiniSuiteChart({
               key={`endpoint-${trace.id}`}
               x={miniToX(lastCommit.minutesElapsed, maxDuration) + 3}
               y={miniToY(passed, suiteTotal) + 2}
-              style={{ fontSize: "7px", fill: traceColor.line, fontWeight: 700 }}
+              style={{ fontSize: "9px", fill: traceColor.line, fontWeight: 700 }}
               opacity={hoveredTrace !== undefined && hoveredTrace !== traceIndex ? 0.3 : 1}
             >
               {traceColor.label}
@@ -246,10 +246,10 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
       <div className="rounded border border-envoi-border bg-envoi-bg">
         {/* Table header */}
         <div className="flex items-center border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
-          <span className="min-w-25 text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <span className="min-w-25 text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Suite
           </span>
-          <span className="min-w-15 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+          <span className="min-w-15 text-right text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Total
           </span>
           {traces.map((_trace, traceIndex) => {
@@ -260,7 +260,7 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
             return (
               <span
                 key={`col-${traceIndex}`}
-                className="flex min-w-40 flex-1 items-center gap-1.5 pl-4 text-[10px] font-semibold uppercase tracking-[0.08em]"
+                className="flex min-w-40 flex-1 items-center gap-1.5 pl-4 text-[12px] font-semibold uppercase tracking-[0.08em]"
                 style={{ color: color.line }}
               >
                 <span
@@ -284,7 +284,7 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
               className="flex items-center border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
             >
               {/* Suite name */}
-              <span className="flex min-w-25 items-center gap-2 text-[11px] font-medium text-envoi-text">
+              <span className="flex min-w-25 items-center gap-2 text-[13px] font-medium text-envoi-text">
                 <span
                   className="h-1.5 w-1.5 rounded-full"
                   style={{ background: suiteColor?.color ?? T.textMuted }}
@@ -293,7 +293,7 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
               </span>
 
               {/* Total */}
-              <span className="min-w-15 text-right text-[11px] text-envoi-text-muted">
+              <span className="min-w-15 text-right text-[13px] text-envoi-text-muted">
                 {suite.total}
               </span>
 
@@ -323,10 +323,10 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
                       />
                     </div>
                     {/* Values */}
-                    <span className="text-[11px] font-semibold" style={{ color: traceColor.line }}>
+                    <span className="text-[13px] font-semibold" style={{ color: traceColor.line }}>
                       {passed}
                     </span>
-                    <span className="text-[9px] text-envoi-text-dim">
+                    <span className="text-[13px] text-envoi-text-dim">
                       {formatPercent(passed, suite.total)}
                     </span>
                   </div>

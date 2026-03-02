@@ -987,13 +987,13 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   return {
     id: first.trajectory_id,
     model,
-    environment: first.environment ?? "",
+    environment: deriveEnvironment(first.environment, suites, first.task_params),
     commits,
     totalTests,
     startedAt: first.started_at ?? "",
     duration,
     totalTokens,
-    cost: 0, // Cost estimation requires model-specific pricing, skip for now
+    cost: 0,
     params,
     finalPassed,
     suites: suites.length > 0 ? suites : undefined,
@@ -1001,6 +1001,72 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     sessionId: first.session_id ?? undefined,
     sessionEndReason: first.session_end_reason ?? undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Environment derivation
+// ---------------------------------------------------------------------------
+
+/** Gameboy emulator suite names */
+const GAMEBOY_SUITES = new Set([
+  "acid2_dmg", "acid2_cgb",
+  "blargg_cpu", "blargg_timing", "blargg_sound", "blargg_misc",
+  "mealybug_dmg", "mealybug_cgb",
+  "mooneye_timer", "mooneye_mbc", "mooneye_acceptance",
+  "samesuite",
+]);
+
+/** C compiler suite names */
+const C_COMPILER_SUITES = new Set(["basics", "wacct", "c_testsuite", "torture"]);
+
+/**
+ * Derive the real environment from available data.
+ * The parquet `environment` column is often a placeholder ("environment"),
+ * so we use suite names and task_params to determine the actual environment.
+ */
+export function deriveEnvironment(
+  rawEnvironment: string | undefined,
+  suites: Suite[],
+  taskParamsJson?: string,
+): string {
+  /** 1. If the raw environment is a real value (not a placeholder), use it */
+  if (rawEnvironment && rawEnvironment !== "environment" && rawEnvironment !== "") {
+    return rawEnvironment;
+  }
+
+  /** 2. Derive from suite names */
+  for (const suite of suites) {
+    if (GAMEBOY_SUITES.has(suite.name)) {
+      return "gameboy_emulator";
+    }
+    if (C_COMPILER_SUITES.has(suite.name)) {
+      return "c_compiler";
+    }
+  }
+
+  /** 3. Derive from task_params advisor_system_prompt */
+  if (taskParamsJson) {
+    try {
+      const params = JSON.parse(taskParamsJson);
+      const advisorPrompt = params?._environment_params?.advisor_system_prompt ?? "";
+      if (typeof advisorPrompt === "string") {
+        if (advisorPrompt.includes("Game Boy") || advisorPrompt.includes("emulator")) {
+          return "gameboy_emulator";
+        }
+        if (advisorPrompt.includes("compiler") || advisorPrompt.includes("C compiler")) {
+          return "c_compiler";
+        }
+      }
+      /** 4. Check for failed_tests_feedback_limit (c_compiler specific param) */
+      if (params?._environment_params?.failed_tests_feedback_limit) {
+        return "c_compiler";
+      }
+    } catch {
+      /* ignore parse errors */
+    }
+  }
+
+  return rawEnvironment || "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1090,8 @@ export type TrajectorySummaryRow = {
 export function summaryRowToTrajectory(
   row: TrajectorySummaryRow,
   finalScore?: { passed: number; failed: number; total: number },
+  endedAt?: string,
+  evalCount?: number,
 ): Trajectory {
   const suites = parseSuites(row.suites);
   const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
@@ -1033,14 +1101,27 @@ export function summaryRowToTrajectory(
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
   const model = agent ? `${agent}/${agentModel}` : agentModel;
+  const environment = deriveEnvironment(row.environment, suites, row.task_params);
 
-  // Build a minimal single-commit trajectory for the list view
+  /** Compute duration from started_at → ended_at timestamps */
+  let durationMinutes = 0;
+  let durationStr = "";
+  const startMs = new Date(row.started_at ?? "").getTime();
+  const endMs = new Date(endedAt ?? "").getTime();
+  if (!isNaN(startMs) && !isNaN(endMs) && endMs > startMs) {
+    durationMinutes = Math.round((endMs - startMs) / 60_000);
+    const hours = Math.floor(durationMinutes / 60);
+    const mins = durationMinutes % 60;
+    durationStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+  }
+
+  /** Build a minimal single-commit trajectory for the list view */
   const commit: Commit = {
     index: 0,
     hash: "",
     turn: 0,
     timestamp: row.started_at ?? "",
-    minutesElapsed: 0,
+    minutesElapsed: durationMinutes,
     suiteState: {},
     totalPassed: passed,
     delta: 0,
@@ -1059,16 +1140,18 @@ export function summaryRowToTrajectory(
     codeSnapshot: {},
     phase: totalTests > 0 ? passed / totalTests : 0,
     tokensUsed: toNumber(row.total_tokens),
+    /** Store eval count in evalId for the list view to read */
+    evalId: evalCount !== undefined ? String(evalCount) : undefined,
   };
 
   return {
     id: row.trajectory_id,
     model,
-    environment: row.environment ?? "",
+    environment,
     commits: [commit],
     totalTests,
     startedAt: row.started_at ?? "",
-    duration: "",
+    duration: durationStr,
     totalTokens: toNumber(row.total_tokens),
     cost: 0,
     params,
@@ -1123,6 +1206,7 @@ export function summaryTableRowToTrajectory(
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
   const model = agent ? `${agent}/${agentModel}` : agentModel;
+  const environment = deriveEnvironment(row.environment, suites, row.task_params);
 
   // Compute duration from started_at and ended_at
   const startMs = new Date(row.started_at ?? "").getTime();
@@ -1170,7 +1254,7 @@ export function summaryTableRowToTrajectory(
   return {
     id: row.trajectory_id,
     model,
-    environment: row.environment ?? "",
+    environment,
     commits: [commit],
     totalTests,
     startedAt: row.started_at ?? "",

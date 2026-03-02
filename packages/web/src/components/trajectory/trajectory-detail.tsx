@@ -280,7 +280,7 @@ export function TrajectoryDetail({
               <TooltipTrigger asChild>
                 <button
                   onClick={() => setActiveSuite("all")}
-                  className={`shrink-0 rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
+                  className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
                     activeSuite === "all"
                       ? "bg-envoi-text text-white"
                       : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -296,7 +296,7 @@ export function TrajectoryDetail({
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => setActiveSuite(suite.name)}
-                    className={`shrink-0 rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
+                    className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
                       activeSuite === suite.name
                         ? "bg-envoi-text text-white"
                         : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -442,7 +442,7 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center px-[14px] text-[10px] font-semibold uppercase tracking-[0.06em] transition-colors ${
+      className={`flex items-center px-[14px] text-[12px] font-semibold uppercase tracking-[0.06em] transition-colors ${
         isActive
           ? "border-b-[2px] border-envoi-accent text-envoi-accent"
           : "border-b-[2px] border-transparent text-envoi-text-dim hover:text-envoi-text"

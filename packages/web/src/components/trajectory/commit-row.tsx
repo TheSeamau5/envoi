@@ -61,10 +61,10 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
     >
       {/* Hash + turn */}
       <div className="flex min-w-[90px] flex-col gap-[2px]">
-        <span className="text-[11px] font-semibold text-envoi-text">
+        <span className="text-[13px] font-semibold text-envoi-text">
           {commit.hash.slice(0, 8)}
         </span>
-        <span className="text-[9px] text-envoi-text-dim">
+        <span className="text-[13px] text-envoi-text-dim">
           turn {commit.turn}
         </span>
       </div>
@@ -72,7 +72,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       {/* Delta + total */}
       <div className="flex min-w-[60px] flex-col items-end gap-[2px]">
         <span
-          className="text-[11px] font-semibold"
+          className="text-[13px] font-semibold"
           style={{
             color:
               commit.delta > 0
@@ -84,7 +84,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         >
           {commit.delta > 0 ? `+${commit.delta}` : commit.delta === 0 ? "±0" : `${commit.delta}`}
         </span>
-        <span className="text-[9px] text-envoi-text-dim">
+        <span className="text-[13px] text-envoi-text-dim">
           {commit.totalPassed} total
         </span>
       </div>
@@ -125,7 +125,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       <div className="flex items-center gap-[6px]">
         {commit.feedback.newlyBroken > 0 && (
           <span
-            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[9px] font-medium"
+            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
             style={{ color: T.redDark, background: T.redBg }}
           >
             <TrendingDown size={9} />
@@ -134,7 +134,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         )}
         {commit.isMilestone && (
           <span
-            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[9px] font-medium"
+            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
             style={{ color: T.gold, background: T.goldBg }}
           >
             <Star size={9} />

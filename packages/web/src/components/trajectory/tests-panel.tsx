@@ -30,13 +30,13 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
           <span className="text-[18px] font-bold text-envoi-text">
             {commit.totalPassed}
           </span>
-          <span className="text-[11px] text-envoi-text-dim">
+          <span className="text-[13px] text-envoi-text-dim">
             / {effectiveTotal} passed ({overallPercent})
           </span>
         </div>
         <div className="mt-[6px] flex items-center gap-2">
           <span
-            className="text-[11px] font-semibold"
+            className="text-[13px] font-semibold"
             style={{
               color:
                 commit.delta > 0
@@ -48,7 +48,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
           >
             {commit.delta > 0 ? `+${commit.delta}` : commit.delta === 0 ? "±0" : `${commit.delta}`}
           </span>
-          <span className="text-[9px] text-envoi-text-dim">
+          <span className="text-[13px] text-envoi-text-dim">
             since previous commit
           </span>
         </div>
@@ -56,7 +56,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
 
       {/* Per-suite breakdown */}
       <div className="border-b border-envoi-border px-[14px] py-[10px]">
-        <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+        <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           Suites
         </span>
         <div className="mt-[8px] space-y-[10px]">
@@ -67,10 +67,10 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
             return (
               <div key={suite.name}>
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-semibold text-envoi-text">
+                  <span className="text-[12px] font-semibold text-envoi-text">
                     {suite.name}
                   </span>
-                  <span className="text-[10px] text-envoi-text-dim">
+                  <span className="text-[12px] text-envoi-text-dim">
                     {passed} / {suite.total}
                   </span>
                 </div>
@@ -94,11 +94,11 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
 
       {/* Broken tests */}
       <div className="px-[14px] py-[10px]">
-        <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+        <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           Broken Tests ({commit.feedback.newlyBroken})
         </span>
         {commit.feedback.brokenTests.length === 0 ? (
-          <div className="mt-[8px] text-[10px] text-envoi-text-dim">
+          <div className="mt-[8px] text-[12px] text-envoi-text-dim">
             No newly broken tests in this commit.
           </div>
         ) : (
@@ -111,7 +111,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
               >
                 <div className="flex items-center gap-2">
                   <span
-                    className="rounded-[2px] px-[5px] py-[1px] text-[9px] font-medium"
+                    className="rounded-[2px] px-[5px] py-[1px] text-[13px] font-medium"
                     style={{
                       color: SUITE_COLORS[brokenTest.suite]?.color ?? T.textMuted,
                       background: SUITE_COLORS[brokenTest.suite]?.bg ?? T.borderLight,
@@ -119,11 +119,11 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
                   >
                     {brokenTest.suite}
                   </span>
-                  <span className="text-[10px] font-semibold text-envoi-text">
+                  <span className="text-[12px] font-semibold text-envoi-text">
                     {brokenTest.testId}
                   </span>
                 </div>
-                <div className="mt-[4px] text-[9px] text-envoi-red-dark">
+                <div className="mt-[4px] text-[13px] text-envoi-red-dark">
                   {brokenTest.error}
                 </div>
               </div>

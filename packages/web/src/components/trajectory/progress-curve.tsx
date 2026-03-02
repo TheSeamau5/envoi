@@ -263,7 +263,7 @@ export function ProgressCurve({
               x={xPos}
               y={MARGIN.top + PLOT_HEIGHT + 16}
               textAnchor="middle"
-              style={{ fontSize: "8px", fill: T.textDim }}
+              style={{ fontSize: "10px", fill: T.textDim }}
             >
               {formatTimeLabel(tickMinutes)}
             </text>

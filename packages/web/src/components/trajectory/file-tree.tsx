@@ -140,7 +140,7 @@ function TreeNodeRow({
       <>
         <button
           onClick={() => onToggleFolder(node.path)}
-          className="flex w-full items-center gap-[5px] py-[3px] text-left text-[10px] text-envoi-text-muted transition-colors hover:bg-envoi-surface"
+          className="flex w-full items-center gap-[5px] py-[3px] text-left text-[12px] text-envoi-text-muted transition-colors hover:bg-envoi-surface"
           style={{ paddingLeft: 8 + depth * 12 }}
         >
           <FolderIcon size={12} style={{ color: T.textDim }} />
@@ -170,7 +170,7 @@ function TreeNodeRow({
   return (
     <button
       onClick={() => onSelectFile(node.path)}
-      className={`flex w-full items-center gap-[5px] py-[3px] text-left text-[10px] transition-colors ${
+      className={`flex w-full items-center gap-[5px] py-[3px] text-left text-[12px] transition-colors ${
         isSelected
           ? "bg-envoi-accent-bg font-semibold text-envoi-accent"
           : "text-envoi-text hover:bg-envoi-surface"

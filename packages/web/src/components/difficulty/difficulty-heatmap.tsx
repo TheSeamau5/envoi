@@ -20,13 +20,13 @@ type DifficultyHeatmapProps = {
   cells: DifficultyCell[];
 };
 
-const CELL_W = 80;
-const CELL_H = 28;
+const CELL_W = 160;
+const CELL_H = 34;
 const GAP = 2;
-const LABEL_W = 160;
-const LABEL_H = 80;
-const ENV_HEADER_H = 32;
-const ENV_GAP = 16;
+const LABEL_W = 200;
+const LABEL_H = 28;
+const ENV_HEADER_H = 38;
+const ENV_GAP = 20;
 
 /** Interpolate between red (0%) → yellow (50%) → green (100%) */
 function passRateColor(rate: number): string {
@@ -100,7 +100,7 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
 
   if (cells.length === 0) {
     return (
-      <div className="flex items-center justify-center py-[40px] text-[11px] text-envoi-text-dim">
+      <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
         No difficulty data available
       </div>
     );
@@ -128,11 +128,11 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
           <text
             key={`model-${model}`}
             x={LABEL_W + modelIndex * (CELL_W + GAP) + CELL_W / 2}
-            y={LABEL_H - 8}
+            y={LABEL_H - 10}
             textAnchor="middle"
-            style={{ fontSize: "9px", fill: T.textDim }}
+            style={{ fontSize: "12px", fill: T.textDim, fontWeight: 500 }}
           >
-            {model.length > 12 ? `${model.slice(0, 12)}...` : model}
+            {model}
           </text>
         ))}
 
@@ -154,10 +154,10 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
               <g key={`row-${group.environment}-${category}`}>
                 {/* Category label */}
                 <text
-                  x={LABEL_W - 8}
-                  y={cellY + CELL_H / 2 + 3}
+                  x={LABEL_W - 10}
+                  y={cellY + CELL_H / 2 + 4}
                   textAnchor="end"
-                  style={{ fontSize: "9px", fill: T.textMuted }}
+                  style={{ fontSize: "12px", fill: T.textMuted }}
                 >
                   {category}
                 </text>
@@ -183,10 +183,10 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
                           />
                           <text
                             x={cellX + CELL_W / 2}
-                            y={cellY + CELL_H / 2 + 3}
+                            y={cellY + CELL_H / 2 + 4}
                             textAnchor="middle"
                             style={{
-                              fontSize: "9px",
+                              fontSize: "13px",
                               fill: textColor(rate),
                               fontWeight: 600,
                             }}
@@ -211,9 +211,9 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
               {/* Environment section header */}
               <text
                 x={0}
-                y={sectionY + ENV_HEADER_H / 2 + 4}
+                y={sectionY + ENV_HEADER_H / 2 + 5}
                 style={{
-                  fontSize: "10px",
+                  fontSize: "13px",
                   fill: T.text,
                   fontWeight: 600,
                   textTransform: "uppercase",

@@ -74,7 +74,7 @@ export function WastePanel({ trajectoryId }: WastePanelProps) {
 
   if (!entries || entries.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center text-[11px] text-envoi-text-dim">
+      <div className="flex flex-1 items-center justify-center text-[13px] text-envoi-text-dim">
         No waste detected
       </div>
     );
@@ -90,10 +90,10 @@ export function WastePanel({ trajectoryId }: WastePanelProps) {
         className="sticky top-0 z-10 flex items-center gap-[10px] border-b border-envoi-border px-[14px] py-[8px]"
         style={{ background: T.surface }}
       >
-        <span className="text-[10px] font-semibold text-envoi-text">
+        <span className="text-[12px] font-semibold text-envoi-text">
           {totalWaste.toLocaleString()} tokens wasted
         </span>
-        <span className="text-[9px] text-envoi-text-dim">
+        <span className="text-[13px] text-envoi-text-dim">
           ({totalPct.toFixed(1)}% of trajectory)
         </span>
       </div>
@@ -115,10 +115,10 @@ export function WastePanel({ trajectoryId }: WastePanelProps) {
                   className="h-[8px] w-[8px] shrink-0 rounded-full"
                   style={{ background: color }}
                 />
-                <span className="flex-1 text-[10px] font-semibold text-envoi-text">
+                <span className="flex-1 text-[12px] font-semibold text-envoi-text">
                   {label}
                 </span>
-                <span className="text-[9px] text-envoi-text-dim">
+                <span className="text-[13px] text-envoi-text-dim">
                   {entry.count} occurrences
                 </span>
               </div>
@@ -134,10 +134,10 @@ export function WastePanel({ trajectoryId }: WastePanelProps) {
                     }}
                   />
                 </div>
-                <span className="min-w-[60px] text-right text-[9px] text-envoi-text-muted">
+                <span className="min-w-[60px] text-right text-[13px] text-envoi-text-muted">
                   {entry.tokensCost.toLocaleString()} tok
                 </span>
-                <span className="min-w-[36px] text-right text-[9px] text-envoi-text-dim">
+                <span className="min-w-[36px] text-right text-[13px] text-envoi-text-dim">
                   {entry.percentage.toFixed(1)}%
                 </span>
               </div>

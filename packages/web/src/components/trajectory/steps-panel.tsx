@@ -63,7 +63,7 @@ const STEP_CONFIG: Record<
 /** Section label used in expanded content */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
+    <span className="text-[13px] font-semibold uppercase tracking-[0.06em] text-envoi-text-dim">
       {children}
     </span>
   );
@@ -81,7 +81,7 @@ function MonoBox({
 }) {
   return (
     <div
-      className="overflow-auto rounded-[4px] border px-[10px] py-[8px] text-[10px] leading-[15px]"
+      className="overflow-auto rounded-[4px] border px-[10px] py-[8px] text-[12px] leading-[18px]"
       style={{
         maxHeight: maxHeight ?? 240,
         fontFamily: T.mono,
@@ -114,7 +114,7 @@ function ReasoningExpanded({ step }: { step: Step }) {
         </div>
       )}
       {!step.reasoningContent && !step.planContent && step.detail && (
-        <div className="text-[10px] leading-[15px] text-envoi-text-muted">
+        <div className="text-[12px] leading-[18px] text-envoi-text-muted">
           {step.detail}
         </div>
       )}
@@ -289,11 +289,11 @@ function StepRow({
           <div className="flex items-center gap-[6px]">
             <span
               className="font-semibold tracking-[0.06em]"
-              style={{ fontSize: 9, color: config.color }}
+              style={{ fontSize: 13, color: config.color }}
             >
               {config.label}
             </span>
-            <span className="text-[9px] text-envoi-text-dim">
+            <span className="text-[13px] text-envoi-text-dim">
               #{step.index + 1}
             </span>
             {step.isError && (
@@ -302,13 +302,13 @@ function StepRow({
           </div>
 
           {/* Summary */}
-          <div className="mt-[2px] text-[11px] leading-[16px] text-envoi-text">
+          <div className="mt-[2px] text-[13px] leading-[18px] text-envoi-text">
             {step.summary}
           </div>
 
           {/* Metadata line */}
           {(step.durationMs !== undefined || step.tokensUsed !== undefined) && (
-            <div className="mt-[2px] flex items-center gap-[8px] text-[9px] text-envoi-text-dim">
+            <div className="mt-[2px] flex items-center gap-[8px] text-[13px] text-envoi-text-dim">
               {step.durationMs !== undefined && (
                 <span>{step.durationMs}ms</span>
               )}
@@ -362,23 +362,23 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
       <BannerIcon size={13} style={{ color: textColor }} />
       <div className="flex items-center gap-[10px]">
         {hasProgress && (
-          <span className="text-[10px] font-semibold" style={{ color: T.greenDark }}>
+          <span className="text-[12px] font-semibold" style={{ color: T.greenDark }}>
             +{feedback.newlyFixed} fixed
           </span>
         )}
         {hasRegression && (
-          <span className="text-[10px] font-semibold" style={{ color: T.redDark }}>
+          <span className="text-[12px] font-semibold" style={{ color: T.redDark }}>
             {feedback.newlyBroken} broken
           </span>
         )}
         {isNeutral && (
-          <span className="text-[10px] font-medium" style={{ color: T.textMuted }}>
+          <span className="text-[12px] font-medium" style={{ color: T.textMuted }}>
             No change
           </span>
         )}
       </div>
       <div className="flex-1" />
-      <span className="text-[9px]" style={{ color: textColor }}>
+      <span className="text-[13px]" style={{ color: textColor }}>
         {feedback.totalPassed} passed / {feedback.totalFailed} failed
       </span>
     </div>

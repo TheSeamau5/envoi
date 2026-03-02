@@ -145,7 +145,7 @@ export function PlayControls({
           <button
             key={speedOption}
             onClick={() => onSpeedChange(speedOption)}
-            className={`rounded px-[6px] py-[2px] text-[9px] font-semibold transition-colors ${
+            className={`rounded px-[6px] py-[2px] text-[13px] font-semibold transition-colors ${
               speed === speedOption
                 ? "bg-envoi-text text-white"
                 : "text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
@@ -158,7 +158,7 @@ export function PlayControls({
 
       {/* Position indicator */}
       <div className="flex-1" />
-      <span className="text-[10px] text-envoi-text-dim">
+      <span className="text-[12px] text-envoi-text-dim">
         {selectedIndex + 1} / {totalCommits}
       </span>
     </div>
