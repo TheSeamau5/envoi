@@ -139,6 +139,7 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 - Never use `# noqa` comments. Fix the underlying issue instead.
 - No leading-underscore function names. All functions are plain public names.
 - Do not use `@dataclass` for internal schemas/state containers. Use `pydantic.BaseModel` instead.
+- In TypeScript type/interface properties, always use optional syntax (`prop?: Type`) instead of union with undefined (`prop: Type | undefined`). The `| undefined` form should only appear where `?:` is not available (return types, standalone variables, function parameter types outside object literals).
 
 ## Schema Policy
 

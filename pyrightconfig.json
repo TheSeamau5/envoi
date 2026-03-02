@@ -9,7 +9,9 @@
     "packages/envoi/envoi"
   ],
   "extraPaths": [
-    "packages/envoi"
+    "packages/envoi",
+    "packages/code",
+    "packages/cli"
   ],
   "exclude": [
     ".venv",
@@ -20,7 +22,12 @@
   ],
   "executionEnvironments": [
     {
-      "root": "packages/envoi"
+      "root": ".",
+      "extraPaths": [
+        "packages/envoi",
+        "packages/code",
+        "packages/cli"
+      ]
     }
   ]
 }

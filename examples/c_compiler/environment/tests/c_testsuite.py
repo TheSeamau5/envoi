@@ -21,22 +21,7 @@ from .utils import TestResult, fixture_path, run_case, select_cases, to_result
 c_testsuite = envoi.suite("c_testsuite")
 
 
-@c_testsuite.test()
-async def run_c_testsuite_all(
-    n_tests: int = 0,
-    test_name: str | None = None,
-    offset: int = 0,
-) -> TestResult:
-    return await run_c_testsuite(
-        part=None,
-        n_tests=n_tests,
-        test_name=test_name,
-        offset=offset,
-    )
-
-
-@c_testsuite.test("part_{part}")
-async def run_c_testsuite(
+async def run_c_testsuite_impl(
     part: int | None = None,
     n_tests: int = 0,
     test_name: str | None = None,
@@ -77,3 +62,32 @@ async def run_c_testsuite(
 
     selected = select_cases(selected_cases, n_tests=n_tests, test_name=test_name, offset=offset)
     return to_result([await run_case(c) for c in selected])
+
+
+@c_testsuite.test()
+async def run_c_testsuite_all(
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_c_testsuite_impl(
+        part=None,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )
+
+
+@c_testsuite.test("part_{part}")
+async def run_c_testsuite(
+    part: int | None = None,
+    n_tests: int = 0,
+    test_name: str | None = None,
+    offset: int = 0,
+) -> TestResult:
+    return await run_c_testsuite_impl(
+        part=part,
+        n_tests=n_tests,
+        test_name=test_name,
+        offset=offset,
+    )

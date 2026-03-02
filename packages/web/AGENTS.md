@@ -1,0 +1,70 @@
+# AGENTS.md — Envoi Dashboard
+
+This file contains all rules, conventions, and architectural context for AI agents working on this codebase.
+
+## Stack
+
+- **Framework**: Next.js 16 (App Router)
+- **Package manager**: pnpm (always pnpm, never npm or yarn)
+- **Language**: TypeScript (strict)
+- **Styling**: Tailwind CSS v4 (CSS-first config in globals.css)
+- **Components**: shadcn/ui primitives, extended as needed
+- **Icons**: lucide-react (no emoji, no custom SVGs)
+- **Charts**: Custom SVG (no chart libraries)
+- **State**: React state + URL params (no external state management)
+- **Font**: JetBrains Mono only — everything is monospace
+
+## TypeScript Rules
+
+1. `undefined` over `null` — never use `null`. Convert at boundaries if needed.
+2. `useState<T>()` — not `useState<T | undefined>()`.
+3. `type` over `interface` — always. No `interface` keyword anywhere.
+4. `const` over `let` — only `let` when reassignment is genuinely needed. Never `var`.
+5. No single-letter variable names — `index` not `i`, `suite` not `s`. Exception: `x`/`y` in chart math.
+6. **Always use curly braces on new lines** — every `if`, `else`, `for`, `while` body must use `{ }` with the body on its own line. No single-line bodies. `if (x) { return y; }` is forbidden — write `if (x) {\n  return y;\n}`. This applies everywhere: conditions, loops, callbacks. Ternaries excluded.
+7. No classes — use functions, closures, plain objects.
+8. **No `!` (non-null assertion) or `as` type casts** — never use `!` to bypass strictness or `as` to force types. Handle types properly with `if` guards, early returns, or runtime validation (e.g. Zod). The only exception: `as` may be used on strings to narrow a `string` to a string literal type (e.g. `"model" as const`).
+9. **Prefer async APIs over sync** — always use async versions of APIs when available. Never use sync methods (e.g. `closeSync()`) when an async equivalent exists.
+
+## React & Next.js
+
+10. Server components first — every `page.tsx` is a server component. Only interactive parts use `"use client"`.
+11. shadcn/ui for UI primitives — buttons, tabs, selects, tables, tooltips.
+12. lucide-react for all icons.
+
+## Styling
+
+13. Padding over margins — use padding and gap. Only acceptable margin: `margin: 0 auto`.
+14. Design tokens in `src/lib/tokens.ts` for inline SVG styles.
+15. Tailwind theme tokens in `src/app/globals.css`.
+
+## Code Quality
+
+16. JSDoc comments on every exported function, component, and type.
+17. Zero TypeScript errors, zero warnings, zero ESLint errors.
+18. The build must be clean: `pnpm build` exits 0 with no warnings.
+
+## Architecture
+
+- `src/lib/` — shared utilities, types, constants, mock data generation
+- `src/components/` — all React components
+- `src/app/` — Next.js App Router pages
+- Mock data is generated server-side (pure, deterministic functions) and passed to client components as props
+- `Set<number>` is not serializable across server/client — use `number[]` for FileSnapshot.added
+
+## Design Language
+
+- Monospace everything (JetBrains Mono)
+- Orange accent (#f97316) for active/selected states
+- White + light gray backgrounds, no dark mode
+- ALL CAPS section headers (12px, letter-spacing 0.08em)
+- Information-dense, power-user focused
+- Bottom status bar with green dot
+
+## localStorage & UI Persistence
+
+19. Use `usePersistedState` from `src/lib/storage.ts` for all localStorage access — never call `localStorage` directly.
+20. All keys are auto-prefixed with `envoi:`. Use descriptive kebab-case key names (e.g., `"sidebar-collapsed"`, `"divider-position"`).
+21. The hook handles SSR, invalid JSON, schema changes, and quota errors. Always provide a sensible default value.
+22. Never crash on bad/missing/outdated localStorage data — always fall back to defaults.
+23. Validate stored values against current valid options before using them.

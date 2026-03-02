@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-envoi-bg: #ffffff;
+  --color-envoi-surface: #fafafa;
+  --color-envoi-border: #e5e5e5;
+  --color-envoi-border-light: #f0f0f0;
+  --color-envoi-text: #0a0a0a;
+  --color-envoi-text-muted: #737373;
+  --color-envoi-text-dim: #a3a3a3;
+  --color-envoi-accent: #f97316;
+  --color-envoi-accent-dark: #ea580c;
+  --color-envoi-accent-bg: rgba(249, 115, 22, 0.06);
+  --color-envoi-green: #10b981;
+  --color-envoi-green-dark: #059669;
+  --color-envoi-green-bg: rgba(16, 185, 129, 0.07);
+  --color-envoi-red: #ef4444;
+  --color-envoi-red-dark: #dc2626;
+  --color-envoi-red-bg: rgba(239, 68, 68, 0.06);
+  --color-envoi-gold: #a17a08;
+  --color-envoi-gold-bg: rgba(161, 122, 8, 0.07);
+  --color-envoi-green-bg-opaque: #f0fdf9;
+  --color-envoi-red-bg-opaque: #fef2f2;
+  --color-envoi-red-border-light: rgba(239, 68, 68, 0.2);
+
+  --color-step-reasoning: #f97316;
+  --color-step-read: #2563eb;
+  --color-step-write: #059669;
+  --color-step-tool: #a17a08;
+  --color-step-test: #059669;
+  --color-step-mcp: #c026a3;
+  --color-step-text: #6b7280;
+  --color-step-spawn: #7c3aed;
+  --color-step-message: #0891b2;
+
+  --color-syntax-keyword: #c41a16;
+  --color-syntax-type: #0b4f79;
+  --color-syntax-number: #1750eb;
+  --color-syntax-comment: #8e8e93;
+
+  --color-diff-added-bg: rgba(16, 185, 129, 0.08);
+  --color-diff-added-border: #10b981;
+  --color-diff-flash-bg: rgba(16, 185, 129, 0.25);
+
+  --color-suite-basics: #6d28d9;
+  --color-suite-basics-bg: rgba(109, 40, 217, 0.06);
+  --color-suite-wacct: #2563eb;
+  --color-suite-wacct-bg: rgba(37, 99, 235, 0.06);
+  --color-suite-c_testsuite: #059669;
+  --color-suite-c_testsuite-bg: rgba(5, 150, 105, 0.06);
+  --color-suite-torture: #dc2626;
+  --color-suite-torture-bg: rgba(220, 38, 38, 0.06);
+
+  --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo",
+    monospace;
+}
+
+body {
+  background: var(--color-envoi-bg);
+  color: var(--color-envoi-text);
+  font-family: var(--font-mono);
+}
+
+/* Scrollbar styling for information-dense panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-envoi-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-envoi-text-dim);
+}
