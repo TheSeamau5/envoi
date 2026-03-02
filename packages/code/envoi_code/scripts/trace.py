@@ -55,6 +55,28 @@ def resolve_positive_int_env(name: str, default: int) -> int:
     return parsed
 
 
+DEFAULT_TIMEOUT_SECONDS = 7200
+
+
+def resolve_timeout(args: argparse.Namespace) -> None:
+    """Collapse --timeout-{minutes,hours,days} into timeout_seconds."""
+    sources = [
+        ("timeout_seconds", args.timeout_seconds, 1),
+        ("timeout_minutes", getattr(args, "timeout_minutes", None), 60),
+        ("timeout_hours", getattr(args, "timeout_hours", None), 3600),
+        ("timeout_days", getattr(args, "timeout_days", None), 86400),
+    ]
+    provided = [(name, value, mult) for name, value, mult in sources if value is not None]
+    if len(provided) > 1:
+        names = [name.replace("_", "-") for name, _, _ in provided]
+        raise SystemExit(f"Only one timeout flag allowed, got: --{', --'.join(names)}")
+    if len(provided) == 1:
+        _, value, mult = provided[0]
+        args.timeout_seconds = int(value * mult)
+    else:
+        args.timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+
 def normalize_e2b_timeout_for_plan(args: argparse.Namespace) -> None:
     if getattr(args, "sandbox", None) != "e2b":
         return
@@ -332,8 +354,26 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--timeout-seconds",
         type=int,
-        default=7200,
-        help="Total run timeout in seconds (default: 7200).",
+        default=None,
+        help="Total run timeout in seconds.",
+    )
+    parser.add_argument(
+        "--timeout-minutes",
+        type=float,
+        default=None,
+        help="Total run timeout in minutes.",
+    )
+    parser.add_argument(
+        "--timeout-hours",
+        type=float,
+        default=None,
+        help="Total run timeout in hours.",
+    )
+    parser.add_argument(
+        "--timeout-days",
+        type=float,
+        default=None,
+        help="Total run timeout in days.",
     )
     parser.add_argument(
         "--non-preemptible",
@@ -385,6 +425,7 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
 
 def run_command(args: argparse.Namespace) -> None:
     """Execute a trajectory run."""
+    resolve_timeout(args)
     normalize_e2b_timeout_for_plan(args)
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
     bucket = os.environ.get("AWS_S3_BUCKET")
