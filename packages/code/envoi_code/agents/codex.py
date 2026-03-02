@@ -1714,6 +1714,7 @@ try:
     from envoi_code.agents.setup import run_workspace_init
     from envoi_code.sandbox.base import Sandbox
     from envoi_code.utils.helpers import (
+        compute_turn_timeout_seconds,
         decode_b64_to_text,
         environment_upload_items,
         load_local_codex_auth_json_b64,
@@ -1984,7 +1985,11 @@ echo "[setup] codex install complete"
             remaining_run_seconds: float,
             message_timeout_seconds: int,
         ) -> int:
-            return max(1, int(remaining_run_seconds))
+            return compute_turn_timeout_seconds(
+                remaining_parts=remaining_parts,
+                remaining_run_seconds=remaining_run_seconds,
+                message_timeout_seconds=message_timeout_seconds,
+            )
 
         async def run_client(
             self,
