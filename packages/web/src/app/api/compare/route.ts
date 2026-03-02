@@ -18,6 +18,13 @@ export async function GET(request: NextRequest) {
       ? idsParam.split(",").filter(Boolean)
       : undefined;
 
+    if (!ids || ids.length === 0) {
+      return NextResponse.json(
+        { error: "ids parameter is required" },
+        { status: 400 },
+      );
+    }
+
     const trajectories = await getCompareTrajectories({
       ids,
       environment,

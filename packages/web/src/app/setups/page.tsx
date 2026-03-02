@@ -1,15 +1,39 @@
 /**
  * Setups page — server component.
- * Fetches all trajectories and renders the Setup Compare view.
- * This is a standalone page separate from the trace comparison flow.
+ * Fetches all active trajectories with full commit data and renders
+ * the Setup Compare view. Data is loaded server-side so no client
+ * fetch is needed — navigating back to /setups is instant.
+ *
+ * Full trajectories are stripped to only the fields SetupCompare uses
+ * (commits with minutesElapsed/totalPassed/suiteState) so the RSC
+ * payload stays small (~50 KB instead of ~40 MB).
  */
 
-import { getAllTrajectories } from "@/lib/server/data";
-import { SetupsClient } from "@/components/setups/setups-client";
+import type { Trajectory } from "@/lib/types";
+import { getAllTrajectories, getTrajectoryById } from "@/lib/server/data";
+import { SetupCompare } from "@/components/compare/setup-compare";
+
+/** Strip a trajectory to only the fields SetupCompare needs */
+function slimTrajectory(trace: Trajectory): Trajectory {
+  return {
+    ...trace,
+    commits: trace.commits.map((commit) => ({
+      ...commit,
+      steps: [],
+      changedFiles: [],
+      codeSnapshot: {},
+    })),
+  };
+}
 
 export default async function SetupsPage() {
   const allTraces = await getAllTrajectories();
   const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
 
-  return <SetupsClient allTraces={activeTraces} />;
+  // Load full trajectories in parallel (each is individually cached)
+  const fullTraces = (
+    await Promise.all(activeTraces.map((trace) => getTrajectoryById(trace.id)))
+  ).filter((trace) => trace !== undefined);
+
+  return <SetupCompare allTraces={fullTraces.map(slimTrajectory)} />;
 }
