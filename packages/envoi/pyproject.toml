@@ -1,9 +1,10 @@
 [project]
-name = "envoi"
+name = "envoi-ai"
 version = "0.1.0"
 description = "API-backed evaluation environments for AI agents"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+readme = {text = "API-backed evaluation environments for AI agents. See https://github.com/TheSeamau5/envoi for full documentation.", content-type = "text/plain"}
 dependencies = [
     "fastapi>=0.128.5",
     "httpx>=0.28.1",
@@ -14,6 +15,10 @@ dependencies = [
 
 [project.scripts]
 envoi-runtime = "envoi.runtime:main"
+
+[project.urls]
+Homepage = "https://github.com/TheSeamau5/envoi"
+Repository = "https://github.com/TheSeamau5/envoi"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

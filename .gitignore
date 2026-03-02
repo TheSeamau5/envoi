@@ -15,3 +15,6 @@ prompt_logs
 output/
 *.parquet
 node_modules/
+.next/
+.cache/
+*.tsbuildinfo

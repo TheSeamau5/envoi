@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-    "envoi",
+    "envoi-ai",
     "envoi-code",
     "envoi-cli",
 ]
@@ -13,7 +13,7 @@ dependencies = [
 members = ["packages/envoi", "packages/code", "packages/cli"]
 
 [tool.uv.sources]
-envoi = { workspace = true }
+envoi-ai = { workspace = true }
 envoi-code = { workspace = true }
 envoi-cli = { workspace = true }
 

@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "Code agent evaluation framework with trace capture"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+readme = {text = "Code agent evaluation framework with trace capture. See https://github.com/TheSeamau5/envoi for full documentation.", content-type = "text/plain"}
 dependencies = [
-    "envoi",
+    "envoi-ai",
     "fastapi>=0.128.5",
     "httpx>=0.27.0",
     "aiohttp>=3.10.0",
@@ -37,8 +38,12 @@ dev = [
     "mypy>=1.10.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/TheSeamau5/envoi"
+Repository = "https://github.com/TheSeamau5/envoi"
+
 [tool.uv.sources]
-envoi = { workspace = true }
+envoi-ai = { workspace = true }
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
