@@ -288,7 +288,8 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
         CAST(json_extract(event, '$.failed') AS INTEGER) AS failed,
         CAST(json_extract(event, '$.total') AS INTEGER) AS total,
         json_extract_string(event, '$.target_commit') AS target_commit,
-        json_extract(event, '$.suite_results') AS suite_results
+        json_extract(event, '$.suite_results') AS suite_results,
+        json_extract_string(event, '$.finished_at') AS finished_at
       FROM (
         SELECT *, unnest(from_json_strict(eval_events_delta, '["json"]')) AS event
         FROM read_parquet('${glob}')

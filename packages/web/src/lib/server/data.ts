@@ -240,13 +240,19 @@ async function getAllTrajectoriesFromGlob(opts?: {
         MAX(passed) AS best_passed,
         MAX(failed) AS best_failed,
         MAX(total) AS best_total,
-        COUNT(*) AS eval_count
+        COUNT(*) AS eval_count,
+        MAX(finished_at) AS last_eval_finished
       FROM evaluations
       WHERE status = 'completed'
       GROUP BY trajectory_id
     )
     SELECT
-      s.*,
+      s.* EXCLUDE (ended_at),
+      CASE
+        WHEN b.last_eval_finished IS NOT NULL AND b.last_eval_finished > s.ended_at
+        THEN b.last_eval_finished
+        ELSE s.ended_at
+      END AS ended_at,
       b.best_passed,
       b.best_failed,
       b.best_total,

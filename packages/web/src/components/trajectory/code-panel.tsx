@@ -18,8 +18,13 @@ type CodePanelProps = {
 export function CodePanel({ commit }: CodePanelProps) {
   const [selectedFile, setSelectedFile] = useState<string>();
 
-  /** Auto-select first changed file when commit changes */
+  /** Auto-select file when commit changes.
+   *  If the currently viewed file exists in the new commit, stay on it.
+   *  Otherwise fall back to first changed file, then first snapshot file. */
   useEffect(() => {
+    if (selectedFile && commit.codeSnapshot[selectedFile]) {
+      return;
+    }
     const firstChanged = commit.changedFiles[0];
     if (firstChanged) {
       setSelectedFile(firstChanged.path);
@@ -28,6 +33,7 @@ export function CodePanel({ commit }: CodePanelProps) {
       const allFiles = Object.keys(commit.codeSnapshot);
       setSelectedFile(allFiles[0]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commit.index, commit.changedFiles, commit.codeSnapshot]);
 
   const fileSnapshot = selectedFile

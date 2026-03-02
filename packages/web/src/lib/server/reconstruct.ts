@@ -104,6 +104,8 @@ type EvalRecord = {
   total: number;
   suiteResults: Record<string, { passed: number; total: number }>;
   tests: unknown[];
+  /** ISO timestamp when the evaluation finished (from eval event finished_at) */
+  finishedAt?: string;
 };
 
 function buildEvaluationsFromRows(
@@ -185,6 +187,9 @@ function buildEvaluationsFromRows(
       }
       if (Array.isArray(event.tests)) {
         rec.tests = event.tests;
+      }
+      if (typeof event.finished_at === "string" && event.finished_at) {
+        rec.finishedAt = event.finished_at;
       }
     }
   }
@@ -1051,11 +1056,17 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       const suiteDeltas = computeSuiteDeltas(prevSuiteState, suiteState);
       const brokenTests = buildBrokenTests(prevSuiteState, suiteState);
 
-      // Compute minutes elapsed from trajectory start
+      // Compute minutes elapsed from trajectory start.
+      // Prefer eval finishedAt (when the score became known) over row timestamp.
       const startTime = new Date(first.started_at ?? "").getTime();
-      const partTime = new Date(
-        commitRows[commitRows.length - 1]?.timestamp ?? "",
-      ).getTime();
+      const evalFinishedTime = evalRec.finishedAt
+        ? new Date(evalRec.finishedAt).getTime()
+        : NaN;
+      const partTime = !isNaN(evalFinishedTime)
+        ? evalFinishedTime
+        : new Date(
+            commitRows[commitRows.length - 1]?.timestamp ?? "",
+          ).getTime();
       const commitIndex = commits.length;
       const minutesElapsed =
         isNaN(startTime) || isNaN(partTime)
