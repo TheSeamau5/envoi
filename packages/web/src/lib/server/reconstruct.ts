@@ -539,6 +539,44 @@ export function parseSuites(suitesJson: string | undefined): Suite[] {
   return [...aggregated.entries()].map(([name, total]) => ({ name, total }));
 }
 
+/**
+ * Merge suite definitions from parquet with the union of all eval suite_results.
+ * Older trajectories stored only the last eval's suite_results as the "suites"
+ * field, so when a suite timed out in that eval it went missing. By taking the
+ * union across all evals we recover the full environment definition.
+ */
+function mergeSuitesFromEvals(
+  parquetSuites: Suite[],
+  evals: { suiteResults: Record<string, { passed: number; total: number }> }[],
+): Suite[] {
+  // Start with a map of suite totals from the parquet definition
+  const totals = new Map<string, number>();
+  for (const suite of parquetSuites) {
+    totals.set(suite.name, suite.total);
+  }
+
+  // Merge in suite data from every eval's suite_results
+  for (const evalRec of evals) {
+    const aggregated = new Map<string, number>();
+    for (const [key, result] of Object.entries(evalRec.suiteResults)) {
+      const suiteName = extractSuiteName(key);
+      aggregated.set(suiteName, (aggregated.get(suiteName) ?? 0) + result.total);
+    }
+    for (const [name, total] of aggregated) {
+      const existing = totals.get(name) ?? 0;
+      if (total > existing) {
+        totals.set(name, total);
+      }
+    }
+  }
+
+  if (totals.size === 0) {
+    return parquetSuites;
+  }
+
+  return [...totals.entries()].map(([name, total]) => ({ name, total }));
+}
+
 // ---------------------------------------------------------------------------
 // Parse task_params
 // ---------------------------------------------------------------------------
@@ -829,8 +867,6 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const sortedRows = [...rows].sort((rowA, rowB) => rowA.part - rowB.part);
 
   // Parse trajectory-level fields
-  const suites = parseSuites(first.suites);
-  const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
   const params = parseTaskParams(first.task_params);
 
   // Build evaluations
@@ -838,6 +874,13 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const completedEvals = [...evalMap.values()]
     .filter((rec) => rec.status === "completed" && rec.total > 0)
     .sort((recA, recB) => recA.part - recB.part);
+
+  // Compute suites: merge the parquet-level definition with the union of all
+  // eval suite_results. Older trajectories may have partial suites in the
+  // parquet (only the last eval's results). Merging across all evals ensures
+  // we recover the full environment definition.
+  const suites = mergeSuitesFromEvals(parseSuites(first.suites), completedEvals);
+  const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
 
   // Build commits from evaluation boundaries
   const commits: Commit[] = [];
@@ -1147,9 +1190,15 @@ export function summaryRowToTrajectory(
   evalCount?: number,
 ): Trajectory {
   const suites = parseSuites(row.suites);
-  const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
-  const params = parseTaskParams(row.task_params);
   const passed = finalScore?.passed ?? 0;
+  // Safeguard: totalTests must be at least as large as the passed count.
+  // Old trajectories may have partial suite data from incomplete evals.
+  const totalTests = Math.max(
+    suites.length > 0 ? computeTotalTests(suites) : 0,
+    finalScore?.total ?? 0,
+    passed,
+  );
+  const params = parseTaskParams(row.task_params);
 
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
@@ -1251,10 +1300,17 @@ export function summaryTableRowToTrajectory(
   row: SummaryTableRow,
 ): Trajectory {
   const suites = parseSuites(row.suites);
-  const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
   const params = parseTaskParams(row.task_params);
   const passed = row.final_passed ?? 0;
   const failed = row.final_failed ?? 0;
+  // Safeguard: totalTests must be at least as large as passed count.
+  // Old trajectories may have partial suite data from incomplete evals.
+  const totalTests = Math.max(
+    suites.length > 0 ? computeTotalTests(suites) : 0,
+    row.final_total ?? 0,
+    passed,
+  );
+
 
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
@@ -1394,6 +1450,18 @@ export function buildCompareTrajectories(
     const evals = evalsByTrajectory.get(tableRow.trajectory_id) ?? [];
     evals.sort((evalA, evalB) => evalA.trigger_part - evalB.trigger_part);
 
+    // Merge suite_results from all evals to recover full suite definitions
+    const evalRecordsForMerge = evals
+      .filter((evalRow) => evalRow.suite_results)
+      .map((evalRow) => {
+        const parsed = parseJson(evalRow.suite_results);
+        return {
+          suiteResults: isRecord(parsed) ? narrowSuiteResults(parsed) : {},
+        };
+      });
+    const mergedSuites = mergeSuitesFromEvals(suites, evalRecordsForMerge);
+    const mergedTotalTests = mergedSuites.length > 0 ? computeTotalTests(mergedSuites) : totalTests;
+
     const commits: Commit[] = [];
     let prevPassed = 0;
     let prevTableSuiteState: SuiteState = {};
@@ -1430,7 +1498,7 @@ export function buildCompareTrajectories(
         steps: [],
         changedFiles: [],
         codeSnapshot: {},
-        phase: totalTests > 0 ? evalRow.passed / totalTests : 0,
+        phase: mergedTotalTests > 0 ? evalRow.passed / mergedTotalTests : 0,
         tokensUsed: 0,
         evalId: evalRow.eval_id,
         targetCommit: evalRow.target_commit,
@@ -1459,7 +1527,7 @@ export function buildCompareTrajectories(
           newlyFixed: 0,
           brokenTests: [],
           totalPassed: 0,
-          totalFailed: totalTests,
+          totalFailed: mergedTotalTests,
         },
         steps: [],
         changedFiles: [],
@@ -1474,14 +1542,14 @@ export function buildCompareTrajectories(
       model,
       environment: tableRow.environment ?? "",
       commits,
-      totalTests,
+      totalTests: mergedTotalTests,
       startedAt: tableRow.started_at ?? "",
       duration: "",
       totalTokens: toNumber(tableRow.total_tokens),
       cost: 0,
       params,
       finalPassed: tableRow.final_passed ?? 0,
-      suites: suites.length > 0 ? suites : undefined,
+      suites: mergedSuites.length > 0 ? mergedSuites : undefined,
       agentHarness: agent || undefined,
       sessionEndReason: tableRow.session_end_reason ?? undefined,
     });
