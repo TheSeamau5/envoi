@@ -14,7 +14,6 @@ import {
   codeSnapshotsUri,
   query,
   hasSummaryTables,
-  validateTrajectoryId,
 } from "./db";
 import {
   reconstructTrajectory,
@@ -34,7 +33,6 @@ import type {
   FileSnapshot,
   DifficultyCell,
   PortfolioRow,
-  WasteEntry,
   SchemaColumn,
 } from "@/lib/types";
 
@@ -207,7 +205,7 @@ async function getAllTrajectoriesFromGlob(opts?: {
   /**
    * Single query that computes trajectory summaries AND final evaluation scores
    * via a LEFT JOIN on the evaluations view. No N+1 queries.
-   * Also computes duration from MIN/MAX started_at timestamps and eval count.
+   * Also computes duration from started_at and last timestamp, plus eval count.
    */
   let sql = `
     WITH summary AS (
@@ -217,7 +215,7 @@ async function getAllTrajectoriesFromGlob(opts?: {
         environment,
         MIN(agent) AS agent,
         MIN(started_at) AS started_at,
-        MAX(started_at) AS ended_at,
+        MAX(timestamp) AS ended_at,
         MAX(part) + 1 AS total_parts,
         MAX(turn) AS total_turns,
         SUM(content_token_estimate) AS total_tokens,
@@ -977,113 +975,3 @@ async function getMockPortfolioData(): Promise<PortfolioRow[]> {
   return buildPortfolioRows(rows);
 }
 
-// ---------------------------------------------------------------------------
-// Waste analysis
-// ---------------------------------------------------------------------------
-
-/**
- * Get waste analysis for a trajectory — identifies redundant operations.
- */
-export async function getWasteAnalysis(trajectoryId: string): Promise<WasteEntry[]> {
-  if (!isS3Configured()) {
-    return getMockWasteData();
-  }
-
-  try {
-    const validId = validateTrajectoryId(trajectoryId);
-    const uri = await traceUri(validId);
-
-    /** Redundant reads — same file read more than once between writes */
-    const redundantReads = await query(`
-      WITH file_ops AS (
-        SELECT
-          part,
-          tool_name,
-          json_extract_string(tool_input, '$.file_path') AS file_path,
-          COALESCE(content_token_estimate, 0) AS tokens
-        FROM read_parquet('${escapeString(uri)}')
-        WHERE tool_name IN ('Read', 'Write', 'Edit', 'file_read', 'file_write')
-          AND tool_input IS NOT NULL
-        ORDER BY part
-      ),
-      reads AS (
-        SELECT part, file_path, tokens
-        FROM file_ops
-        WHERE tool_name IN ('Read', 'file_read')
-      ),
-      writes AS (
-        SELECT part, file_path
-        FROM file_ops
-        WHERE tool_name IN ('Write', 'Edit', 'file_write')
-      )
-      SELECT
-        COUNT(*) AS count,
-        COALESCE(SUM(r.tokens), 0) AS tokens_cost
-      FROM reads r
-      WHERE EXISTS (
-        SELECT 1 FROM reads r2
-        WHERE r2.file_path = r.file_path
-          AND r2.part < r.part
-          AND NOT EXISTS (
-            SELECT 1 FROM writes w
-            WHERE w.file_path = r.file_path
-              AND w.part > r2.part
-              AND w.part < r.part
-          )
-      )
-    `);
-
-    /** Repeated errors — same tool producing errors multiple times */
-    const repeatedErrors = await query(`
-      SELECT
-        COUNT(*) - COUNT(DISTINCT tool_name || COALESCE(tool_error, '')) AS count,
-        COALESCE(SUM(content_token_estimate), 0) AS tokens_cost
-      FROM read_parquet('${escapeString(uri)}')
-      WHERE tool_status = 'error'
-        AND tool_error IS NOT NULL
-    `);
-
-    /** Total tokens for the trajectory */
-    const totalRow = await query(`
-      SELECT COALESCE(SUM(content_token_estimate), 0) AS total_tokens
-      FROM read_parquet('${escapeString(uri)}')
-    `);
-    const totalTokens = Number(totalRow[0]?.total_tokens ?? 1);
-
-    const entries: WasteEntry[] = [];
-    const redundantCount = Number(redundantReads[0]?.count ?? 0);
-    const redundantCost = Number(redundantReads[0]?.tokens_cost ?? 0);
-    if (redundantCount > 0) {
-      entries.push({
-        category: "redundant_read",
-        count: redundantCount,
-        tokensCost: redundantCost,
-        percentage: totalTokens > 0 ? (redundantCost / totalTokens) * 100 : 0,
-      });
-    }
-
-    const errorCount = Number(repeatedErrors[0]?.count ?? 0);
-    const errorCost = Number(repeatedErrors[0]?.tokens_cost ?? 0);
-    if (errorCount > 0) {
-      entries.push({
-        category: "repeated_error",
-        count: errorCount,
-        tokensCost: errorCost,
-        percentage: totalTokens > 0 ? (errorCost / totalTokens) * 100 : 0,
-      });
-    }
-
-    return entries;
-  } catch (error) {
-    console.error(`[data] Failed to get waste analysis for ${trajectoryId}:`, error);
-    return [];
-  }
-}
-
-/** Mock waste data */
-function getMockWasteData(): WasteEntry[] {
-  return [
-    { category: "redundant_read", count: 12, tokensCost: 4800, percentage: 8.2 },
-    { category: "repeated_error", count: 5, tokensCost: 2100, percentage: 3.6 },
-  ];
-}

@@ -10,7 +10,7 @@
 
 "use client";
 
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import type { Trajectory } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
-import { formatPercent, formatDate } from "@/lib/utils";
+import { formatPercent, formatDate, needsYear } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -54,6 +54,7 @@ type CompareShellProps = {
 export function CompareShell({ children }: CompareShellProps) {
   const pathname = usePathname();
   const {
+    allTraces,
     selectedTraces,
     selectedIds,
     sortBy,
@@ -75,6 +76,7 @@ export function CompareShell({ children }: CompareShellProps) {
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const focusedRowRef = useRef<HTMLDivElement>(null);
+  const showYear = useMemo(() => needsYear(allTraces.map((trace) => trace.startedAt)), [allTraces]);
 
   /** Scroll focused row into view */
   useEffect(() => {
@@ -236,6 +238,7 @@ export function CompareShell({ children }: CompareShellProps) {
                       toggleTrace={toggleTrace}
                       setFocusedIndex={setFocusedIndex}
                       computeTraceTotal={computeTraceTotal}
+                      showYear={showYear}
                     />
                   );
                 })}
@@ -280,6 +283,7 @@ function TraceRow({
   toggleTrace,
   setFocusedIndex,
   computeTraceTotal,
+  showYear,
 }: {
   trace: Trajectory;
   flatIndex: number;
@@ -289,6 +293,7 @@ function TraceRow({
   toggleTrace: (id: string) => void;
   setFocusedIndex: (index: number) => void;
   computeTraceTotal: (trace: Trajectory) => number;
+  showYear: boolean;
 }) {
   const colorIdx = getColorIndex(trace.id);
   const isSelected = colorIdx >= 0;
@@ -338,7 +343,7 @@ function TraceRow({
           {trace.model}
         </span>
         <span className="text-[13px] text-envoi-text-dim">
-          {formatDate(trace.startedAt)}
+          {formatDate(trace.startedAt, showYear)}
         </span>
         {/* Score bar */}
         <div className="mt-px h-0.75 w-full rounded-full bg-envoi-border-light">

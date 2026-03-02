@@ -1,15 +1,18 @@
 /**
  * Single commit row in the timeline commit list.
  * Client component — handles click and scroll-into-view.
+ *
+ * Shows: hash, turn, test delta (+passed / -broken), LOC delta (+added / -removed),
+ * mini suite bars, milestone/regression badges.
  */
 
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import type { Commit, Suite } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
-import { Star, TrendingDown } from "lucide-react";
+import { Star } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -49,6 +52,18 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       ? effectiveSuites
       : effectiveSuites.filter((suite) => suite.name === activeSuite);
 
+  const { totalAdded, totalDeleted } = useMemo(() => {
+    let added = 0;
+    let deleted = 0;
+    for (const file of commit.changedFiles) {
+      added += file.additions;
+      deleted += file.deletions;
+    }
+    return { totalAdded: added, totalDeleted: deleted };
+  }, [commit.changedFiles]);
+
+  const { newlyFixed, newlyBroken } = commit.feedback;
+
   return (
     <div
       ref={rowRef}
@@ -69,23 +84,51 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         </span>
       </div>
 
-      {/* Delta + total */}
-      <div className="flex min-w-[60px] flex-col items-end gap-[2px]">
-        <span
-          className="text-[13px] font-semibold"
-          style={{
-            color:
-              commit.delta > 0
-                ? T.greenDark
-                : commit.delta < 0
-                  ? T.redDark
-                  : T.textMuted,
-          }}
-        >
-          {commit.delta > 0 ? `+${commit.delta}` : commit.delta === 0 ? "±0" : `${commit.delta}`}
-        </span>
+      {/* Test delta: +passed / -broken */}
+      <div className="flex min-w-[70px] flex-col items-end gap-[2px]">
+        <div className="flex items-center gap-[6px]">
+          {newlyFixed > 0 && (
+            <span className="text-[13px] font-semibold" style={{ color: T.greenDark }}>
+              +{newlyFixed}
+            </span>
+          )}
+          {newlyBroken > 0 && (
+            <span className="text-[13px] font-semibold" style={{ color: T.redDark }}>
+              -{newlyBroken}
+            </span>
+          )}
+          {newlyFixed === 0 && newlyBroken === 0 && (
+            <span className="text-[13px] font-semibold text-envoi-text-muted">
+              ±0
+            </span>
+          )}
+        </div>
         <span className="text-[13px] text-envoi-text-dim">
           {commit.totalPassed} total
+        </span>
+      </div>
+
+      {/* LOC delta: +added / -removed */}
+      <div className="flex min-w-[70px] flex-col items-end gap-[2px]">
+        <div className="flex items-center gap-[6px]">
+          {totalAdded > 0 && (
+            <span className="text-[13px] font-medium" style={{ color: T.greenDark }}>
+              +{totalAdded}
+            </span>
+          )}
+          {totalDeleted > 0 && (
+            <span className="text-[13px] font-medium" style={{ color: T.redDark }}>
+              -{totalDeleted}
+            </span>
+          )}
+          {totalAdded === 0 && totalDeleted === 0 && (
+            <span className="text-[13px] font-medium text-envoi-text-muted">
+              ±0
+            </span>
+          )}
+        </div>
+        <span className="text-[13px] text-envoi-text-dim">
+          loc
         </span>
       </div>
 
@@ -121,17 +164,8 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
           })}
       </div>
 
-      {/* Feedback badges */}
+      {/* Milestone badge */}
       <div className="flex items-center gap-[6px]">
-        {commit.feedback.newlyBroken > 0 && (
-          <span
-            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
-            style={{ color: T.redDark, background: T.redBg }}
-          >
-            <TrendingDown size={9} />
-            {commit.feedback.newlyBroken}
-          </span>
-        )}
         {commit.isMilestone && (
           <span
             className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
@@ -141,7 +175,6 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
           </span>
         )}
       </div>
-
     </div>
   );
 }

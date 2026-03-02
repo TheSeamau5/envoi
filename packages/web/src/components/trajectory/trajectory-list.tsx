@@ -12,7 +12,7 @@ import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import type { Trajectory } from "@/lib/types";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
-import { formatPercent, formatDate } from "@/lib/utils";
+import { formatPercent, formatDate, needsYear } from "@/lib/utils";
 
 type TrajectoryListProps = {
   trajectories: Trajectory[];
@@ -93,6 +93,7 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
 
   const currentTraces = activeTab === "active" ? activeTraces : failedTraces;
   const grouped = useMemo(() => groupByEnvironmentThenModel(currentTraces), [currentTraces]);
+  const showYear = useMemo(() => needsYear(currentTraces.map((trace) => trace.startedAt)), [currentTraces]);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -201,7 +202,7 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
 
                         {/* Date started */}
                         <span className={`${COL.started} ${CELL_BORDER} whitespace-nowrap font-mono text-[12px] text-envoi-text-muted`}>
-                          {formatDate(trace.startedAt)}
+                          {formatDate(trace.startedAt, showYear)}
                         </span>
 
                         {/* Duration */}

@@ -151,9 +151,6 @@ export type MilestoneDef = {
   group: string;
 };
 
-/** Trajectory detail right panel tab */
-export type DetailRightTab = "steps" | "code" | "tests" | "waste";
-
 /** Row in the difficulty heatmap — one per (environment, test_category, model) */
 export type DifficultyCell = {
   environment: string;
@@ -168,14 +165,6 @@ export type PortfolioRow = {
   model: string;
   environments: Record<string, { passRate: number; rank: number }>;
   avgRank: number;
-};
-
-/** Waste category breakdown for a single trajectory */
-export type WasteEntry = {
-  category: string;
-  count: number;
-  tokensCost: number;
-  percentage: number;
 };
 
 /** Schema column info for the SQL console */

@@ -103,16 +103,45 @@ export function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
-/** Format an ISO date string as YY/MM/DD HH:MM:SS */
-export function formatDate(isoString: string): string {
+/**
+ * Format an ISO date string as MM/DD HH:MM:SS (compact) or YYYY/MM/DD HH:MM:SS.
+ * Shows year only when `showYear` is true.
+ */
+export function formatDate(isoString: string, showYear = false): string {
   const date = new Date(isoString);
-  const yy = String(date.getFullYear()).slice(2);
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
   const hh = String(date.getHours()).padStart(2, "0");
   const min = String(date.getMinutes()).padStart(2, "0");
   const ss = String(date.getSeconds()).padStart(2, "0");
-  return `${yy}/${mm}/${dd} ${hh}:${min}:${ss}`;
+  const datePart = showYear
+    ? `${date.getFullYear()}/${mm}/${dd}`
+    : `${mm}/${dd}`;
+  return `${datePart} ${hh}:${min}:${ss}`;
+}
+
+/**
+ * Determine whether dates in a list of ISO strings need year display.
+ * Returns true if dates span multiple years or any year differs from the current year.
+ */
+export function needsYear(dates: string[]): boolean {
+  const currentYear = new Date().getFullYear();
+  let firstYear: number | undefined;
+  for (const isoString of dates) {
+    const year = new Date(isoString).getFullYear();
+    if (isNaN(year)) {
+      continue;
+    }
+    if (year !== currentYear) {
+      return true;
+    }
+    if (firstYear === undefined) {
+      firstYear = year;
+    } else if (year !== firstYear) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Format an ISO date string as a short date + time (e.g., "Jan 15, 10:00") */
