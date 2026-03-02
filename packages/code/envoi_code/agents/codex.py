@@ -1883,6 +1883,9 @@ echo "[setup] codex install complete"
 
         auth_json: str | None = None
 
+    from envoi_code.agents import agent
+
+    @agent("codex")
     class CodexAgent:
         """Agent implementation for Codex."""
 

@@ -1057,16 +1057,13 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       const brokenTests = buildBrokenTests(prevSuiteState, suiteState);
 
       // Compute minutes elapsed from trajectory start.
-      // Prefer eval finishedAt (when the score became known) over row timestamp.
+      // Use the row timestamp (when the agent committed code), not the eval
+      // finishedAt (when CI completed) — evals run asynchronously and their
+      // completion times are not monotonic relative to commit order.
       const startTime = new Date(first.started_at ?? "").getTime();
-      const evalFinishedTime = evalRec.finishedAt
-        ? new Date(evalRec.finishedAt).getTime()
-        : NaN;
-      const partTime = !isNaN(evalFinishedTime)
-        ? evalFinishedTime
-        : new Date(
-            commitRows[commitRows.length - 1]?.timestamp ?? "",
-          ).getTime();
+      const partTime = new Date(
+        commitRows[commitRows.length - 1]?.timestamp ?? "",
+      ).getTime();
       const commitIndex = commits.length;
       const minutesElapsed =
         isNaN(startTime) || isNaN(partTime)

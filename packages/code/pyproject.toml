@@ -17,6 +17,7 @@ dependencies = [
     "modal>=0.60.0",
     "python-dotenv>=1.0.0",
     "opencode-ai>=0.1.0a36",
+    "claude-agent-sdk>=0.1.0",
     "matplotlib>=3.10.8",
     "pyarrow>=17.0.0",
     "uvicorn>=0.40.0",

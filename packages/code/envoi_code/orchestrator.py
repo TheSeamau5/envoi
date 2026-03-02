@@ -49,9 +49,8 @@ from envoi.logging import (
 )
 from pydantic import BaseModel
 
+from envoi_code.agents import get_agent_backends
 from envoi_code.agents.base import Agent, AgentFatalError, AgentSetupContext
-from envoi_code.agents.codex import CodexAgent
-from envoi_code.agents.opencode import OpenCodeAgent
 from envoi_code.models import (
     AgentTrace,
     EnvoiCall,
@@ -151,10 +150,7 @@ EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
 
 print = tprint
 
-AGENT_BACKENDS: dict[str, type] = {
-    "opencode": OpenCodeAgent,
-    "codex": CodexAgent,
-}
+AGENT_BACKENDS = get_agent_backends()
 
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
@@ -2171,7 +2167,7 @@ def start_logs_runtime(
             last_logs_flush_count = len(snapshot)
             last_logs_flush_mono = time.monotonic()
 
-    def capture(record: dict[str, Any]) -> None:
+    def capture(record: Any) -> None:
         if not isinstance(record, dict):
             return
         normalized = dict(record)

@@ -41,7 +41,7 @@ class E2BSandbox:
     """Sandbox implementation backed by E2B.
 
     Requires ``e2b-code-interpreter`` (install via
-    ``pip install e2b-code-interpreter``).
+    ``uv add e2b-code-interpreter``).
     The sandbox image must be pre-built as an E2B template — see
     ``sandbox/e2b/e2b.Dockerfile``.
     """
@@ -161,7 +161,7 @@ class E2BSandbox:
             raise RuntimeError(
                 "E2B backend requires optional dependency "
                 "e2b-code-interpreter. "
-                "Install with: pip install envoi-code[e2b]"
+                "Install with: uv add envoi-code[e2b]"
             ) from error
         async_sandbox = getattr(
             e2b_module, "AsyncSandbox", None,

@@ -24,6 +24,15 @@ if (fs.existsSync(rootEnvPath)) {
 const nextConfig: NextConfig = {
   devIndicators: false,
   serverExternalPackages: ["@duckdb/node-api", "@duckdb/node-bindings"],
+  async redirects() {
+    return [
+      {
+        source: "/compare",
+        destination: "/compare/curves",
+        permanent: false,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

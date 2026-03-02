@@ -86,10 +86,13 @@ export function useLiveTrajectory(initial: Trajectory): {
     }
   }, [initial.id]);
 
-  /** Immediate fresh fetch on mount — server data may be stale from cache */
+  /** Immediate fresh fetch on mount — but only if possibly live.
+   *  Finished trajectories already have their final data from the server. */
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (isPossiblyLive(initial)) {
+      refresh();
+    }
+  }, [initial, refresh]);
 
   /** Poll every 30s while live */
   useEffect(() => {

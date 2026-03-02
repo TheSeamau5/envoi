@@ -313,7 +313,7 @@ def load_trace_session_end(
 def add_run_args(parser: argparse.ArgumentParser) -> None:
     """Add run-mode arguments to a parser."""
     parser.set_defaults(non_preemptible=True)
-    parser.add_argument("--agent", choices=["codex", "opencode"], default="codex")
+    parser.add_argument("--agent", choices=["codex", "opencode", "claude_code"], default="codex")
     parser.add_argument("--model", default=None)
     parser.add_argument(
         "--max-parts",

@@ -15,8 +15,16 @@ import { statSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { stat, mkdir, readdir } from "node:fs/promises";
 import path from "path";
 
-let instance: DuckDBInstance | undefined;
-let initPromise: Promise<DuckDBInstance> | undefined;
+// Store instance on globalThis so it survives Next.js hot reloads in dev.
+// Without this, Turbopack re-evaluates the module (resetting local vars)
+// while the old DuckDB instance still holds the file lock in the same process.
+const globalForDb = globalThis as unknown as {
+  __duckdb?: DuckDBInstance;
+  __duckdbInit?: Promise<DuckDBInstance>;
+  __duckdbRefreshInterval?: ReturnType<typeof setInterval>;
+};
+let instance: DuckDBInstance | undefined = globalForDb.__duckdb;
+let initPromise: Promise<DuckDBInstance> | undefined = globalForDb.__duckdbInit;
 
 function getBucket(): string {
   return process.env.AWS_S3_BUCKET ?? "";
@@ -263,51 +271,128 @@ async function loadSummaryTables(inst: DuckDBInstance): Promise<void> {
   }
 }
 
-/** Create analytics views over raw parquet data for ad-hoc queries */
+/** List all local trace parquet file paths */
+async function listTraceFiles(): Promise<string[]> {
+  try {
+    const dirs = await readdir(CACHE_DIR);
+    const files: string[] = [];
+    for (const dirName of dirs) {
+      const filePath = path.join(CACHE_DIR, dirName, "trace.parquet");
+      if (await pathExists(filePath)) {
+        files.push(filePath);
+      }
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Materialize analytics tables from parquet files.
+ *
+ * Processes files one at a time to stay within 1GB memory.
+ * Evaluations use JS-side JSON parsing (DuckDB's from_json_strict OOMs on
+ * large parquet files), trajectories use DuckDB GROUP BY per file.
+ */
 async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
-  if (!(await hasLocalCache())) {
-    console.log("[db] No local parquet cache, skipping analytics view creation.");
+  const files = await listTraceFiles();
+  if (files.length === 0) {
+    console.log("[db] No local parquet files, skipping analytics materialization.");
     return;
   }
 
   const glob = await allTracesGlob();
   const conn = await inst.connect();
   try {
+    // Drop stale objects (TABLE or VIEW) so fresh CREATE works.
+    // Must drop TABLE before VIEW — DuckDB errors if you DROP VIEW on a TABLE.
+    await conn.run(`DROP TABLE IF EXISTS evaluations`);
+    await conn.run(`DROP TABLE IF EXISTS trajectories`);
+    await conn.run(`DROP VIEW IF EXISTS evaluations`);
+    await conn.run(`DROP VIEW IF EXISTS trajectories`);
+
+    // Use single thread during materialization to minimize memory
+    await conn.run("SET threads=1");
+
+    // --- Trajectories: GROUP BY per file, INSERT INTO ---
+    let firstTraj = true;
+    for (const file of files) {
+      const sql = `
+        SELECT trajectory_id, environment, agent_model,
+          MIN(agent) AS agent, MIN(started_at) AS started_at,
+          MAX(timestamp) AS ended_at, MAX(part) + 1 AS total_parts,
+          MAX(turn) AS total_turns, SUM(content_token_estimate) AS total_tokens,
+          MAX(session_end_reason) AS session_end_reason,
+          MIN(task_params) AS task_params, arg_max(suites, part) AS suites
+        FROM read_parquet('${file}')
+        GROUP BY trajectory_id, environment, agent_model
+      `;
+      if (firstTraj) {
+        await conn.run(`CREATE TABLE trajectories AS ${sql}`);
+        firstTraj = false;
+      } else {
+        await conn.run(`INSERT INTO trajectories ${sql}`);
+      }
+    }
+    console.log("[db] Materialized trajectories table");
+
+    // --- Evaluations: read raw JSON strings per file, parse in JS, INSERT ---
     await conn.run(`
-      CREATE OR REPLACE VIEW evaluations AS
-      SELECT
-        trajectory_id,
-        environment,
-        agent_model,
-        part,
-        turn,
-        git_commit,
-        json_extract_string(event, '$.eval_id') AS eval_id,
-        json_extract_string(event, '$.status') AS status,
-        CAST(json_extract(event, '$.passed') AS INTEGER) AS passed,
-        CAST(json_extract(event, '$.failed') AS INTEGER) AS failed,
-        CAST(json_extract(event, '$.total') AS INTEGER) AS total,
-        json_extract_string(event, '$.target_commit') AS target_commit,
-        json_extract(event, '$.suite_results') AS suite_results,
-        json_extract_string(event, '$.finished_at') AS finished_at
-      FROM (
-        SELECT *, unnest(from_json_strict(eval_events_delta, '["json"]')) AS event
-        FROM read_parquet('${glob}')
-        WHERE eval_events_delta IS NOT NULL
-          AND json_array_length(eval_events_delta) > 0
+      CREATE TABLE evaluations (
+        trajectory_id VARCHAR, environment VARCHAR, agent_model VARCHAR,
+        part INTEGER, turn INTEGER, git_commit VARCHAR,
+        eval_id VARCHAR, status VARCHAR, passed INTEGER, failed INTEGER,
+        total INTEGER, target_commit VARCHAR, suite_results VARCHAR,
+        finished_at VARCHAR
       )
     `);
-    console.log("[db] Created evaluations view");
 
+    for (const file of files) {
+      const rawResult = await conn.run(`
+        SELECT trajectory_id, environment, agent_model, part, turn,
+          git_commit, eval_events_delta
+        FROM read_parquet('${file}')
+        WHERE eval_events_delta IS NOT NULL
+          AND json_array_length(eval_events_delta) > 0
+      `);
+      const rawRows = await rawResult.getRowObjectsJson();
+
+      for (const row of rawRows) {
+        let events: Record<string, unknown>[];
+        try {
+          events = JSON.parse(String(row.eval_events_delta));
+        } catch {
+          continue;
+        }
+        for (const evt of events) {
+          const esc = (value: unknown) => String(value ?? "").replace(/'/g, "''");
+          await conn.run(`
+            INSERT INTO evaluations VALUES (
+              '${esc(row.trajectory_id)}', '${esc(row.environment)}',
+              '${esc(row.agent_model)}', ${Number(row.part ?? 0)},
+              ${row.turn !== undefined && row.turn !== null ? Number(row.turn) : "NULL"},
+              '${esc(row.git_commit)}', '${esc(evt.eval_id)}', '${esc(evt.status)}',
+              ${Number(evt.passed ?? 0)}, ${Number(evt.failed ?? 0)},
+              ${Number(evt.total ?? 0)}, '${esc(evt.target_commit)}',
+              '${esc(JSON.stringify(evt.suite_results ?? {}))}',
+              '${esc(evt.finished_at)}'
+            )
+          `);
+        }
+      }
+    }
+    console.log("[db] Materialized evaluations table");
+
+    // Restore threads for normal query workloads
+    await conn.run("SET threads=4");
+
+    // Lightweight views — only evaluated when explicitly queried
     await conn.run(`
       CREATE OR REPLACE VIEW turn_summaries AS
       SELECT
-        trajectory_id,
-        environment,
-        agent_model,
-        turn,
-        MIN(timestamp) AS turn_start,
-        MAX(timestamp) AS turn_end,
+        trajectory_id, environment, agent_model, turn,
+        MIN(timestamp) AS turn_start, MAX(timestamp) AS turn_end,
         COUNT(*) AS num_parts,
         SUM(content_token_estimate) AS total_content_tokens,
         SUM(duration_ms) AS total_duration_ms,
@@ -322,37 +407,14 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
     await conn.run(`
       CREATE OR REPLACE VIEW file_access AS
       SELECT
-        trajectory_id,
-        environment,
-        agent_model,
-        part,
-        turn,
-        tool_name,
+        trajectory_id, environment, agent_model, part, turn, tool_name,
         json_extract_string(tool_input, '$.file_path') AS file_path,
-        content_token_estimate AS tokens,
-        duration_ms
+        content_token_estimate AS tokens, duration_ms
       FROM read_parquet('${glob}')
       WHERE tool_name IN ('Read', 'Write', 'Edit', 'file_read', 'file_write')
         AND tool_input IS NOT NULL
     `);
     console.log("[db] Created file_access view");
-
-    await conn.run(`
-      CREATE OR REPLACE VIEW trajectories AS
-      SELECT
-        trajectory_id,
-        environment,
-        agent_model,
-        MIN(agent) AS agent,
-        MIN(started_at) AS started_at,
-        MAX(part) + 1 AS total_parts,
-        MAX(turn) AS total_turns,
-        SUM(content_token_estimate) AS total_tokens,
-        MAX(session_end_reason) AS session_end_reason
-      FROM read_parquet('${glob}')
-      GROUP BY trajectory_id, environment, agent_model
-    `);
-    console.log("[db] Created trajectories view");
   } catch (err) {
     console.warn("[db] Failed to create analytics views:", err);
   } finally {
@@ -368,6 +430,17 @@ async function createInstance(): Promise<DuckDBInstance> {
   await ensureDbDir();
   await ensureCacheDir();
   const inst = await DuckDBInstance.create(DB_PATH);
+
+  // Cap memory and threads so DuckDB doesn't consume all system RAM
+  const cfgConn = await inst.connect();
+  try {
+    await cfgConn.run("SET memory_limit='1GB'");
+    await cfgConn.run("SET threads=4");
+    await cfgConn.run("SET preserve_insertion_order=false");
+    await cfgConn.run(`SET temp_directory='${path.resolve(process.cwd(), ".cache", "duckdb_tmp")}'`);
+  } finally {
+    cfgConn.disconnectSync();
+  }
 
   // Only configure httpfs if we'll need S3 access (no local cache)
   if (isS3Configured() && !(await hasLocalCache())) {
@@ -394,7 +467,7 @@ async function createInstance(): Promise<DuckDBInstance> {
   return inst;
 }
 
-/** Get the shared DuckDB instance (creates on first call) */
+/** Get the shared DuckDB instance (creates on first call, survives hot reloads) */
 export async function getDb(): Promise<DuckDBInstance> {
   if (instance) {
     return instance;
@@ -402,8 +475,12 @@ export async function getDb(): Promise<DuckDBInstance> {
   if (!initPromise) {
     initPromise = createInstance().then((inst) => {
       instance = inst;
+      globalForDb.__duckdb = inst;
+      globalForDb.__duckdbInit = undefined;
+      startBackgroundRefresh();
       return inst;
     });
+    globalForDb.__duckdbInit = initPromise;
   }
   return initPromise;
 }
@@ -483,7 +560,7 @@ export async function hasSummaryTables(): Promise<boolean> {
 }
 
 /**
- * Re-run S3 sync and reload summary tables.
+ * Re-run S3 sync and reload summary tables + materialized analytics tables.
  * Call from POST /api/refresh to pick up new data.
  */
 export async function refreshData(): Promise<void> {
@@ -498,4 +575,26 @@ export async function refreshData(): Promise<void> {
   const db = await getDb();
   await loadSummaryTables(db);
   await createAnalyticsViews(db);
+}
+
+// ---------------------------------------------------------------------------
+// Background refresh — keeps materialized tables fresh without blocking UI
+// ---------------------------------------------------------------------------
+
+const BACKGROUND_REFRESH_MS = 5 * 60_000; // every 5 minutes
+
+/** Start periodic background refresh (idempotent, survives hot reloads) */
+function startBackgroundRefresh(): void {
+  if (globalForDb.__duckdbRefreshInterval) {
+    return;
+  }
+  globalForDb.__duckdbRefreshInterval = setInterval(() => {
+    refreshData().catch((err) => {
+      console.warn("[db] Background refresh failed:", err);
+    });
+  }, BACKGROUND_REFRESH_MS);
+  // Don't prevent process exit
+  if (globalForDb.__duckdbRefreshInterval.unref) {
+    globalForDb.__duckdbRefreshInterval.unref();
+  }
 }

@@ -5,7 +5,7 @@ Envoi is a Python SDK for building **evaluation environments** — HTTP servers 
 You write async Python functions that define what "correct" means. Envoi turns them into an API that any client can call: a script, a CI pipeline, or an AI coding agent.
 
 ```
-pip install envoi-ai
+uv add envoi-ai
 ```
 
 ## The problem

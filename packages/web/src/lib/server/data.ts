@@ -9,7 +9,6 @@
 
 import {
   isS3Configured,
-  allTracesGlob,
   traceUri,
   freshTraceUri,
   codeSnapshotsUri,
@@ -200,8 +199,8 @@ async function getAllTrajectoriesFromSummary(opts?: {
 }
 
 /**
- * Slow path: GROUP BY scan of raw parquet files + N+1 evaluation queries.
- * Used when materialized summary tables are not available.
+ * Slow path: query materialized trajectories + evaluations tables.
+ * Used when pre-built summary tables are not available.
  */
 async function getAllTrajectoriesFromGlob(opts?: {
   environment?: string;
@@ -209,32 +208,12 @@ async function getAllTrajectoriesFromGlob(opts?: {
   limit?: number;
   offset?: number;
 }): Promise<Trajectory[]> {
-  const glob = await allTracesGlob();
-
   /**
-   * Single query that computes trajectory summaries AND final evaluation scores
-   * via a LEFT JOIN on the evaluations view. No N+1 queries.
-   * Also computes duration from started_at and last timestamp, plus eval count.
+   * Query the materialized trajectories + evaluations tables directly.
+   * No parquet scanning at query time — everything was materialized at startup.
    */
   let sql = `
-    WITH summary AS (
-      SELECT
-        trajectory_id,
-        agent_model,
-        environment,
-        MIN(agent) AS agent,
-        MIN(started_at) AS started_at,
-        MAX(timestamp) AS ended_at,
-        MAX(part) + 1 AS total_parts,
-        MAX(turn) AS total_turns,
-        SUM(content_token_estimate) AS total_tokens,
-        MAX(session_end_reason) AS session_end_reason,
-        MIN(task_params) AS task_params,
-        MIN(suites) AS suites
-      FROM read_parquet('${escapeString(glob)}')
-      GROUP BY trajectory_id, agent_model, environment
-    ),
-    best_eval AS (
+    WITH best_eval AS (
       SELECT
         trajectory_id,
         MAX(passed) AS best_passed,
@@ -257,7 +236,7 @@ async function getAllTrajectoriesFromGlob(opts?: {
       b.best_failed,
       b.best_total,
       b.eval_count
-    FROM summary s
+    FROM trajectories s
     LEFT JOIN best_eval b ON b.trajectory_id = s.trajectory_id
     WHERE 1=1
   `;
@@ -310,20 +289,117 @@ export async function getTrajectoryById(
     return getMockTrajectoryById(id);
   }
 
+  if (options?.fresh) {
+    return loadTrajectory(id, true);
+  }
+
+  return cached(`trajectory:${id}`, () => loadTrajectory(id, false));
+}
+
+/**
+ * Load a single trajectory from parquet + materialized evaluations.
+ * Excludes eval_events_delta from the parquet read (176MB savings on large
+ * files) and injects evaluation data from the materialized evaluations table.
+ */
+async function loadTrajectory(
+  id: string,
+  fresh: boolean,
+): Promise<Trajectory | undefined> {
   try {
-    const uri = options?.fresh
+    const uri = fresh
       ? freshTraceUri(id)
       : await traceUri(id);
-    const sql = `
-      SELECT * FROM read_parquet('${escapeString(uri)}')
-      ORDER BY part
-    `;
-    const rawRows = await query(sql);
+
+    // Read parquet without eval_events_delta (5MB vs 181MB for large files)
+    const [rawRows, evalRows] = await Promise.all([
+      query(`
+        SELECT * EXCLUDE (eval_events_delta)
+        FROM read_parquet('${escapeString(uri)}')
+        ORDER BY part
+      `),
+      query(`
+        SELECT part, turn, eval_id, status, passed, failed, total,
+          target_commit, suite_results, finished_at
+        FROM evaluations
+        WHERE trajectory_id = '${escapeString(id)}'
+        ORDER BY part
+      `),
+    ]);
+
     if (rawRows.length === 0) {
       return undefined;
     }
-    const rows = rawRows.map(toParquetRow);
+
+    // Group materialized evals by part and synthesize eval_events_delta
+    const evalsByPart = new Map<number, Record<string, unknown>[]>();
+    for (const evalRow of evalRows) {
+      const part = Number(evalRow.part ?? 0);
+      let bucket = evalsByPart.get(part);
+      if (!bucket) {
+        bucket = [];
+        evalsByPart.set(part, bucket);
+      }
+      bucket.push({
+        kind: "commit_async",
+        eval_id: String(evalRow.eval_id ?? ""),
+        target_commit: String(evalRow.target_commit ?? ""),
+        trigger_part: part,
+        trigger_turn: evalRow.turn != undefined ? Number(evalRow.turn) : undefined,
+        status: String(evalRow.status ?? ""),
+        passed: Number(evalRow.passed ?? 0),
+        failed: Number(evalRow.failed ?? 0),
+        total: Number(evalRow.total ?? 0),
+        suite_results: (() => {
+          try {
+            return JSON.parse(String(evalRow.suite_results ?? "{}"));
+          } catch {
+            return {};
+          }
+        })(),
+        finished_at: evalRow.finished_at != undefined ? String(evalRow.finished_at) : undefined,
+      });
+    }
+
+    // Inject synthetic eval_events_delta into rows
+    const rows = rawRows.map((raw) => {
+      const row = toParquetRow(raw);
+      const events = evalsByPart.get(row.part);
+      if (events) {
+        row.eval_events_delta = JSON.stringify(events);
+      }
+      return row;
+    });
+
     return reconstructTrajectory(rows);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Lightweight fetch of sandbox metadata for a trajectory.
+ * Only reads 1 row with 3 columns — much faster than getTrajectoryById.
+ */
+export async function getTrajectorySandboxMeta(
+  id: string,
+): Promise<{ sessionEndReason?: string; sandboxId?: string; sandboxProvider?: string } | undefined> {
+  if (!isS3Configured()) {
+    return undefined;
+  }
+  try {
+    const summaryRows = await query(`
+      SELECT session_end_reason
+      FROM trajectories
+      WHERE trajectory_id = '${escapeString(id)}'
+      LIMIT 1
+    `);
+    if (summaryRows.length === 0) {
+      return undefined;
+    }
+    const endReason = summaryRows[0]!.session_end_reason;
+    return {
+      sessionEndReason: endReason != undefined ? String(endReason) : undefined,
+    };
   } catch {
     return undefined;
   }
@@ -364,29 +440,11 @@ export async function getTrajectoryEvaluations(
   }
 
   try {
-    const uri = await traceUri(id);
     const sql = `
-      WITH events AS (
-        SELECT
-          part,
-          unnest(
-            from_json_strict(eval_events_delta, '["json"]')
-          ) AS event
-        FROM read_parquet('${escapeString(uri)}')
-        WHERE eval_events_delta IS NOT NULL
-          AND json_array_length(eval_events_delta) > 0
-      )
-      SELECT
-        json_extract_string(event, '$.eval_id') AS eval_id,
-        part,
-        CAST(json_extract(event, '$.passed') AS INTEGER) AS passed,
-        CAST(json_extract(event, '$.failed') AS INTEGER) AS failed,
-        CAST(json_extract(event, '$.total') AS INTEGER) AS total,
-        json_extract_string(event, '$.suite_results') AS suite_results,
-        json_extract_string(event, '$.target_commit') AS target_commit
-      FROM events
-      WHERE json_extract_string(event, '$.status') = 'completed'
-        AND json_extract_string(event, '$.kind') = 'commit_async'
+      SELECT eval_id, part, passed, failed, total, suite_results, target_commit
+      FROM evaluations
+      WHERE trajectory_id = '${escapeString(id)}'
+        AND status = 'completed'
       ORDER BY part
     `;
     const rawRows = await query(sql);
@@ -458,15 +516,14 @@ export async function getEnvironments(): Promise<
       }));
     }
 
-    // Slow path: glob scan
-    const glob = await allTracesGlob();
+    // Slow path: use materialized trajectories table
     const sql = `
       SELECT
         environment,
         MIN(suites) AS suites,
-        COUNT(DISTINCT trajectory_id) AS trajectory_count,
+        COUNT(*) AS trajectory_count,
         COUNT(DISTINCT agent_model) AS model_count
-      FROM read_parquet('${escapeString(glob)}')
+      FROM trajectories
       GROUP BY environment
       ORDER BY environment
     `;
@@ -508,37 +565,8 @@ export async function getCompareTrajectories(opts?: {
     return getCompareTrajectoriesFromSummary(opts);
   }
 
-  // Slow path: load full trajectories individually
-  if (opts?.ids && opts.ids.length > 0) {
-    const trajectories: Trajectory[] = [];
-    for (const id of opts.ids) {
-      const traj = await getTrajectoryById(id);
-      if (traj) {
-        trajectories.push(traj);
-      }
-    }
-    return trajectories;
-  }
-
-  const glob = await allTracesGlob();
-  const idSql = `
-    SELECT DISTINCT trajectory_id
-    FROM read_parquet('${escapeString(glob)}')
-    ORDER BY trajectory_id
-  `;
-  const idRows = await query(idSql);
-  const trajectories: Trajectory[] = [];
-  for (const row of idRows) {
-    const id = String(row.trajectory_id ?? "");
-    if (!id) {
-      continue;
-    }
-    const traj = await getTrajectoryById(id);
-    if (traj) {
-      trajectories.push(traj);
-    }
-  }
-  return trajectories;
+  // Slow path: use materialized trajectories + evaluations tables
+  return getCompareTrajectoriesFromMaterialized(opts);
 }
 
 /**
@@ -571,6 +599,36 @@ async function getCompareTrajectoriesFromSummary(opts?: {
   ]);
 
   return buildCompareTrajectories(summaryRows, evalRows);
+}
+
+/**
+ * Load full trajectories for compare from parquet files.
+ * Uses the same loadTrajectory path as /trajectories/:id so that commits
+ * have proper timestamps and minutesElapsed for the progress curves chart.
+ * Each trajectory is cached so repeated selections are instant.
+ */
+async function getCompareTrajectoriesFromMaterialized(opts?: {
+  ids?: string[];
+  environment?: string;
+}): Promise<Trajectory[]> {
+  let ids = opts?.ids ?? [];
+
+  // If no specific IDs, get all trajectory IDs from the materialized table
+  if (ids.length === 0) {
+    let sql = `SELECT trajectory_id FROM trajectories WHERE 1=1`;
+    if (opts?.environment) {
+      sql += ` AND environment = '${escapeString(opts.environment)}'`;
+    }
+    const rows = await query(sql);
+    ids = rows.map((row) => String(row.trajectory_id ?? ""));
+  }
+
+  // Load full trajectories in parallel, reusing the cached loadTrajectory path
+  const results = await Promise.all(
+    ids.map((id) => cached(`trajectory:${id}`, () => loadTrajectory(id, false))),
+  );
+
+  return results.filter((traj): traj is Trajectory => traj !== undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -740,34 +798,20 @@ export async function getDifficultyData(): Promise<DifficultyCell[]> {
 
   return cached("difficulty-data", async () => {
     try {
-      const glob = await allTracesGlob();
-
       /**
        * The `suites` column contains JSON like:
        *   {"all/basics/smoke": {"ok":true,"passed":7,"failed":0,"total":7}, ...}
        *
-       * We take the latest non-empty suites snapshot per trajectory,
-       * unnest the JSON keys, extract suite name (2nd path segment),
+       * Uses the materialized trajectories table (suites = latest snapshot via arg_max).
+       * Unnest the JSON keys, extract suite name (2nd path segment),
        * and aggregate passed/total per (suite, model).
        */
       const rawRows = await query(`
-        WITH latest_suites AS (
-          SELECT
-            trajectory_id,
-            agent_model,
-            suites,
-            ROW_NUMBER() OVER (
-              PARTITION BY trajectory_id
-              ORDER BY part DESC
-            ) AS rn
-          FROM read_parquet('${escapeString(glob)}')
+        WITH snapshots AS (
+          SELECT trajectory_id, agent_model, suites::JSON AS sr
+          FROM trajectories
           WHERE suites IS NOT NULL
             AND LENGTH(CAST(suites AS VARCHAR)) > 5
-        ),
-        snapshots AS (
-          SELECT trajectory_id, agent_model, suites::JSON AS sr
-          FROM latest_suites
-          WHERE rn = 1
         ),
         suite_entries AS (
           SELECT
@@ -862,33 +906,19 @@ export async function getPortfolioData(): Promise<PortfolioRow[]> {
 
   return cached("portfolio-data", async () => {
     try {
-      const glob = await allTracesGlob();
-
       /**
-       * Get the latest suites snapshot per trajectory, compute overall
-       * pass rate per trajectory, then derive environment from the first suite key.
+       * Uses materialized trajectories table (suites = latest snapshot via arg_max).
+       * Compute overall pass rate per trajectory, derive environment from suite keys.
        */
       const rawRows = await query(`
-        WITH latest_suites AS (
-          SELECT
-            trajectory_id,
-            agent_model,
-            suites,
-            ROW_NUMBER() OVER (
-              PARTITION BY trajectory_id
-              ORDER BY part DESC
-            ) AS rn
-          FROM read_parquet('${escapeString(glob)}')
-          WHERE suites IS NOT NULL
-            AND LENGTH(CAST(suites AS VARCHAR)) > 5
-        ),
-        snapshots AS (
+        WITH snapshots AS (
           SELECT
             trajectory_id,
             agent_model,
             suites::JSON AS sr
-          FROM latest_suites
-          WHERE rn = 1
+          FROM trajectories
+          WHERE suites IS NOT NULL
+            AND LENGTH(CAST(suites AS VARCHAR)) > 5
         ),
         suite_entries AS (
           SELECT

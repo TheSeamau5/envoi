@@ -11,7 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
-import { getTrajectoryById } from "@/lib/server/data";
+import { getTrajectorySandboxMeta } from "@/lib/server/data";
 import { cached } from "@/lib/server/cache";
 
 const execFileAsync = promisify(execFile);
@@ -28,23 +28,23 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const trajectory = await getTrajectoryById(id, { fresh: true });
-    if (!trajectory) {
+    const meta = await getTrajectorySandboxMeta(id);
+    if (!meta) {
       return NextResponse.json({ error: "Trajectory not found" }, { status: 404 });
     }
 
     /** Already finished — no need to query the provider */
-    if (trajectory.sessionEndReason) {
-      return NextResponse.json({ running: false, reason: trajectory.sessionEndReason });
+    if (meta.sessionEndReason) {
+      return NextResponse.json({ running: false, reason: meta.sessionEndReason });
     }
 
     /** No sandbox info — legacy trajectory without sandbox tracking */
-    if (!trajectory.sandboxId || !trajectory.sandboxProvider) {
+    if (!meta.sandboxId || !meta.sandboxProvider) {
       return NextResponse.json({ running: false, reason: "no_sandbox_info" });
     }
 
-    const sandboxId = trajectory.sandboxId;
-    const sandboxProvider = trajectory.sandboxProvider;
+    const sandboxId = meta.sandboxId;
+    const sandboxProvider = meta.sandboxProvider;
 
     const result = await cached(
       `sandbox-status:${sandboxId}`,

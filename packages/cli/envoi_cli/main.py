@@ -161,7 +161,7 @@ def main() -> None:
     elif args.command == "code":
         if not _has_code:
             print(
-                "envoi-code is not installed. Run: pip install envoi-cli[code]",
+                "envoi-code is not installed. Run: uv add envoi-cli[code]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -188,7 +188,7 @@ def main() -> None:
         elif code_command == "materialize":
             if materialize_command is None:
                 print(
-                    "envoi-code is not installed. Run: pip install envoi-cli[code]",
+                    "envoi-code is not installed. Run: uv add envoi-cli[code]",
                     file=sys.stderr,
                 )
                 sys.exit(1)

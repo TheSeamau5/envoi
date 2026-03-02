@@ -106,25 +106,11 @@ export function TrajectoryList({ trajectories: initialTrajectories }: Trajectory
   const [trajectories, setTrajectories] = useState(initialTrajectories);
   const [activeTab, setActiveTab] = useState<Tab>("active");
   const [liveIds, setLiveIds] = useState<Set<string>>(new Set());
+  const confirmedDeadRef = useRef<Set<string>>(new Set());
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-
-  /** Trajectories without sessionEndReason that might be live */
-  const candidateIds = useMemo(
-    () => trajectories.filter((trace) => isPossiblyLive(trace)).map((trace) => trace.id),
-    [trajectories],
-  );
+  const checkedOnMount = useRef(false);
 
   const hasLive = liveIds.size > 0;
-
-  /** Check sandbox status for candidates */
-  const checkLiveness = useCallback(async () => {
-    if (candidateIds.length === 0) {
-      setLiveIds(new Set());
-      return;
-    }
-    const confirmed = await checkLiveTrajectories(candidateIds);
-    setLiveIds(confirmed);
-  }, [candidateIds]);
 
   const refresh = useCallback(async () => {
     try {
@@ -139,26 +125,51 @@ export function TrajectoryList({ trajectories: initialTrajectories }: Trajectory
     }
   }, []);
 
-  /** Immediate fresh fetch on mount, then check liveness */
-  useEffect(() => {
-    refresh().then(() => checkLiveness());
-  }, [refresh, checkLiveness]);
+  const checkLiveness = useCallback(async (allTrajectories: Trajectory[]) => {
+    const candidates = allTrajectories
+      .filter((trace) => isPossiblyLive(trace))
+      .map((trace) => trace.id)
+      .filter((traceId) => !confirmedDeadRef.current.has(traceId));
+    if (candidates.length === 0) {
+      setLiveIds(new Set());
+      return;
+    }
+    const confirmed = await checkLiveTrajectories(candidates);
+    setLiveIds(confirmed);
+    for (const traceId of candidates) {
+      if (!confirmed.has(traceId)) {
+        confirmedDeadRef.current.add(traceId);
+      }
+    }
+  }, []);
 
-  /** Poll every 30s while any trajectory is live */
+  /** Immediate fresh fetch on mount, then one liveness check */
+  useEffect(() => {
+    if (checkedOnMount.current) {
+      return;
+    }
+    checkedOnMount.current = true;
+    const init = async () => {
+      await refresh();
+      await checkLiveness(initialTrajectories);
+    };
+    void init();
+  }, [refresh, checkLiveness, initialTrajectories]);
+
+  /** Poll every 30s only while at least one trajectory is confirmed live */
   useEffect(() => {
     if (!hasLive) {
       return;
     }
     intervalRef.current = setInterval(async () => {
       await refresh();
-      await checkLiveness();
     }, LIST_POLL_MS);
     return () => {
       if (intervalRef.current !== undefined) {
         clearInterval(intervalRef.current);
       }
     };
-  }, [hasLive, refresh, checkLiveness]);
+  }, [hasLive, refresh]);
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];
@@ -268,11 +279,11 @@ export function TrajectoryList({ trajectories: initialTrajectories }: Trajectory
                         className="flex items-center border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
                       >
                         {/* ID + live badge */}
-                        <span className={`${COL.id} ${CELL_BORDER} flex items-center gap-[6px] pl-0`}>
+                        <span className={`${COL.id} ${CELL_BORDER} flex items-center gap-1.5 pl-0`}>
                           {live && (
-                            <span className="relative flex h-[7px] w-[7px] shrink-0">
+                            <span className="relative flex h-1.75 w-1.75 shrink-0">
                               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
-                              <span className="relative inline-flex h-[7px] w-[7px] rounded-full bg-emerald-500" />
+                              <span className="relative inline-flex h-1.75 w-1.75 rounded-full bg-emerald-500" />
                             </span>
                           )}
                           <span className="truncate text-[13px] font-medium text-envoi-text">

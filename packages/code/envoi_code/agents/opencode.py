@@ -1051,6 +1051,9 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
             else 0
         )
 
+    from envoi_code.agents import agent
+
+    @agent("opencode")
     class OpenCodeAgent:
         """Agent implementation for OpenCode."""
 

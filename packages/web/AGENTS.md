@@ -61,6 +61,50 @@ This file contains all rules, conventions, and architectural context for AI agen
 - Information-dense, power-user focused
 - Bottom status bar with green dot
 
+## Data Layer & Performance
+
+The dashboard reads trajectory parquet files from S3 via DuckDB (in-process).
+There is a hard 1 GB memory budget — every query must stay within it.
+
+### Materialized tables
+
+At startup, `db.ts` materializes two DuckDB tables from the raw parquet files:
+- **`trajectories`** — one row per trajectory (GROUP BY summary).
+- **`evaluations`** — one row per eval event, parsed from `eval_events_delta` JSON.
+
+List and compare pages query these tables, never raw parquet at request time.
+
+### The `eval_events_delta` column is the memory killer
+
+A single 46 MB parquet file can contain 176 MB of JSON in `eval_events_delta`.
+`SELECT *` will OOM. Always use `SELECT * EXCLUDE (eval_events_delta)` and
+inject eval data from the materialized `evaluations` table instead (see
+`loadTrajectory` in `data.ts`).
+
+### Caching (`cache.ts`)
+
+`cached(key, fn, ttl)` provides stale-while-revalidate in-memory caching
+(5-minute default TTL). Use it for any expensive query result. Trajectory
+detail pages use it so navigating away and back is instant.
+
+For finished trajectories (`sessionEndReason` is set), the client-side
+`useLiveTrajectory` hook skips the mount fetch entirely — the server-rendered
+data is already final.
+
+### Compare page data
+
+The compare endpoint loads full trajectories via `loadTrajectory` (same path as
+`/trajectories/:id`). This gives commits with proper timestamps and
+`minutesElapsed` for the progress curves chart. The results are cached per
+trajectory so selecting/deselecting traces is fast.
+
+### Commit timestamps
+
+`reconstructTrajectory` computes `minutesElapsed` from **row timestamps** (when
+the agent wrote code), not eval `finishedAt` (when CI completed). Eval
+completion times are non-monotonic because evals run asynchronously — using them
+produces backward jumps on the time axis.
+
 ## localStorage & UI Persistence
 
 19. Use `usePersistedState` from `src/lib/storage.ts` for all localStorage access — never call `localStorage` directly.
