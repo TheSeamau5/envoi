@@ -102,6 +102,8 @@ export type Commit = {
   codeSnapshot: CodeSnapshot;
   phase: number;
   tokensUsed: number;
+  /** Global part range [start, end] from the parquet — used to map waste items to commits */
+  partRange?: [number, number];
   /** Evaluation ID from the backend */
   evalId?: string;
   /** Git commit hash this evaluation targeted */
@@ -173,6 +175,37 @@ export type SchemaColumn = {
   columnName: string;
   dataType: string;
 };
+
+// ---------------------------------------------------------------------------
+// Portfolio enrichment (per-environment summaries and Pareto frontier)
+// ---------------------------------------------------------------------------
+
+/** Per-environment summary row for the enriched portfolio dashboard */
+export type PortfolioEnvironmentRow = {
+  environment: string;
+  bestPassed: number;
+  bestTotal: number;
+  bestModel: string;
+  medianPassRate: number;
+  runCount: number;
+  totalTokens: number;
+  perModelCounts: Record<string, number>;
+};
+
+/** A single trajectory point for the Pareto frontier scatter plot */
+export type ParetoPoint = {
+  trajectoryId: string;
+  model: string;
+  environment: string;
+  totalTokens: number;
+  passed: number;
+  total: number;
+  passRate: number;
+};
+
+// ---------------------------------------------------------------------------
+// Query templates
+// ---------------------------------------------------------------------------
 
 /** Query template parameter definition */
 export type TemplateParameter = {

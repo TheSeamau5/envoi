@@ -25,7 +25,8 @@ import {
 } from "@/components/ui/tooltip";
 import { ProgressCurve } from "./progress-curve";
 import { PlayControls } from "./play-controls";
-import { CommitRow } from "./commit-row";
+import { CommitRow, computeCriticality } from "./commit-row";
+import type { CriticalityTag } from "./commit-row";
 import { TestsPanel } from "./tests-panel";
 import { StepsPanel } from "./steps-panel";
 import { CodePanel } from "./code-panel";
@@ -37,6 +38,10 @@ type TrajectoryDetailProps = {
   initialDividerPct: number;
 };
 
+/** Right panel tab options */
+type RightTab = "steps" | "code" | "tests";
+
+/** Main trajectory detail view with resizable split layout */
 export function TrajectoryDetail({
   trajectory,
   initialRightPanelOpen,
@@ -54,10 +59,13 @@ export function TrajectoryDetail({
   const [speed, setSpeed] = useState(1);
 
   /** Tab state */
-  const [rightTab, setRightTab] = useState<"steps" | "code" | "tests">("steps");
+  const [rightTab, setRightTab] = useState<RightTab>("steps");
 
   /** Suite filter for timeline */
   const [activeSuite, setActiveSuite] = useState("all");
+
+  /** Critical-only filter */
+  const [showCriticalOnly, setShowCriticalOnly] = useState(false);
 
   /** Code history — fetched lazily from code_snapshots.parquet */
   const [codeHistory, setCodeHistory] = useState<Record<number, CodeSnapshot>>();
@@ -118,6 +126,30 @@ export function TrajectoryDetail({
   const isDragging = useRef(false);
 
   const selectedCommit = commits[selectedIndex];
+
+  /** Pre-compute criticality tags for all commits */
+  const criticalityMap: Map<number, CriticalityTag[]> = useMemo(() => {
+    const map = new Map<number, CriticalityTag[]>();
+    for (let commitIdx = 0; commitIdx < commits.length; commitIdx++) {
+      const commit = commits[commitIdx];
+      if (!commit) {
+        continue;
+      }
+      const tags = computeCriticality(commit, commitIdx, commits, suites);
+      if (tags.length > 0) {
+        map.set(commitIdx, tags);
+      }
+    }
+    return map;
+  }, [commits, suites]);
+
+  /** Filter commits when showCriticalOnly is enabled */
+  const visibleCommits = useMemo(() => {
+    if (!showCriticalOnly) {
+      return commits;
+    }
+    return commits.filter((_, commitIdx) => criticalityMap.has(commitIdx));
+  }, [commits, showCriticalOnly, criticalityMap]);
 
   /** Merge code snapshot into selected commit when code history is available */
   const enrichedCommit: Commit | undefined = useMemo(() => {
@@ -273,7 +305,7 @@ export function TrajectoryDetail({
             onSpeedChange={handleSpeedChange}
           />
 
-          {/* Suite filter pills */}
+          {/* Suite filter pills + critical filter toggle */}
           <div className="flex flex-nowrap items-center gap-[4px] overflow-x-auto border-b border-envoi-border px-[14px] py-[6px]">
             <Tooltip>
               <TooltipTrigger asChild>
@@ -307,6 +339,29 @@ export function TrajectoryDetail({
                 <TooltipContent>{suite.name}: {suite.total} tests</TooltipContent>
               </Tooltip>
             ))}
+
+            {/* Separator + critical filter */}
+            {criticalityMap.size > 0 && (
+              <>
+                <div className="mx-1 h-[14px] w-px bg-envoi-border-light" />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => setShowCriticalOnly((prev) => !prev)}
+                      className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
+                        showCriticalOnly
+                          ? "bg-envoi-accent text-white"
+                          : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+                      }`}
+                    >
+                      critical ({criticalityMap.size})
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Show only critical commits (large deltas, suite transitions, regression recoveries)</TooltipContent>
+                </Tooltip>
+              </>
+            )}
+
             {!rightPanelOpen && (
               <>
                 <div className="flex-1" />
@@ -327,16 +382,20 @@ export function TrajectoryDetail({
 
           {/* Commit list (scrollable) */}
           <div className="flex-1 overflow-y-auto">
-            {commits.map((commit) => (
-              <CommitRow
-                key={commit.index}
-                commit={commit}
-                isSelected={commit.index === selectedIndex}
-                onSelect={handleSelectCommit}
-                activeSuite={activeSuite}
-                suites={suites}
-              />
-            ))}
+            {visibleCommits.map((commit) => {
+              const commitIdx = commits.indexOf(commit);
+              return (
+                <CommitRow
+                  key={commit.index}
+                  commit={commit}
+                  isSelected={commit.index === selectedIndex}
+                  onSelect={handleSelectCommit}
+                  activeSuite={activeSuite}
+                  suites={suites}
+                  criticalityTags={criticalityMap.get(commitIdx)}
+                />
+              );
+            })}
           </div>
         </div>
       </animated.div>

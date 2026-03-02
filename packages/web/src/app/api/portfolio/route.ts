@@ -1,15 +1,25 @@
 /**
  * GET /api/portfolio — Portfolio dashboard data.
- * Returns per-model rankings across environments.
+ * Returns per-model rankings, environment summaries, and Pareto frontier points.
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getPortfolioData } from "@/lib/server/data";
+import {
+  getPortfolioData,
+  getPortfolioEnvironmentData,
+  getParetoData,
+} from "@/lib/server/data";
 
+/** GET handler for full portfolio dashboard payload */
 export async function GET(_request: NextRequest) {
   try {
-    const data = await getPortfolioData();
-    return NextResponse.json(data);
+    const [rows, environmentRows, paretoPoints] = await Promise.all([
+      getPortfolioData(),
+      getPortfolioEnvironmentData(),
+      getParetoData(),
+    ]);
+
+    return NextResponse.json({ rows, environmentRows, paretoPoints });
   } catch (error) {
     console.error("GET /api/portfolio error:", error);
     return NextResponse.json(

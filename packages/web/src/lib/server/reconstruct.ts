@@ -867,13 +867,16 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         newlyFixed: 0,
         brokenTests: [],
         totalPassed: 0,
-        totalFailed: 0,
+        totalFailed: totalTests,
       },
       steps,
       changedFiles: extractChangedFiles(lastCheckpoint),
       codeSnapshot: {},
       phase: 0,
       tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
+      partRange: sortedRows.length > 0
+        ? [sortedRows[0]?.part ?? 0, lastSortedRow?.part ?? 0]
+        : undefined,
     });
   } else {
     // Group rows by evaluation boundaries
@@ -947,6 +950,9 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         codeSnapshot: {},
         phase: totalTests > 0 ? evalRec.passed / totalTests : 0,
         tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
+        partRange: commitRows.length > 0
+          ? [commitRows[0]?.part ?? 0, commitRows[commitRows.length - 1]?.part ?? 0]
+          : undefined,
         evalId: evalRec.evalId,
         targetCommit: evalRec.commit,
       });
@@ -987,13 +993,16 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
           newlyFixed: 0,
           brokenTests: [],
           totalPassed: prevTotalPassed,
-          totalFailed: 0,
+          totalFailed: totalTests - prevTotalPassed,
         },
         steps,
         changedFiles: extractChangedFiles(lastCheckpoint),
         codeSnapshot: {},
         phase: totalTests > 0 ? prevTotalPassed / totalTests : 0,
         tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
+        partRange: remainingRows.length > 0
+          ? [remainingRows[0]?.part ?? 0, remainingRows[remainingRows.length - 1]?.part ?? 0]
+          : undefined,
       });
     }
   }
@@ -1446,7 +1455,7 @@ export function buildCompareTrajectories(
           newlyFixed: 0,
           brokenTests: [],
           totalPassed: 0,
-          totalFailed: 0,
+          totalFailed: totalTests,
         },
         steps: [],
         changedFiles: [],

@@ -1,15 +1,22 @@
 /**
  * Portfolio Dashboard page — server component.
- * Shows cross-environment model rankings using average rank.
+ * Shows cross-environment model rankings, environment summaries, and Pareto frontier.
  */
 
-import { getPortfolioData, getEnvironments } from "@/lib/server/data";
+import {
+  getPortfolioData,
+  getEnvironments,
+  getPortfolioEnvironmentData,
+  getParetoData,
+} from "@/lib/server/data";
 import { PortfolioClient } from "@/components/portfolio/portfolio-client";
 
 export default async function PortfolioPage() {
-  const [portfolioRows, environments] = await Promise.all([
+  const [portfolioRows, environments, environmentRows, paretoPoints] = await Promise.all([
     getPortfolioData(),
     getEnvironments(),
+    getPortfolioEnvironmentData(),
+    getParetoData(),
   ]);
 
   const environmentNames = environments.map((env) => env.environment);
@@ -21,7 +28,12 @@ export default async function PortfolioPage() {
           Portfolio Dashboard
         </span>
       </div>
-      <PortfolioClient rows={portfolioRows} environments={environmentNames} />
+      <PortfolioClient
+        rows={portfolioRows}
+        environments={environmentNames}
+        environmentRows={environmentRows}
+        paretoPoints={paretoPoints}
+      />
     </div>
   );
 }

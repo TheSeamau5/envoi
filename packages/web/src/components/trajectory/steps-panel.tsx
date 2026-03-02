@@ -321,7 +321,7 @@ function StepRow({
           </div>
 
           {/* Summary */}
-          <div className="mt-[2px] text-[13px] leading-[18px] text-envoi-text">
+          <div className="mt-[2px] break-all text-[13px] leading-[18px] text-envoi-text">
             {step.summary || (step.type === "reasoning" ? (
               <span className="italic text-envoi-text-muted">Reasoning not shown</span>
             ) : step.summary)}
@@ -419,7 +419,7 @@ export function StepsPanel({ commit }: StepsPanelProps) {
   }, [commit.index]);
 
   return (
-    <div ref={containerRef} className="flex flex-1 flex-col overflow-y-auto">
+    <div ref={containerRef} className="flex flex-1 flex-col overflow-y-auto overflow-x-hidden">
       {/* Inline keyframes for stagger animation */}
       <style>{`
         @keyframes stepFadeIn {

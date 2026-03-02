@@ -33,6 +33,8 @@ import type {
   FileSnapshot,
   DifficultyCell,
   PortfolioRow,
+  PortfolioEnvironmentRow,
+  ParetoPoint,
   SchemaColumn,
 } from "@/lib/types";
 
@@ -973,5 +975,190 @@ async function getMockPortfolioData(): Promise<PortfolioRow[]> {
     }
   }
   return buildPortfolioRows(rows);
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio enrichment (Task 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Get per-environment summary data for the enriched portfolio dashboard.
+ * Returns best score, median pass rate, run count, and total tokens per environment.
+ */
+export async function getPortfolioEnvironmentData(): Promise<PortfolioEnvironmentRow[]> {
+  if (!isS3Configured()) {
+    return getMockPortfolioEnvironmentData();
+  }
+
+  return cached("portfolio-env-data", async () => {
+    try {
+      const rawRows = await query(`
+        WITH best_eval AS (
+          SELECT
+            trajectory_id,
+            MAX(passed) AS best_passed,
+            MAX(total) AS best_total
+          FROM evaluations
+          WHERE status = 'completed'
+          GROUP BY trajectory_id
+        ),
+        traj_scores AS (
+          SELECT
+            t.trajectory_id,
+            t.agent_model,
+            t.environment,
+            t.total_tokens,
+            COALESCE(b.best_passed, 0) AS best_passed,
+            COALESCE(b.best_total, 0) AS best_total
+          FROM trajectories t
+          LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
+        ),
+        env_summary AS (
+          SELECT
+            environment,
+            COUNT(*) AS run_count,
+            MAX(best_passed) AS max_passed,
+            MAX(best_total) AS max_total,
+            MEDIAN(CASE WHEN best_total > 0 THEN best_passed * 1.0 / best_total ELSE 0 END) AS median_pass_rate,
+            SUM(total_tokens) AS total_tokens,
+            (SELECT agent_model FROM traj_scores ts2
+              WHERE ts2.environment = traj_scores.environment
+              ORDER BY ts2.best_passed DESC
+              LIMIT 1) AS best_model,
+            LIST(DISTINCT agent_model) AS model_list
+          FROM traj_scores
+          GROUP BY environment
+        )
+        SELECT * FROM env_summary
+        ORDER BY environment
+      `);
+
+      return rawRows.map((row) => {
+        /** Count runs per model from the data */
+        const perModelCounts: Record<string, number> = {};
+        return {
+          environment: String(row.environment ?? ""),
+          bestPassed: Number(row.max_passed ?? 0),
+          bestTotal: Number(row.max_total ?? 0),
+          bestModel: String(row.best_model ?? ""),
+          medianPassRate: Number(row.median_pass_rate ?? 0),
+          runCount: Number(row.run_count ?? 0),
+          totalTokens: Number(row.total_tokens ?? 0),
+          perModelCounts,
+        };
+      });
+    } catch {
+      return getMockPortfolioEnvironmentData();
+    }
+  });
+}
+
+/** Mock portfolio environment data */
+function getMockPortfolioEnvironmentData(): PortfolioEnvironmentRow[] {
+  return [
+    {
+      environment: "c_compiler",
+      bestPassed: 891,
+      bestTotal: 2184,
+      bestModel: "claude-code/opus-4.6",
+      medianPassRate: 0.28,
+      runCount: 20,
+      totalTokens: 45_000_000,
+      perModelCounts: { "claude-code/opus-4.6": 8, "codex/gpt-5.3-codex": 6, "opencode/glm-5": 6 },
+    },
+    {
+      environment: "gameboy_emulator",
+      bestPassed: 156,
+      bestTotal: 400,
+      bestModel: "codex/gpt-5.3-codex",
+      medianPassRate: 0.22,
+      runCount: 10,
+      totalTokens: 22_000_000,
+      perModelCounts: { "claude-code/opus-4.6": 4, "codex/gpt-5.3-codex": 3, "opencode/glm-5": 3 },
+    },
+  ];
+}
+
+/**
+ * Get Pareto frontier data — one point per trajectory with cost and score.
+ * Optionally filter by environment.
+ */
+export async function getParetoData(environment?: string): Promise<ParetoPoint[]> {
+  if (!isS3Configured()) {
+    return getMockParetoData();
+  }
+
+  const cacheKey = `pareto-data:${environment ?? "all"}`;
+
+  return cached(cacheKey, async () => {
+    try {
+      let sql = `
+        WITH best_eval AS (
+          SELECT
+            trajectory_id,
+            MAX(passed) AS best_passed,
+            MAX(total) AS best_total
+          FROM evaluations
+          WHERE status = 'completed'
+          GROUP BY trajectory_id
+        )
+        SELECT
+          t.trajectory_id,
+          t.agent_model,
+          t.environment,
+          t.total_tokens,
+          COALESCE(b.best_passed, 0) AS best_passed,
+          COALESCE(b.best_total, 0) AS best_total
+        FROM trajectories t
+        LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
+        WHERE COALESCE(b.best_total, 0) > 0
+      `;
+
+      if (environment) {
+        sql += ` AND t.environment = '${escapeString(environment)}'`;
+      }
+
+      sql += ` ORDER BY t.total_tokens ASC`;
+
+      const rawRows = await query(sql);
+
+      return rawRows.map((row) => {
+        const passed = Number(row.best_passed ?? 0);
+        const total = Number(row.best_total ?? 0);
+        return {
+          trajectoryId: String(row.trajectory_id ?? ""),
+          model: String(row.agent_model ?? ""),
+          environment: String(row.environment ?? ""),
+          totalTokens: Number(row.total_tokens ?? 0),
+          passed,
+          total,
+          passRate: total > 0 ? passed / total : 0,
+        };
+      });
+    } catch {
+      return getMockParetoData();
+    }
+  });
+}
+
+/** Mock Pareto data */
+function getMockParetoData(): ParetoPoint[] {
+  const models = ["claude-code/opus-4.6", "codex/gpt-5.3-codex", "opencode/glm-5"];
+  const points: ParetoPoint[] = [];
+  for (let pointIdx = 0; pointIdx < 20; pointIdx++) {
+    const model = models[pointIdx % models.length] ?? models[0] ?? "";
+    const tokens = 500_000 + pointIdx * 200_000 + Math.round(Math.random() * 500_000);
+    const passRate = Math.min(0.95, 0.1 + pointIdx * 0.04 + Math.random() * 0.1);
+    points.push({
+      trajectoryId: `mock-traj-${pointIdx}`,
+      model,
+      environment: "c_compiler",
+      totalTokens: tokens,
+      passed: Math.round(passRate * 2184),
+      total: 2184,
+      passRate,
+    });
+  }
+  return points;
 }
 

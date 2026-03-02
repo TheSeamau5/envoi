@@ -1,12 +1,20 @@
 /**
  * Difficulty heatmap — SVG color matrix showing pass rates per (category, model),
  * segmented by environment with section headers.
- * Client component for hover interactions via shadcn Tooltip.
+ *
+ * Features:
+ * - Color interpolation: red (0%) → yellow (50%) → green (100%)
+ * - Frontier band: dashed border on cells in the 35-65% range (optimal training signal)
+ * - Click-through: clicking a cell navigates to the trajectory list filtered by model
+ * - Tooltip: shows model name, pass rate percentage, and trajectory count
+ *
+ * Client component for hover/click interactions.
  */
 
 "use client";
 
 import { useMemo } from "react";
+import { useRouter } from "next/navigation";
 import type { DifficultyCell } from "@/lib/types";
 import { T } from "@/lib/tokens";
 import {
@@ -27,6 +35,12 @@ const LABEL_W = 200;
 const LABEL_H = 28;
 const ENV_HEADER_H = 38;
 const ENV_GAP = 20;
+
+/** Minimum pass rate for the frontier training band */
+const FRONTIER_MIN = 0.35;
+
+/** Maximum pass rate for the frontier training band */
+const FRONTIER_MAX = 0.65;
 
 /** Interpolate between red (0%) → yellow (50%) → green (100%) */
 function passRateColor(rate: number): string {
@@ -52,12 +66,20 @@ function textColor(rate: number): string {
   return rate > 0.3 && rate < 0.7 ? T.text : "#ffffff";
 }
 
+/** Whether a pass rate falls in the frontier training band */
+function isFrontier(rate: number): boolean {
+  return rate >= FRONTIER_MIN && rate <= FRONTIER_MAX;
+}
+
 type EnvironmentGroup = {
   environment: string;
   categories: string[];
 };
 
+/** Difficulty heatmap with click-through navigation and frontier band highlighting */
 export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
+  const router = useRouter();
+
   const { envGroups, models, cellMap } = useMemo(() => {
     const modelSet = new Set<string>();
     const map = new Map<string, DifficultyCell>();
@@ -104,6 +126,14 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
         No difficulty data available
       </div>
     );
+  }
+
+  /** Navigate to trajectory list filtered by environment and model */
+  function handleCellClick(environment: string, model: string) {
+    const params = new URLSearchParams();
+    params.set("environment", environment);
+    params.set("model", model);
+    router.push(`/trajectory?${params.toString()}`);
   }
 
   /** Calculate total rows across all environments for SVG height */
@@ -167,11 +197,15 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
                   const cell = cellMap.get(`${group.environment}:${category}:${model}`);
                   const rate = cell?.passRate ?? 0;
                   const cellX = LABEL_W + modelIndex * (CELL_W + GAP);
+                  const frontier = isFrontier(rate);
 
                   return (
                     <Tooltip key={`${group.environment}:${category}:${model}`}>
                       <TooltipTrigger asChild>
-                        <g>
+                        <g
+                          className="cursor-pointer"
+                          onClick={() => handleCellClick(group.environment, model)}
+                        >
                           <rect
                             x={cellX}
                             y={cellY}
@@ -179,8 +213,22 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
                             height={CELL_H}
                             rx={3}
                             fill={passRateColor(rate)}
-                            className="cursor-pointer"
                           />
+                          {/* Frontier band indicator — dashed border */}
+                          {frontier && (
+                            <rect
+                              x={cellX + 1}
+                              y={cellY + 1}
+                              width={CELL_W - 2}
+                              height={CELL_H - 2}
+                              rx={2}
+                              fill="none"
+                              stroke="#ffffff"
+                              strokeWidth={1.5}
+                              strokeDasharray="4 2"
+                              opacity={0.8}
+                            />
+                          )}
                           <text
                             x={cellX + CELL_W / 2}
                             y={cellY + CELL_H / 2 + 4}
@@ -196,8 +244,9 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
                         </g>
                       </TooltipTrigger>
                       <TooltipContent>
-                        {group.environment} / {category} × {model}: {(rate * 100).toFixed(1)}%
-                        {cell ? ` (${cell.attempts} attempts)` : ""}
+                        <span className="font-semibold">{model}</span> on {group.environment}/{category}: {(rate * 100).toFixed(1)}%
+                        {cell ? ` (${cell.attempts} trajectories)` : ""}
+                        {frontier ? " — frontier range" : ""}
                       </TooltipContent>
                     </Tooltip>
                   );
@@ -236,6 +285,36 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
           );
         })}
       </svg>
+
+      {/* Legend */}
+      <div className="mt-3 flex items-center gap-4 text-[11px] text-envoi-text-dim">
+        <span>Click a cell to view trajectories</span>
+        <span className="flex items-center gap-1.5">
+          <svg width="16" height="12">
+            <rect
+              x={0}
+              y={0}
+              width={16}
+              height={12}
+              rx={2}
+              fill={passRateColor(0.5)}
+            />
+            <rect
+              x={1}
+              y={1}
+              width={14}
+              height={10}
+              rx={1}
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth={1}
+              strokeDasharray="3 2"
+              opacity={0.8}
+            />
+          </svg>
+          Frontier band (35-65%)
+        </span>
+      </div>
     </TooltipProvider>
   );
 }

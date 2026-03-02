@@ -3,7 +3,12 @@
  * Client component — handles click and scroll-into-view.
  *
  * Shows: hash, turn, test delta (+passed / -broken), LOC delta (+added / -removed),
- * mini suite bars, milestone/regression badges.
+ * mini suite bars, milestone/regression badges, and criticality indicators.
+ *
+ * Criticality heuristics (all computed from existing commit data):
+ * - Large score delta: |delta| > 5 tests changed
+ * - Suite transition: first time a suite goes from 0 to >0 passed
+ * - Regression recovery: positive delta following one or more negative deltas
  */
 
 "use client";
@@ -12,12 +17,90 @@ import { useEffect, useRef, useMemo } from "react";
 import type { Commit, Suite } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
-import { Star } from "lucide-react";
+import { Star, Diamond } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+/** Criticality classification for a commit */
+export type CriticalityTag = "large_delta" | "suite_transition" | "regression_recovery";
+
+/** Minimum absolute delta to be considered a large score change */
+const LARGE_DELTA_THRESHOLD = 5;
+
+/**
+ * Compute criticality tags for a commit based on its position in the trajectory.
+ * Returns an array of tags (empty if the commit is not critical).
+ */
+export function computeCriticality(
+  commit: Commit,
+  commitIndex: number,
+  allCommits: Commit[],
+  suites: Suite[],
+): CriticalityTag[] {
+  const tags: CriticalityTag[] = [];
+
+  if (Math.abs(commit.delta) > LARGE_DELTA_THRESHOLD) {
+    tags.push("large_delta");
+  }
+
+  if (commitIndex > 0) {
+    const prevCommit = allCommits[commitIndex - 1];
+    if (prevCommit) {
+      for (const suite of suites) {
+        const prevPassed = prevCommit.suiteState[suite.name] ?? 0;
+        const currentPassed = commit.suiteState[suite.name] ?? 0;
+        if (prevPassed === 0 && currentPassed > 0) {
+          tags.push("suite_transition");
+          break;
+        }
+      }
+    }
+  }
+
+  if (commitIndex > 0 && commit.delta > 0) {
+    let foundRegression = false;
+    for (let lookback = commitIndex - 1; lookback >= 0; lookback--) {
+      const prev = allCommits[lookback];
+      if (!prev) {
+        break;
+      }
+      if (prev.delta < 0) {
+        foundRegression = true;
+        break;
+      }
+      if (prev.delta > 0) {
+        break;
+      }
+    }
+    if (foundRegression) {
+      tags.push("regression_recovery");
+    }
+  }
+
+  return tags;
+}
+
+/** Format criticality tags into a human-readable tooltip string */
+function criticalityLabel(tags: CriticalityTag[]): string {
+  const labels: string[] = [];
+  for (const tag of tags) {
+    switch (tag) {
+      case "large_delta":
+        labels.push("Large score change");
+        break;
+      case "suite_transition":
+        labels.push("New suite unlocked");
+        break;
+      case "regression_recovery":
+        labels.push("Recovery from regression");
+        break;
+    }
+  }
+  return labels.join(", ");
+}
 
 type CommitRowProps = {
   commit: Commit;
@@ -25,9 +108,12 @@ type CommitRowProps = {
   onSelect: (index: number) => void;
   activeSuite: string;
   suites?: Suite[];
+  /** Pre-computed criticality tags for this commit */
+  criticalityTags?: CriticalityTag[];
 };
 
-export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp }: CommitRowProps) {
+/** Single commit row with optional criticality indicator */
+export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp, criticalityTags }: CommitRowProps) {
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const rowRef = useRef<HTMLDivElement>(null);
 
@@ -37,13 +123,17 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
     }
   }, [isSelected]);
 
+  const isCritical = criticalityTags !== undefined && criticalityTags.length > 0;
+
   const leftBorderColor = isSelected
     ? T.accent
     : commit.isRegression
       ? T.red
       : commit.isMilestone
         ? T.gold
-        : "transparent";
+        : isCritical
+          ? T.accent
+          : "transparent";
 
   const bgColor = isSelected ? T.accentBg : "transparent";
 
@@ -164,8 +254,21 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
           })}
       </div>
 
-      {/* Milestone badge */}
+      {/* Milestone + criticality badges */}
       <div className="flex items-center gap-[6px]">
+        {isCritical && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
+                style={{ color: T.accent, background: T.accentBg }}
+              >
+                <Diamond size={9} />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{criticalityLabel(criticalityTags)}</TooltipContent>
+          </Tooltip>
+        )}
         {commit.isMilestone && (
           <span
             className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
