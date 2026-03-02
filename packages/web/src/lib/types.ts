@@ -157,8 +157,5 @@ export type CompareMode = "traces" | "setups";
 /** Compare tab selection */
 export type CompareTab = "curves" | "milestones" | "suites";
 
-/** Trajectory detail left panel tab */
-export type DetailLeftTab = "timeline" | "tests";
-
 /** Trajectory detail right panel tab */
-export type DetailRightTab = "steps" | "code";
+export type DetailRightTab = "steps" | "code" | "tests";

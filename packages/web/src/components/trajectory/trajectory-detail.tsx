@@ -14,7 +14,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type { Trajectory, DetailLeftTab, DetailRightTab, Suite, CodeSnapshot, Commit } from "@/lib/types";
+import type { Trajectory, DetailRightTab, Suite, CodeSnapshot, Commit } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
@@ -54,7 +54,6 @@ export function TrajectoryDetail({
   const [speed, setSpeed] = useState(1);
 
   /** Tab state */
-  const [leftTab, setLeftTab] = useState<DetailLeftTab>("timeline");
   const [rightTab, setRightTab] = useState<DetailRightTab>("steps");
 
   /** Suite filter for timeline */
@@ -247,118 +246,99 @@ export function TrajectoryDetail({
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      {/* Left panel */}
+      {/* Left panel — always shows timeline */}
       <animated.div
         className="flex flex-col overflow-hidden"
         style={{ width: panelSpring.leftWidth.to((width) => `${width}%`) }}
       >
-        {/* Tab bar */}
-        <div className="flex h-[41px] shrink-0 items-stretch border-b border-envoi-border">
-          <TabButton
-            label="Timeline"
-            isActive={leftTab === "timeline"}
-            onClick={() => setLeftTab("timeline")}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Progress curve */}
+          <ProgressCurve
+            commits={commits}
+            selectedIndex={selectedIndex}
+            onSelect={handleSelectCommit}
+            activeSuite={activeSuite}
+            suites={suites}
+            totalTests={totalTests}
           />
-          <TabButton
-            label="Tests & Metrics"
-            isActive={leftTab === "tests"}
-            onClick={() => setLeftTab("tests")}
+
+          {/* Playback controls */}
+          <PlayControls
+            totalCommits={commits.length}
+            selectedIndex={selectedIndex}
+            onSelect={handleSelectCommit}
+            isPlaying={isPlaying}
+            onTogglePlay={handleTogglePlay}
+            speed={speed}
+            onSpeedChange={handleSpeedChange}
           />
-          {!rightPanelOpen && (
-            <>
-              <div className="flex-1" />
-              <Tooltip>
+
+          {/* Suite filter pills */}
+          <div className="flex items-center gap-[4px] border-b border-envoi-border px-[14px] py-[6px]">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setActiveSuite("all")}
+                  className={`rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
+                    activeSuite === "all"
+                      ? "bg-envoi-text text-white"
+                      : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+                  }`}
+                >
+                  all
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>All suites: {totalTests} tests</TooltipContent>
+            </Tooltip>
+            {suites.map((suite) => (
+              <Tooltip key={suite.name}>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={() => setRightPanelOpen(true)}
-                    className="mr-2 flex h-[24px] w-[24px] shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
-                  >
-                    <PanelRightOpen size={14} />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>Open right panel</TooltipContent>
-              </Tooltip>
-            </>
-          )}
-        </div>
-
-        {/* Left tab content */}
-        {leftTab === "timeline" ? (
-          <div className="flex flex-1 flex-col overflow-hidden">
-            {/* Progress curve */}
-            <ProgressCurve
-              commits={commits}
-              selectedIndex={selectedIndex}
-              onSelect={handleSelectCommit}
-              activeSuite={activeSuite}
-              suites={suites}
-              totalTests={totalTests}
-            />
-
-            {/* Playback controls */}
-            <PlayControls
-              totalCommits={commits.length}
-              selectedIndex={selectedIndex}
-              onSelect={handleSelectCommit}
-              isPlaying={isPlaying}
-              onTogglePlay={handleTogglePlay}
-              speed={speed}
-              onSpeedChange={handleSpeedChange}
-            />
-
-            {/* Suite filter pills */}
-            <div className="flex items-center gap-[4px] border-b border-envoi-border px-[14px] py-[6px]">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => setActiveSuite("all")}
+                    onClick={() => setActiveSuite(suite.name)}
                     className={`rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
-                      activeSuite === "all"
+                      activeSuite === suite.name
                         ? "bg-envoi-text text-white"
                         : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
                     }`}
                   >
-                    all
+                    {suite.name}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>All suites: {totalTests} tests</TooltipContent>
+                <TooltipContent>{suite.name}: {suite.total} tests</TooltipContent>
               </Tooltip>
-              {suites.map((suite) => (
-                <Tooltip key={suite.name}>
+            ))}
+            {!rightPanelOpen && (
+              <>
+                <div className="flex-1" />
+                <Tooltip>
                   <TooltipTrigger asChild>
                     <button
-                      onClick={() => setActiveSuite(suite.name)}
-                      className={`rounded-full px-[8px] py-[2px] text-[9px] font-semibold transition-colors ${
-                        activeSuite === suite.name
-                          ? "bg-envoi-text text-white"
-                          : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
-                      }`}
+                      onClick={() => setRightPanelOpen(true)}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
                     >
-                      {suite.name}
+                      <PanelRightOpen size={14} />
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent>{suite.name}: {suite.total} tests</TooltipContent>
+                  <TooltipContent>Open right panel</TooltipContent>
                 </Tooltip>
-              ))}
-            </div>
-
-            {/* Commit list (scrollable) */}
-            <div className="flex-1 overflow-y-auto">
-              {commits.map((commit) => (
-                <CommitRow
-                  key={commit.index}
-                  commit={commit}
-                  isSelected={commit.index === selectedIndex}
-                  onSelect={handleSelectCommit}
-                  activeSuite={activeSuite}
-                  suites={suites}
-                />
-              ))}
-            </div>
+              </>
+            )}
           </div>
-        ) : (
-          <TestsPanel commit={selectedCommit} suites={suites} totalTests={totalTests} />
-        )}
+
+          {/* Commit list (scrollable) */}
+          <div className="flex-1 overflow-y-auto">
+            {commits.map((commit) => (
+              <CommitRow
+                key={commit.index}
+                commit={commit}
+                isSelected={commit.index === selectedIndex}
+                onSelect={handleSelectCommit}
+                activeSuite={activeSuite}
+                suites={suites}
+              />
+            ))}
+          </div>
+        </div>
       </animated.div>
 
       {/* Draggable divider — always mounted, width animates to 0 */}
@@ -405,12 +385,17 @@ export function TrajectoryDetail({
             isActive={rightTab === "code"}
             onClick={() => setRightTab("code")}
           />
+          <TabButton
+            label="Tests & Metrics"
+            isActive={rightTab === "tests"}
+            onClick={() => setRightTab("tests")}
+          />
           <div className="flex-1" />
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 onClick={() => setRightPanelOpen(false)}
-                className="mr-2 flex h-[24px] w-[24px] shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+                className="mr-2 flex h-6 w-6 shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
               >
                 <PanelRightClose size={14} />
               </button>
@@ -422,8 +407,10 @@ export function TrajectoryDetail({
         {/* Right tab content */}
         {rightTab === "steps" ? (
           <StepsPanel commit={selectedCommit} />
-        ) : (
+        ) : rightTab === "code" ? (
           <CodePanel commit={enrichedCommit ?? selectedCommit} />
+        ) : (
+          <TestsPanel commit={selectedCommit} suites={suites} totalTests={totalTests} />
         )}
       </animated.div>
     </div>
