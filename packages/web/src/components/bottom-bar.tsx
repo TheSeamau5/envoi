@@ -6,6 +6,7 @@
 import { TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import type { Suite } from "@/lib/types";
 import { Circle } from "lucide-react";
+import { T } from "@/lib/tokens";
 
 type BottomBarProps = {
   suites?: Suite[];
@@ -22,7 +23,7 @@ export function BottomBar({ suites, totalTests }: BottomBarProps) {
       </span>
       <div className="flex-1" />
       <span className="flex items-center gap-1.25">
-        <Circle size={6} fill="#10b981" className="text-envoi-green" />
+        <Circle size={6} fill={T.green} className="text-envoi-green" />
         ALL SYSTEMS OPERATIONAL
       </span>
     </div>

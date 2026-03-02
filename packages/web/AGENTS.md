@@ -4,7 +4,7 @@ This file contains all rules, conventions, and architectural context for AI agen
 
 ## Stack
 
-- **Framework**: Next.js 15 (App Router)
+- **Framework**: Next.js 16 (App Router)
 - **Package manager**: pnpm (always pnpm, never npm or yarn)
 - **Language**: TypeScript (strict)
 - **Styling**: Tailwind CSS v4 (CSS-first config in globals.css)
@@ -57,7 +57,7 @@ This file contains all rules, conventions, and architectural context for AI agen
 - Monospace everything (JetBrains Mono)
 - Orange accent (#f97316) for active/selected states
 - White + light gray backgrounds, no dark mode
-- ALL CAPS section headers (10px, letter-spacing 0.06em)
+- ALL CAPS section headers (10px, letter-spacing 0.08em)
 - Information-dense, power-user focused
 - Bottom status bar with green dot
 

@@ -2,11 +2,11 @@
  * Syntax-highlighted code viewer with diff markers.
  * Client component — renders code lines with line numbers and highlights.
  *
- * Syntax highlighting for Rust:
- * - Keywords (fn, let, mut, pub, use, mod, struct, impl, if, else, match, return): #c41a16
- * - Types (String, Vec, Option, Result, bool, i64, usize): #0b4f79
- * - Numbers: #1750eb
- * - Comments (//): #8e8e93
+ * Syntax highlighting for Rust — colors from T.syntax* tokens:
+ * - Keywords (fn, let, mut, pub, use, mod, struct, impl, etc.)
+ * - Types (String, Vec, Option, Result, bool, i64, usize, etc.)
+ * - Numbers
+ * - Comments (//)
  *
  * Added lines get green background + green left border (3px) + "+" marker.
  * On file change, scrolls to the first changed line and flashes added lines.
@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FileSnapshot } from "@/lib/types";
+import { T } from "@/lib/tokens";
 
 type CodeViewProps = {
   snapshot?: FileSnapshot;
@@ -23,18 +24,6 @@ type CodeViewProps = {
   additions?: number;
   deletions?: number;
 };
-
-/** Syntax color tokens */
-const COLORS = {
-  keyword: "#c41a16",
-  type: "#0b4f79",
-  number: "#1750eb",
-  comment: "#8e8e93",
-  text: "#0a0a0a",
-  addedBg: "rgba(16, 185, 129, 0.08)",
-  addedBorder: "#10b981",
-  flashBg: "rgba(16, 185, 129, 0.25)",
-} as const;
 
 /** Line height in pixels — used for scroll offset calculation */
 const LINE_HEIGHT = 20;
@@ -64,7 +53,7 @@ function highlightLine(line: string): React.ReactNode[] {
     const leadingSpace = line.slice(0, line.length - trimmed.length);
     return [
       <span key="ws">{leadingSpace}</span>,
-      <span key="comment" style={{ color: COLORS.comment }}>{trimmed}</span>,
+      <span key="comment" style={{ color: T.syntaxComment }}>{trimmed}</span>,
     ];
   }
 
@@ -80,23 +69,23 @@ function highlightLine(line: string): React.ReactNode[] {
 
     if (token.startsWith("//")) {
       tokens.push(
-        <span key={tokenIndex} style={{ color: COLORS.comment }}>{token}</span>,
+        <span key={tokenIndex} style={{ color: T.syntaxComment }}>{token}</span>,
       );
     } else if (token.startsWith('"') || token.startsWith("'")) {
       tokens.push(
-        <span key={tokenIndex} style={{ color: COLORS.keyword }}>{token}</span>,
+        <span key={tokenIndex} style={{ color: T.syntaxKeyword }}>{token}</span>,
       );
     } else if (/^\d+$/.test(token)) {
       tokens.push(
-        <span key={tokenIndex} style={{ color: COLORS.number }}>{token}</span>,
+        <span key={tokenIndex} style={{ color: T.syntaxNumber }}>{token}</span>,
       );
     } else if (KEYWORDS.has(token)) {
       tokens.push(
-        <span key={tokenIndex} style={{ color: COLORS.keyword }}>{token}</span>,
+        <span key={tokenIndex} style={{ color: T.syntaxKeyword }}>{token}</span>,
       );
     } else if (TYPES.has(token)) {
       tokens.push(
-        <span key={tokenIndex} style={{ color: COLORS.type }}>{token}</span>,
+        <span key={tokenIndex} style={{ color: T.syntaxType }}>{token}</span>,
       );
     } else {
       tokens.push(<span key={tokenIndex}>{token}</span>);
@@ -160,14 +149,14 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
         <div
           className="sticky top-0 z-10 flex items-center gap-[8px] border-b px-[12px] py-[4px]"
           style={{
-            borderColor: "#f0f0f0",
-            background: "#fafafa",
+            borderColor: T.borderLight,
+            background: T.surface,
           }}
         >
           {additions !== undefined && additions > 0 && (
             <span
               className="text-[10px] font-semibold"
-              style={{ color: COLORS.addedBorder }}
+              style={{ color: T.diffAddedBorder }}
             >
               +{additions}
             </span>
@@ -175,7 +164,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
           {deletions !== undefined && deletions > 0 && (
             <span
               className="text-[10px] font-semibold"
-              style={{ color: "#ef4444" }}
+              style={{ color: T.red }}
             >
               &minus;{deletions}
             </span>
@@ -191,10 +180,10 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
               className="flex"
               style={{
                 background: isAdded
-                  ? (flashing ? COLORS.flashBg : COLORS.addedBg)
+                  ? (flashing ? T.diffFlashBg : T.diffAddedBg)
                   : undefined,
                 borderLeft: isAdded
-                  ? `3px solid ${COLORS.addedBorder}`
+                  ? `3px solid ${T.diffAddedBorder}`
                   : "3px solid transparent",
                 transition: isAdded ? "background 0.6s ease-out" : undefined,
               }}
@@ -219,7 +208,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
                   width: 16,
                   fontSize: 10,
                   lineHeight: "20px",
-                  color: isAdded ? COLORS.addedBorder : "transparent",
+                  color: isAdded ? T.diffAddedBorder : "transparent",
                 }}
               >
                 {isAdded ? "+" : " "}
@@ -231,7 +220,7 @@ export function CodeView({ snapshot, filePath, additions, deletions }: CodeViewP
                 style={{
                   fontSize: 11,
                   lineHeight: "20px",
-                  color: COLORS.text,
+                  color: T.text,
                   margin: 0,
                   padding: 0,
                 }}

@@ -158,4 +158,54 @@ export type CompareMode = "traces" | "setups";
 export type CompareTab = "curves" | "milestones" | "suites";
 
 /** Trajectory detail right panel tab */
-export type DetailRightTab = "steps" | "code" | "tests";
+export type DetailRightTab = "steps" | "code" | "tests" | "waste";
+
+/** Row in the difficulty heatmap — one per (environment, test_category, model) */
+export type DifficultyCell = {
+  environment: string;
+  category: string;
+  model: string;
+  passRate: number;
+  attempts: number;
+};
+
+/** Row in the portfolio dashboard — one per model */
+export type PortfolioRow = {
+  model: string;
+  environments: Record<string, { passRate: number; rank: number }>;
+  avgRank: number;
+};
+
+/** Waste category breakdown for a single trajectory */
+export type WasteEntry = {
+  category: string;
+  count: number;
+  tokensCost: number;
+  percentage: number;
+};
+
+/** Schema column info for the SQL console */
+export type SchemaColumn = {
+  tableName: string;
+  columnName: string;
+  dataType: string;
+};
+
+/** Query template parameter definition */
+export type TemplateParameter = {
+  name: string;
+  label: string;
+  type: "text" | "select";
+  defaultValue: string;
+  options?: string[];
+};
+
+/** Predefined query template */
+export type QueryTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  sql: string;
+  parameters: TemplateParameter[];
+  visualization: "table" | "bar" | "line";
+};

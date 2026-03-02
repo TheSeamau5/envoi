@@ -281,6 +281,41 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
       GROUP BY trajectory_id, environment, agent_model, turn
     `);
     console.log("[db] Created turn_summaries view");
+
+    await conn.run(`
+      CREATE OR REPLACE VIEW file_access AS
+      SELECT
+        trajectory_id,
+        environment,
+        agent_model,
+        part,
+        turn,
+        tool_name,
+        json_extract_string(tool_input, '$.file_path') AS file_path,
+        content_token_estimate AS tokens,
+        duration_ms
+      FROM read_parquet('${glob}')
+      WHERE tool_name IN ('Read', 'Write', 'Edit', 'file_read', 'file_write')
+        AND tool_input IS NOT NULL
+    `);
+    console.log("[db] Created file_access view");
+
+    await conn.run(`
+      CREATE OR REPLACE VIEW trajectories AS
+      SELECT
+        trajectory_id,
+        environment,
+        agent_model,
+        MIN(agent) AS agent,
+        MIN(started_at) AS started_at,
+        MAX(part) + 1 AS total_parts,
+        MAX(turn) AS total_turns,
+        SUM(content_token_estimate) AS total_tokens,
+        MAX(session_end_reason) AS session_end_reason
+      FROM read_parquet('${glob}')
+      GROUP BY trajectory_id, environment, agent_model
+    `);
+    console.log("[db] Created trajectories view");
   } catch (err) {
     console.warn("[db] Failed to create analytics views:", err);
   } finally {

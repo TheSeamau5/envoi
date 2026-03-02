@@ -3,6 +3,7 @@
  *
  * Queries DuckDB/S3 for real data, falls back to mock when S3 is not configured.
  * Uses materialized summary tables when available for fast list queries.
+ * Derives environment from suite names when the environment column is a placeholder.
  * Import this module only from server components or API route handlers.
  */
 
@@ -13,6 +14,7 @@ import {
   codeSnapshotsUri,
   query,
   hasSummaryTables,
+  validateTrajectoryId,
 } from "./db";
 import {
   reconstructTrajectory,
@@ -25,7 +27,16 @@ import {
   type TrajectorySummaryRow,
 } from "./reconstruct";
 import { cached } from "./cache";
-import type { Trajectory, Suite, CodeSnapshot, FileSnapshot } from "@/lib/types";
+import type {
+  Trajectory,
+  Suite,
+  CodeSnapshot,
+  FileSnapshot,
+  DifficultyCell,
+  PortfolioRow,
+  WasteEntry,
+  SchemaColumn,
+} from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Mock fallback (lazy import to avoid bundling when not needed)
@@ -643,4 +654,442 @@ export async function getCodeHistory(
     console.error(`[data] Failed to load code history for ${trajectoryId}:`, error);
     return undefined;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Schema info (for SQL Console)
+// ---------------------------------------------------------------------------
+
+/**
+ * Get database schema info — table/view names with their columns.
+ * Used by the SQL Console to show a schema reference sidebar.
+ */
+export async function getSchemaInfo(): Promise<SchemaColumn[]> {
+  if (!isS3Configured()) {
+    return [];
+  }
+
+  try {
+    const rawRows = await query(`
+      SELECT table_name, column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'main'
+      ORDER BY table_name, ordinal_position
+    `);
+
+    return rawRows.map((row) => ({
+      tableName: String(row.table_name ?? ""),
+      columnName: String(row.column_name ?? ""),
+      dataType: String(row.data_type ?? ""),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Execute a read-only SQL query from the SQL Console.
+ * Returns rows, column names, row count, and duration.
+ */
+export async function executeQuery(sql: string): Promise<{
+  rows: Record<string, unknown>[];
+  columns: string[];
+  rowCount: number;
+  durationMs: number;
+}> {
+  const start = Date.now();
+  const rows = await query(sql);
+  const durationMs = Date.now() - start;
+  const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
+  return { rows, columns, rowCount: rows.length, durationMs };
+}
+
+// ---------------------------------------------------------------------------
+// Difficulty heatmap
+// ---------------------------------------------------------------------------
+
+/** Known c_compiler suites — everything else is gameboy emulator */
+const C_COMPILER_SUITES = new Set(["basics", "wacct", "c_testsuite", "torture"]);
+
+/** Derive environment name from suite name */
+function suiteToEnvironment(suiteName: string): string {
+  return C_COMPILER_SUITES.has(suiteName) ? "c_compiler" : "gameboy_emulator";
+}
+
+/**
+ * Get difficulty data — per-(environment, suite, model) pass rates for the heatmap.
+ *
+ * Uses the `suites` column from raw parquet which contains the actual per-suite
+ * pass/fail/total breakdown. The `environment` column in the parquet is a
+ * placeholder ("environment"), so we derive the real environment from suite names.
+ */
+export async function getDifficultyData(): Promise<DifficultyCell[]> {
+  if (!isS3Configured()) {
+    return getMockDifficultyData();
+  }
+
+  return cached("difficulty-data", async () => {
+    try {
+      const glob = await allTracesGlob();
+
+      /**
+       * The `suites` column contains JSON like:
+       *   {"all/basics/smoke": {"ok":true,"passed":7,"failed":0,"total":7}, ...}
+       *
+       * We take the latest non-empty suites snapshot per trajectory,
+       * unnest the JSON keys, extract suite name (2nd path segment),
+       * and aggregate passed/total per (suite, model).
+       */
+      const rawRows = await query(`
+        WITH latest_suites AS (
+          SELECT
+            trajectory_id,
+            agent_model,
+            suites,
+            ROW_NUMBER() OVER (
+              PARTITION BY trajectory_id
+              ORDER BY part DESC
+            ) AS rn
+          FROM read_parquet('${escapeString(glob)}')
+          WHERE suites IS NOT NULL
+            AND LENGTH(CAST(suites AS VARCHAR)) > 5
+        ),
+        snapshots AS (
+          SELECT trajectory_id, agent_model, suites::JSON AS sr
+          FROM latest_suites
+          WHERE rn = 1
+        ),
+        suite_entries AS (
+          SELECT
+            agent_model,
+            unnest(json_keys(sr)) AS suite_key,
+            sr
+          FROM snapshots
+        ),
+        parsed AS (
+          SELECT
+            agent_model,
+            SPLIT_PART(suite_key, '/', 2) AS suite_name,
+            CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE) AS passed,
+            CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE) AS total
+          FROM suite_entries
+        ),
+        aggregated AS (
+          SELECT
+            suite_name AS category,
+            agent_model AS model,
+            SUM(passed) AS total_passed,
+            SUM(total) AS total_total,
+            COUNT(*) AS attempts
+          FROM parsed
+          WHERE suite_name != '' AND suite_name != 'all'
+          GROUP BY suite_name, agent_model
+        )
+        SELECT
+          category,
+          model,
+          CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate,
+          attempts
+        FROM aggregated
+        ORDER BY category, model
+      `);
+
+      return rawRows.map((row) => {
+        const category = String(row.category ?? "");
+        return {
+          environment: suiteToEnvironment(category),
+          category,
+          model: String(row.model ?? ""),
+          passRate: Number(row.pass_rate ?? 0),
+          attempts: Number(row.attempts ?? 0),
+        };
+      });
+    } catch {
+      return getMockDifficultyData();
+    }
+  });
+}
+
+/** Mock difficulty data for when S3 is not configured */
+async function getMockDifficultyData(): Promise<DifficultyCell[]> {
+  const models = ["gpt-4o", "claude-sonnet-4-20250514", "o3"];
+  const envSuites: Record<string, string[]> = {
+    c_compiler: ["basics", "wacct", "c_testsuite", "torture"],
+    gameboy_emulator: ["mooneye_acceptance", "blargg_cpu", "acid2_cgb"],
+  };
+  const cells: DifficultyCell[] = [];
+  for (const [environment, suites] of Object.entries(envSuites)) {
+    for (const category of suites) {
+      for (const model of models) {
+        cells.push({
+          environment,
+          category,
+          model,
+          passRate: Math.random() * 0.8 + 0.1,
+          attempts: Math.floor(Math.random() * 10) + 1,
+        });
+      }
+    }
+  }
+  return cells;
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio dashboard
+// ---------------------------------------------------------------------------
+
+/**
+ * Get portfolio data — per-model rankings across environments.
+ *
+ * Derives environment from suite names since the parquet `environment` column
+ * is a placeholder. Uses per-trajectory overall pass rates from the latest
+ * suites snapshot.
+ */
+export async function getPortfolioData(): Promise<PortfolioRow[]> {
+  if (!isS3Configured()) {
+    return getMockPortfolioData();
+  }
+
+  return cached("portfolio-data", async () => {
+    try {
+      const glob = await allTracesGlob();
+
+      /**
+       * Get the latest suites snapshot per trajectory, compute overall
+       * pass rate per trajectory, then derive environment from the first suite key.
+       */
+      const rawRows = await query(`
+        WITH latest_suites AS (
+          SELECT
+            trajectory_id,
+            agent_model,
+            suites,
+            ROW_NUMBER() OVER (
+              PARTITION BY trajectory_id
+              ORDER BY part DESC
+            ) AS rn
+          FROM read_parquet('${escapeString(glob)}')
+          WHERE suites IS NOT NULL
+            AND LENGTH(CAST(suites AS VARCHAR)) > 5
+        ),
+        snapshots AS (
+          SELECT
+            trajectory_id,
+            agent_model,
+            suites::JSON AS sr
+          FROM latest_suites
+          WHERE rn = 1
+        ),
+        suite_entries AS (
+          SELECT
+            trajectory_id,
+            agent_model,
+            unnest(json_keys(sr)) AS suite_key,
+            sr
+          FROM snapshots
+        ),
+        per_trajectory AS (
+          SELECT
+            trajectory_id,
+            agent_model,
+            SPLIT_PART(MIN(suite_key), '/', 2) AS first_suite,
+            SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE)) AS total_passed,
+            SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE)) AS total_total
+          FROM suite_entries
+          WHERE SPLIT_PART(suite_key, '/', 2) != 'all'
+            AND SPLIT_PART(suite_key, '/', 2) != ''
+          GROUP BY trajectory_id, agent_model
+        ),
+        with_env AS (
+          SELECT
+            agent_model,
+            CASE
+              WHEN first_suite IN ('basics', 'wacct', 'c_testsuite', 'torture')
+              THEN 'c_compiler'
+              ELSE 'gameboy_emulator'
+            END AS environment,
+            CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate
+          FROM per_trajectory
+        ),
+        scores AS (
+          SELECT
+            agent_model,
+            environment,
+            AVG(pass_rate) AS pass_rate
+          FROM with_env
+          GROUP BY agent_model, environment
+        ),
+        ranked AS (
+          SELECT *,
+            RANK() OVER (PARTITION BY environment ORDER BY pass_rate DESC) AS env_rank
+          FROM scores
+        )
+        SELECT agent_model, environment, pass_rate, env_rank
+        FROM ranked
+        ORDER BY agent_model, environment
+      `);
+
+      return buildPortfolioRows(rawRows);
+    } catch {
+      return getMockPortfolioData();
+    }
+  });
+}
+
+/** Build PortfolioRow[] from ranked query results */
+function buildPortfolioRows(rawRows: Record<string, unknown>[]): PortfolioRow[] {
+  const modelMap = new Map<string, PortfolioRow>();
+
+  for (const row of rawRows) {
+    const model = String(row.agent_model ?? "");
+    const environment = String(row.environment ?? "");
+    const passRate = Number(row.pass_rate ?? 0);
+    const rank = Number(row.env_rank ?? 0);
+
+    let entry = modelMap.get(model);
+    if (!entry) {
+      entry = { model, environments: {}, avgRank: 0 };
+      modelMap.set(model, entry);
+    }
+    entry.environments[environment] = { passRate, rank };
+  }
+
+  /** Compute average rank across environments */
+  for (const entry of modelMap.values()) {
+    const ranks = Object.values(entry.environments).map((env) => env.rank);
+    entry.avgRank = ranks.length > 0
+      ? ranks.reduce((sum, rank) => sum + rank, 0) / ranks.length
+      : 0;
+  }
+
+  return Array.from(modelMap.values()).sort((rowA, rowB) => rowA.avgRank - rowB.avgRank);
+}
+
+/** Mock portfolio data */
+async function getMockPortfolioData(): Promise<PortfolioRow[]> {
+  const models = ["gpt-4o", "claude-sonnet-4-20250514", "o3", "gemini-2.5-pro", "deepseek-r1"];
+  const environments = ["c_compiler", "gameboy_emulator"];
+  const rows: Record<string, unknown>[] = [];
+  for (const [modelIndex, model] of models.entries()) {
+    for (const environment of environments) {
+      rows.push({
+        agent_model: model,
+        environment,
+        pass_rate: 0.9 - modelIndex * 0.15,
+        env_rank: modelIndex + 1,
+      });
+    }
+  }
+  return buildPortfolioRows(rows);
+}
+
+// ---------------------------------------------------------------------------
+// Waste analysis
+// ---------------------------------------------------------------------------
+
+/**
+ * Get waste analysis for a trajectory — identifies redundant operations.
+ */
+export async function getWasteAnalysis(trajectoryId: string): Promise<WasteEntry[]> {
+  if (!isS3Configured()) {
+    return getMockWasteData();
+  }
+
+  try {
+    const validId = validateTrajectoryId(trajectoryId);
+    const uri = await traceUri(validId);
+
+    /** Redundant reads — same file read more than once between writes */
+    const redundantReads = await query(`
+      WITH file_ops AS (
+        SELECT
+          part,
+          tool_name,
+          json_extract_string(tool_input, '$.file_path') AS file_path,
+          COALESCE(content_token_estimate, 0) AS tokens
+        FROM read_parquet('${escapeString(uri)}')
+        WHERE tool_name IN ('Read', 'Write', 'Edit', 'file_read', 'file_write')
+          AND tool_input IS NOT NULL
+        ORDER BY part
+      ),
+      reads AS (
+        SELECT part, file_path, tokens
+        FROM file_ops
+        WHERE tool_name IN ('Read', 'file_read')
+      ),
+      writes AS (
+        SELECT part, file_path
+        FROM file_ops
+        WHERE tool_name IN ('Write', 'Edit', 'file_write')
+      )
+      SELECT
+        COUNT(*) AS count,
+        COALESCE(SUM(r.tokens), 0) AS tokens_cost
+      FROM reads r
+      WHERE EXISTS (
+        SELECT 1 FROM reads r2
+        WHERE r2.file_path = r.file_path
+          AND r2.part < r.part
+          AND NOT EXISTS (
+            SELECT 1 FROM writes w
+            WHERE w.file_path = r.file_path
+              AND w.part > r2.part
+              AND w.part < r.part
+          )
+      )
+    `);
+
+    /** Repeated errors — same tool producing errors multiple times */
+    const repeatedErrors = await query(`
+      SELECT
+        COUNT(*) - COUNT(DISTINCT tool_name || COALESCE(tool_error, '')) AS count,
+        COALESCE(SUM(content_token_estimate), 0) AS tokens_cost
+      FROM read_parquet('${escapeString(uri)}')
+      WHERE tool_status = 'error'
+        AND tool_error IS NOT NULL
+    `);
+
+    /** Total tokens for the trajectory */
+    const totalRow = await query(`
+      SELECT COALESCE(SUM(content_token_estimate), 0) AS total_tokens
+      FROM read_parquet('${escapeString(uri)}')
+    `);
+    const totalTokens = Number(totalRow[0]?.total_tokens ?? 1);
+
+    const entries: WasteEntry[] = [];
+    const redundantCount = Number(redundantReads[0]?.count ?? 0);
+    const redundantCost = Number(redundantReads[0]?.tokens_cost ?? 0);
+    if (redundantCount > 0) {
+      entries.push({
+        category: "redundant_read",
+        count: redundantCount,
+        tokensCost: redundantCost,
+        percentage: totalTokens > 0 ? (redundantCost / totalTokens) * 100 : 0,
+      });
+    }
+
+    const errorCount = Number(repeatedErrors[0]?.count ?? 0);
+    const errorCost = Number(repeatedErrors[0]?.tokens_cost ?? 0);
+    if (errorCount > 0) {
+      entries.push({
+        category: "repeated_error",
+        count: errorCount,
+        tokensCost: errorCost,
+        percentage: totalTokens > 0 ? (errorCost / totalTokens) * 100 : 0,
+      });
+    }
+
+    return entries;
+  } catch (error) {
+    console.error(`[data] Failed to get waste analysis for ${trajectoryId}:`, error);
+    return [];
+  }
+}
+
+/** Mock waste data */
+function getMockWasteData(): WasteEntry[] {
+  return [
+    { category: "redundant_read", count: 12, tokensCost: 4800, percentage: 8.2 },
+    { category: "repeated_error", count: 5, tokensCost: 2100, percentage: 3.6 },
+  ];
 }

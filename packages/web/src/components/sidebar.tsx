@@ -12,6 +12,10 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   GitCommitHorizontal,
+  Grid3x3,
+  LayoutDashboard,
+  Terminal,
+  FileSearch,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
@@ -26,6 +30,10 @@ import {
 const NAV_ITEMS = [
   { href: "/compare", label: "Compare", icon: BarChart3 },
   { href: "/trajectory", label: "Trajectories", icon: GitCommitHorizontal },
+  { href: "/difficulty", label: "Difficulty", icon: Grid3x3 },
+  { href: "/portfolio", label: "Portfolio", icon: LayoutDashboard },
+  { href: "/query", label: "Query", icon: Terminal },
+  { href: "/templates", label: "Templates", icon: FileSearch },
 ] as const;
 
 type SidebarProps = {

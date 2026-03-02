@@ -24,6 +24,28 @@ export const T = {
   redBg: "rgba(239,68,68,0.06)",
   gold: "#a17a08",
   goldBg: "rgba(161,122,8,0.07)",
+  greenBgOpaque: "#f0fdf9",
+  redBgOpaque: "#fef2f2",
+  redBorderLight: "rgba(239,68,68,0.2)",
+  /** Step type colors — match --color-step-* in globals.css */
+  stepReasoning: "#f97316",
+  stepRead: "#2563eb",
+  stepWrite: "#059669",
+  stepTool: "#a17a08",
+  stepTest: "#059669",
+  stepMcp: "#c026a3",
+  stepText: "#6b7280",
+  stepSpawn: "#7c3aed",
+  stepMessage: "#0891b2",
+  /** Syntax highlighting — match --color-syntax-* in globals.css */
+  syntaxKeyword: "#c41a16",
+  syntaxType: "#0b4f79",
+  syntaxNumber: "#1750eb",
+  syntaxComment: "#8e8e93",
+  /** Code diff — match --color-diff-* in globals.css */
+  diffAddedBg: "rgba(16,185,129,0.08)",
+  diffAddedBorder: "#10b981",
+  diffFlashBg: "rgba(16,185,129,0.25)",
   radius: "6px",
   mono: "var(--font-mono), 'JetBrains Mono', 'SF Mono', 'Menlo', monospace",
 } as const;

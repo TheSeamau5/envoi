@@ -8,13 +8,13 @@
  * - file_read / file_write: INPUT (path JSON) + OUTPUT (code/confirmation)
  * - test_run: RESULTS section with pass/fail summary
  *
- * Step type icons and colors:
- * - REASONING: Diamond, #f97316
- * - READ: ArrowRight, #2563eb
- * - WRITE: ArrowLeft, #059669
- * - TOOL: Terminal, #a17a08
- * - TEST: Play, #059669
- * - MCP: Hexagon, #c026a3
+ * Step type icons and colors (from T.step* tokens):
+ * - REASONING: Diamond
+ * - READ: ArrowRight
+ * - WRITE: ArrowLeft
+ * - TOOL: Terminal
+ * - TEST: Play
+ * - MCP: Hexagon
  */
 
 "use client";
@@ -49,15 +49,15 @@ const STEP_CONFIG: Record<
   Step["type"],
   { icon: typeof Diamond; color: string; label: string }
 > = {
-  reasoning: { icon: Diamond, color: "#f97316", label: "REASONING" },
-  file_read: { icon: ArrowRight, color: "#2563eb", label: "READ" },
-  file_write: { icon: ArrowLeft, color: "#059669", label: "WRITE" },
-  tool_call: { icon: Terminal, color: "#a17a08", label: "TOOL" },
-  test_run: { icon: Play, color: "#059669", label: "TEST" },
-  mcp_call: { icon: Hexagon, color: "#c026a3", label: "MCP" },
-  text: { icon: Type, color: "#6b7280", label: "TEXT" },
-  spawn: { icon: GitBranch, color: "#7c3aed", label: "SPAWN" },
-  message: { icon: MessageSquare, color: "#0891b2", label: "MESSAGE" },
+  reasoning: { icon: Diamond, color: T.stepReasoning, label: "REASONING" },
+  file_read: { icon: ArrowRight, color: T.stepRead, label: "READ" },
+  file_write: { icon: ArrowLeft, color: T.stepWrite, label: "WRITE" },
+  tool_call: { icon: Terminal, color: T.stepTool, label: "TOOL" },
+  test_run: { icon: Play, color: T.stepTest, label: "TEST" },
+  mcp_call: { icon: Hexagon, color: T.stepMcp, label: "MCP" },
+  text: { icon: Type, color: T.stepText, label: "TEXT" },
+  spawn: { icon: GitBranch, color: T.stepSpawn, label: "SPAWN" },
+  message: { icon: MessageSquare, color: T.stepMessage, label: "MESSAGE" },
 };
 
 /** Section label used in expanded content */
@@ -88,7 +88,7 @@ function MonoBox({
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
         background: isError ? T.redBg : T.surface,
-        borderColor: isError ? "rgba(239,68,68,0.2)" : T.borderLight,
+        borderColor: isError ? T.redBorderLight : T.borderLight,
         color: isError ? T.redDark : T.text,
       }}
     >
@@ -339,9 +339,9 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
 
   /** Opaque backgrounds for the sticky banner — prevents text bleed-through from scrolling content */
   const bgColor = hasRegression
-    ? "#fef2f2"
+    ? T.redBgOpaque
     : hasProgress
-      ? "#f0fdf9"
+      ? T.greenBgOpaque
       : T.surface;
   const textColor = hasRegression
     ? T.redDark

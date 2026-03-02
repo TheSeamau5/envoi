@@ -29,6 +29,7 @@ import { CommitRow } from "./commit-row";
 import { TestsPanel } from "./tests-panel";
 import { StepsPanel } from "./steps-panel";
 import { CodePanel } from "./code-panel";
+import { WastePanel } from "./waste-panel";
 
 type TrajectoryDetailProps = {
   trajectory: Trajectory;
@@ -390,6 +391,11 @@ export function TrajectoryDetail({
             isActive={rightTab === "tests"}
             onClick={() => setRightTab("tests")}
           />
+          <TabButton
+            label="Waste"
+            isActive={rightTab === "waste"}
+            onClick={() => setRightTab("waste")}
+          />
           <div className="flex-1" />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -409,6 +415,8 @@ export function TrajectoryDetail({
           <StepsPanel commit={selectedCommit} />
         ) : rightTab === "code" ? (
           <CodePanel commit={enrichedCommit ?? selectedCommit} />
+        ) : rightTab === "waste" ? (
+          <WastePanel trajectoryId={trajectory.id} />
         ) : (
           <TestsPanel commit={selectedCommit} suites={suites} totalTests={totalTests} />
         )}
