@@ -76,10 +76,11 @@ class ModalSandbox:
 
     @staticmethod
     async def get_app() -> modal.App:
-        """Return (or lazily create) the shared Modal App."""
+        """Return the shared Modal App (must be set by deploy.py before use)."""
         if ModalSandbox.app is None:
-            ModalSandbox.app = await modal.App.lookup.aio(
-                "envoi-trace", create_if_missing=True,
+            raise RuntimeError(
+                "ModalSandbox.app not set — deploy.py must assign the "
+                "ephemeral app before calling run_trajectory()"
             )
         return ModalSandbox.app
 

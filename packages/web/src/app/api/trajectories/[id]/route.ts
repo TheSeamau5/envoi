@@ -2,6 +2,8 @@
  * GET /api/trajectories/[id]
  *
  * Returns full trajectory data for the detail page.
+ * Pass ?bust=<timestamp> to bypass local cache and read directly from S3
+ * (used by the live-polling hook for in-progress trajectories).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -9,10 +11,11 @@ import { getTrajectoryById } from "@/lib/server/data";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-export async function GET(_request: NextRequest, { params }: RouteParams) {
+export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
-    const trajectory = await getTrajectoryById(id);
+    const fresh = request.nextUrl.searchParams.has("bust");
+    const trajectory = await getTrajectoryById(id, { fresh });
 
     if (!trajectory) {
       return NextResponse.json(

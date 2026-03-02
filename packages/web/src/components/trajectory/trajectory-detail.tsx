@@ -18,6 +18,7 @@ import type { Trajectory, Suite, CodeSnapshot, Commit } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
+import { useLiveTrajectory } from "@/lib/use-live-trajectory";
 import {
   Tooltip,
   TooltipContent,
@@ -43,10 +44,11 @@ type RightTab = "steps" | "code" | "tests";
 
 /** Main trajectory detail view with resizable split layout */
 export function TrajectoryDetail({
-  trajectory,
+  trajectory: initialTrajectory,
   initialRightPanelOpen,
   initialDividerPct,
 }: TrajectoryDetailProps) {
+  const { trajectory, isLive } = useLiveTrajectory(initialTrajectory);
   const { commits } = trajectory;
   const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
   const totalTests = computeTotalTests(suites);
@@ -307,6 +309,7 @@ export function TrajectoryDetail({
 
           {/* Suite filter pills + critical filter toggle */}
           <div className="flex flex-nowrap items-center gap-[4px] overflow-x-auto border-b border-envoi-border px-[14px] py-[6px]">
+            {isLive && <LiveBadge />}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -501,5 +504,18 @@ function TabButton({
     >
       {label}
     </button>
+  );
+}
+
+/** Pulsing green dot + LIVE label shown when the trajectory is still running */
+function LiveBadge() {
+  return (
+    <span className="mr-[4px] flex shrink-0 items-center gap-[5px] rounded-full bg-emerald-50 px-[8px] py-[2px] text-[11px] font-bold uppercase tracking-[0.08em] text-emerald-700">
+      <span className="relative flex h-[7px] w-[7px]">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
+        <span className="relative inline-flex h-[7px] w-[7px] rounded-full bg-emerald-500" />
+      </span>
+      live
+    </span>
   );
 }

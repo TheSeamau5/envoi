@@ -82,7 +82,9 @@ export function TrajectoryList({ trajectories }: TrajectoryListProps) {
     const active: Trajectory[] = [];
     const failed: Trajectory[] = [];
     for (const trace of trajectories) {
-      if (trace.finalPassed > 0) {
+      const hasScore = trace.finalPassed > 0;
+      const hasSubstantialWork = trace.commits.length >= 3;
+      if (hasScore || hasSubstantialWork) {
         active.push(trace);
       } else {
         failed.push(trace);

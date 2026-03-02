@@ -214,6 +214,12 @@ export async function traceUri(trajectoryId: string): Promise<string> {
   return `s3://${getBucket()}/trajectories/${validId}/trace.parquet`;
 }
 
+/** Always return the S3 URI, bypassing local cache (for live trajectories) */
+export function freshTraceUri(trajectoryId: string): string {
+  const validId = validateTrajectoryId(trajectoryId);
+  return `s3://${getBucket()}/trajectories/${validId}/trace.parquet`;
+}
+
 /** URI for a trajectory's code_snapshots.parquet file (may not exist) */
 export async function codeSnapshotsUri(trajectoryId: string): Promise<string | undefined> {
   ensureSynced();

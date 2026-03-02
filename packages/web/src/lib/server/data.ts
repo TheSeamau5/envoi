@@ -11,6 +11,7 @@ import {
   isS3Configured,
   allTracesGlob,
   traceUri,
+  freshTraceUri,
   codeSnapshotsUri,
   query,
   hasSummaryTables,
@@ -291,13 +292,16 @@ async function getAllTrajectoriesFromGlob(opts?: {
  */
 export async function getTrajectoryById(
   id: string,
+  options?: { fresh?: boolean },
 ): Promise<Trajectory | undefined> {
   if (!isS3Configured()) {
     return getMockTrajectoryById(id);
   }
 
   try {
-    const uri = await traceUri(id);
+    const uri = options?.fresh
+      ? freshTraceUri(id)
+      : await traceUri(id);
     const sql = `
       SELECT * FROM read_parquet('${escapeString(uri)}')
       ORDER BY part

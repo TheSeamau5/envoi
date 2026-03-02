@@ -20,6 +20,18 @@ from typing import Any
 
 import modal
 
+from envoi_code.orchestrator import (
+    AGENT_BACKENDS,
+    DEFAULT_AGENT,
+    MESSAGE_TIMEOUT_SECONDS,
+    RESUME_FROM_S3,
+    run_trajectory,
+)
+from envoi_code.sandbox.modal.backend import ModalSandbox
+from envoi_code.utils.helpers import tprint
+
+print = tprint
+
 ROOT = Path(__file__).parent.parent.parent
 WORKSPACE_ROOT = ROOT.parent.parent.parent
 
@@ -45,18 +57,6 @@ function_image = (
         WORKSPACE_ROOT / "examples", remote_path="/root/examples",
     )
 )
-
-# Import these after defining image — they get serialized into the image.
-from envoi_code.orchestrator import (  # noqa: E402
-    AGENT_BACKENDS,
-    DEFAULT_AGENT,
-    MESSAGE_TIMEOUT_SECONDS,
-    RESUME_FROM_S3,
-    run_trajectory,
-)
-from envoi_code.utils.helpers import tprint  # noqa: E402
-
-print = tprint
 
 
 def parse_raw_params_json(raw_params_json: str | None) -> dict[str, Any] | None:
@@ -92,6 +92,8 @@ async def modal_run_trajectory(
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
 ) -> str:
+    # Share the function's ephemeral app so sandboxes are cleaned up with it.
+    ModalSandbox.app = app
     raw_params = parse_raw_params_json(raw_params_json)
     return await run_trajectory(
         agent=agent,
@@ -140,6 +142,7 @@ async def modal_run_trajectory_non_preemptible(
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
 ) -> str:
+    ModalSandbox.app = app
     raw_params = parse_raw_params_json(raw_params_json)
     return await run_trajectory(
         agent=agent,

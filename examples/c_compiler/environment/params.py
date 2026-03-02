@@ -28,7 +28,7 @@ class VariantParams(BaseModel):
 
 def params() -> dict[str, object]:
     return {
-        "advisor_model": "@anthropic/claude-opus-4.6",
+        "advisor_model": "@anthropic/claude-sonnet-4.6",
         "advisor_model_thinking_level": "high",
         "advisor_system_prompt": (
             "You are a strict C compiler engineering reviewer. "

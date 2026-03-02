@@ -88,6 +88,31 @@ def expected_target_arch() -> tuple[str, set[str]]:
 
 
 def to_result(results: list[CaseResult]) -> TestResult:
+    # A compiler that rejects EVERYTHING trivially "passes" all invalid-program
+    # tests (expect_compile_success=False).  Detect this: if no valid program
+    # reached the verify phase (i.e., the compiler never produced a working
+    # binary) AND there are valid programs that failed compilation, then the
+    # compiler is broken and invalid-program rejections should not be credited.
+    any_valid_compiled = any(r.phase == "verify" for r in results)
+    has_valid_compile_failures = any(
+        r.phase == "compile" and not r.passed for r in results
+    )
+    if not any_valid_compiled and has_valid_compile_failures:
+        adjusted: list[CaseResult] = []
+        for result in results:
+            if result.phase == "compile" and result.passed:
+                adjusted.append(
+                    result.model_copy(
+                        update={
+                            "passed": False,
+                            "stderr": "compiler did not successfully compile any valid program — rejection not credited",
+                        },
+                    )
+                )
+            else:
+                adjusted.append(result)
+        results = adjusted
+
     passed = sum(1 for r in results if r.passed)
     return TestResult(
         passed=passed,
