@@ -498,6 +498,33 @@ function buildBrokenTests(
   return broken;
 }
 
+/**
+ * Compute per-suite broken and fixed counts from suite state diffs.
+ * A suite that lost tests contributes to newlyBroken even if the overall
+ * total went up (masked by gains in other suites).
+ */
+function computeSuiteDeltas(
+  prevSuiteState: SuiteState,
+  currentSuiteState: SuiteState,
+): { newlyBroken: number; newlyFixed: number } {
+  let broken = 0;
+  let fixed = 0;
+  const allSuites = new Set([
+    ...Object.keys(prevSuiteState),
+    ...Object.keys(currentSuiteState),
+  ]);
+  for (const suite of allSuites) {
+    const prev = prevSuiteState[suite] ?? 0;
+    const curr = currentSuiteState[suite] ?? 0;
+    if (curr < prev) {
+      broken += prev - curr;
+    } else if (curr > prev) {
+      fixed += curr - prev;
+    }
+  }
+  return { newlyBroken: broken, newlyFixed: fixed };
+}
+
 // ---------------------------------------------------------------------------
 // Filter empty commits and recompute deltas
 // ---------------------------------------------------------------------------
@@ -524,16 +551,15 @@ function filterEmptyCommits(commits: Commit[]): Commit[] {
 
     commit.index = commitIdx;
     const delta = commit.totalPassed - prevTotalPassed;
+    const suiteDeltas = computeSuiteDeltas(prevSuiteState, commit.suiteState);
     commit.delta = delta;
-    commit.isRegression = delta < 0;
+    commit.isRegression = suiteDeltas.newlyBroken > 0;
     commit.feedback = {
       ...commit.feedback,
       passedDelta: delta,
-      newlyBroken: delta < 0 ? Math.abs(delta) : 0,
-      newlyFixed: delta > 0 ? delta : 0,
-      brokenTests: delta < 0
-        ? buildBrokenTests(prevSuiteState, commit.suiteState)
-        : [],
+      newlyBroken: suiteDeltas.newlyBroken,
+      newlyFixed: suiteDeltas.newlyFixed,
+      brokenTests: buildBrokenTests(prevSuiteState, commit.suiteState),
     };
 
     prevTotalPassed = commit.totalPassed;
@@ -1022,9 +1048,8 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
       const suiteState = buildSuiteState(evalRec.suiteResults);
       const delta = evalRec.passed - prevTotalPassed;
-      const brokenTests = delta < 0
-        ? buildBrokenTests(prevSuiteState, suiteState)
-        : [];
+      const suiteDeltas = computeSuiteDeltas(prevSuiteState, suiteState);
+      const brokenTests = buildBrokenTests(prevSuiteState, suiteState);
 
       // Compute minutes elapsed from trajectory start
       const startTime = new Date(first.started_at ?? "").getTime();
@@ -1053,12 +1078,12 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         suiteState,
         totalPassed: evalRec.passed,
         delta,
-        isRegression: delta < 0,
+        isRegression: suiteDeltas.newlyBroken > 0,
         isMilestone: false,
         feedback: {
           passedDelta: delta,
-          newlyBroken: delta < 0 ? Math.abs(delta) : 0,
-          newlyFixed: delta > 0 ? delta : 0,
+          newlyBroken: suiteDeltas.newlyBroken,
+          newlyFixed: suiteDeltas.newlyFixed,
           brokenTests,
           totalPassed: evalRec.passed,
           totalFailed: evalRec.failed,
@@ -1568,9 +1593,8 @@ export function buildCompareTrajectories(
         ? buildSuiteState(narrowSuiteResults(suiteResultsParsed))
         : {};
       const delta = evalRow.passed - prevPassed;
-      const brokenTests = delta < 0
-        ? buildBrokenTests(prevTableSuiteState, suiteState)
-        : [];
+      const suiteDeltas = computeSuiteDeltas(prevTableSuiteState, suiteState);
+      const brokenTests = buildBrokenTests(prevTableSuiteState, suiteState);
 
       commits.push({
         index: commits.length,
@@ -1581,12 +1605,12 @@ export function buildCompareTrajectories(
         suiteState,
         totalPassed: evalRow.passed,
         delta,
-        isRegression: delta < 0,
+        isRegression: suiteDeltas.newlyBroken > 0,
         isMilestone: false,
         feedback: {
           passedDelta: delta,
-          newlyBroken: delta < 0 ? Math.abs(delta) : 0,
-          newlyFixed: delta > 0 ? delta : 0,
+          newlyBroken: suiteDeltas.newlyBroken,
+          newlyFixed: suiteDeltas.newlyFixed,
           brokenTests,
           totalPassed: evalRow.passed,
           totalFailed: evalRow.failed,
