@@ -60,6 +60,7 @@ export const MILESTONES: MilestoneDef[] = computeMilestones(SUITES);
 /** Dimensions available for grouping trajectories in Setup Compare mode */
 export const GROUPABLE_DIMENSIONS = [
   { key: "model", label: "Model" },
+  { key: "environment", label: "Environment" },
   { key: "implLang", label: "Programming Language" },
   { key: "lang", label: "Natural Language" },
   { key: "target", label: "Target" },

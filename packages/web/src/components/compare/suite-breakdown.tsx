@@ -2,8 +2,9 @@
  * Suite Breakdown — per-suite mini SVG charts + comparison table.
  * Client component: hover interactions on SVG charts.
  *
- * Grid of 4 mini SVG charts (one per suite), each showing overlaid progress curves
- * for the selected traces. Below: a table with per-suite progress bars.
+ * When traces span multiple environments, suites are grouped by environment.
+ * Each environment section only shows traces from that environment, preventing
+ * nonsensical mixing of cross-environment data.
  */
 
 "use client";
@@ -19,6 +20,15 @@ type SuiteBreakdownProps = {
   /** Stable color index for each trace (parallel to `traces` array) */
   colorIndices?: number[];
   suites?: Suite[];
+};
+
+/** Environment group: traces and suites belonging to one environment */
+type EnvGroup = {
+  environment: string;
+  suites: Suite[];
+  traces: Trajectory[];
+  /** Color indices mapped from parent (for TRACE_COLORS lookup) */
+  colorIndices: number[];
 };
 
 /** Mini chart layout constants */
@@ -74,6 +84,53 @@ function buildSuiteAreaPath(commits: Commit[], suiteName: string, suiteTotal: nu
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
+/** Group traces by environment, assigning suites to each group */
+function groupByEnvironment(
+  traces: Trajectory[],
+  allSuites: Suite[],
+  colorIndices?: number[],
+): EnvGroup[] {
+  const envIndices = new Map<string, number[]>();
+  const envSuiteNames = new Map<string, Set<string>>();
+
+  for (let traceIdx = 0; traceIdx < traces.length; traceIdx++) {
+    const trace = traces[traceIdx];
+    if (!trace) {
+      continue;
+    }
+    const env = trace.environment || "unknown";
+
+    const indices = envIndices.get(env);
+    if (indices) {
+      indices.push(traceIdx);
+    } else {
+      envIndices.set(env, [traceIdx]);
+    }
+
+    let suiteNames = envSuiteNames.get(env);
+    if (!suiteNames) {
+      suiteNames = new Set();
+      envSuiteNames.set(env, suiteNames);
+    }
+    if (trace.suites) {
+      for (const suite of trace.suites) {
+        suiteNames.add(suite.name);
+      }
+    }
+  }
+
+  return [...envIndices.entries()]
+    .sort(([envA], [envB]) => envA.localeCompare(envB))
+    .map(([environment, parentIndices]) => ({
+      environment,
+      suites: allSuites
+        .filter((suite) => envSuiteNames.get(environment)?.has(suite.name) ?? false)
+        .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name)),
+      traces: parentIndices.map((idx) => traces[idx] as Trajectory),
+      colorIndices: parentIndices.map((idx) => colorIndices?.[idx] ?? idx),
+    }));
+}
+
 /** Single mini chart for one suite */
 function MiniSuiteChart({
   suiteName,
@@ -87,13 +144,13 @@ function MiniSuiteChart({
   suiteName: string;
   suiteTotal: number;
   traces: Trajectory[];
-  colorIndices?: number[];
+  colorIndices: number[];
   hoveredTrace?: number;
   onHover: (index?: number) => void;
   maxDuration: number;
 }) {
   const suiteColor = SUITE_COLORS[suiteName];
-  const yTicks = [0, Math.round(suiteTotal / 2), suiteTotal];
+  const yTicks = [...new Set([0, Math.round(suiteTotal / 2), suiteTotal])];
 
   return (
     <div className="rounded border border-envoi-border bg-envoi-bg p-2">
@@ -156,7 +213,7 @@ function MiniSuiteChart({
 
         {/* Area fills */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
+          const traceColor = TRACE_COLORS[(colorIndices[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
           if (!traceColor) {
             return undefined;
           }
@@ -172,7 +229,7 @@ function MiniSuiteChart({
 
         {/* Lines */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
+          const traceColor = TRACE_COLORS[(colorIndices[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
           if (!traceColor) {
             return undefined;
           }
@@ -193,7 +250,7 @@ function MiniSuiteChart({
 
         {/* Endpoint labels */}
         {traces.map((trace, traceIndex) => {
-          const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
+          const traceColor = TRACE_COLORS[(colorIndices[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
           if (!traceColor) {
             return undefined;
           }
@@ -219,22 +276,31 @@ function MiniSuiteChart({
   );
 }
 
-export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: SuiteBreakdownProps) {
-  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+/**
+ * Environment suite section — renders mini charts + comparison table
+ * for one environment's suites and traces. Manages its own hover state
+ * so hovering in one environment doesn't affect another.
+ */
+function EnvSuiteSection({
+  envGroup,
+  maxDuration,
+}: {
+  envGroup: EnvGroup;
+  maxDuration: number;
+}) {
   const [hoveredTrace, setHoveredTrace] = useState<number>();
-  const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
 
   return (
     <div className="flex flex-col gap-4">
       {/* Mini charts grid */}
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        {effectiveSuites.map((suite) => (
+        {envGroup.suites.map((suite) => (
           <MiniSuiteChart
             key={suite.name}
             suiteName={suite.name}
             suiteTotal={suite.total}
-            traces={traces}
-            colorIndices={colorIndices}
+            traces={envGroup.traces}
+            colorIndices={envGroup.colorIndices}
             hoveredTrace={hoveredTrace}
             onHover={setHoveredTrace}
             maxDuration={maxDuration}
@@ -252,14 +318,15 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
           <span className="min-w-15 text-right text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Total
           </span>
-          {traces.map((_trace, traceIndex) => {
-            const color = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
+          {envGroup.traces.map((trace, envTraceIdx) => {
+            const colorIdx = envGroup.colorIndices[envTraceIdx] ?? envTraceIdx;
+            const color = TRACE_COLORS[colorIdx % TRACE_COLORS.length];
             if (!color) {
               return undefined;
             }
             return (
               <span
-                key={`col-${traceIndex}`}
+                key={`col-${trace.id}`}
                 className="flex min-w-40 flex-1 items-center gap-1.5 pl-4 text-[12px] font-semibold uppercase tracking-[0.08em]"
                 style={{ color: color.line }}
               >
@@ -276,7 +343,7 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
         </div>
 
         {/* Rows per suite */}
-        {effectiveSuites.map((suite) => {
+        {envGroup.suites.map((suite) => {
           const suiteColor = SUITE_COLORS[suite.name];
           return (
             <div
@@ -298,11 +365,12 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
               </span>
 
               {/* Per-trace cells with progress bar */}
-              {traces.map((trace, traceIndex) => {
+              {envGroup.traces.map((trace, envTraceIdx) => {
+                const colorIdx = envGroup.colorIndices[envTraceIdx] ?? envTraceIdx;
                 const lastCommit = trace.commits[trace.commits.length - 1];
                 const passed = lastCommit?.suiteState[suite.name] ?? 0;
                 const pct = (passed / suite.total) * 100;
-                const traceColor = TRACE_COLORS[(colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length];
+                const traceColor = TRACE_COLORS[colorIdx % TRACE_COLORS.length];
                 if (!traceColor) {
                   return undefined;
                 }
@@ -336,6 +404,37 @@ export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: Sui
           );
         })}
       </div>
+    </div>
+  );
+}
+
+export function SuiteBreakdown({ traces, colorIndices, suites: suitesProp }: SuiteBreakdownProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const maxDuration = useMemo(() => computeMaxDuration(traces), [traces]);
+
+  const envGroups = useMemo(
+    () => groupByEnvironment(traces, effectiveSuites, colorIndices),
+    [traces, effectiveSuites, colorIndices],
+  );
+
+  return (
+    <div className="flex flex-col gap-6">
+      {envGroups.map((envGroup) => (
+        <div key={envGroup.environment}>
+          {/* Environment header — only show when multiple environments present */}
+          {envGroups.length > 1 && (
+            <div className="mb-3 border-b border-envoi-border pb-1.5">
+              <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
+                {envGroup.environment}
+              </span>
+              <span className="ml-2 text-[12px] text-envoi-text-dim">
+                ({envGroup.traces.length} traces · {envGroup.suites.length} suites)
+              </span>
+            </div>
+          )}
+          <EnvSuiteSection envGroup={envGroup} maxDuration={maxDuration} />
+        </div>
+      ))}
     </div>
   );
 }

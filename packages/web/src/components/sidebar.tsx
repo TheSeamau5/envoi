@@ -15,6 +15,7 @@ import {
   Grid3x3,
   LayoutDashboard,
   Terminal,
+  Settings2,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import {
 
 const NAV_ITEMS = [
   { href: "/compare", label: "Compare", icon: BarChart3 },
+  { href: "/setups", label: "Setups", icon: Settings2 },
   { href: "/trajectory", label: "Trajectories", icon: GitCommitHorizontal },
   { href: "/difficulty", label: "Difficulty", icon: Grid3x3 },
   { href: "/portfolio", label: "Portfolio", icon: LayoutDashboard },

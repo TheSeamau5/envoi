@@ -67,7 +67,12 @@ function groupByEnvironmentThenModel(traces: Trajectory[]): GroupedTrajectories 
     }
   }
 
-  return envGroups;
+  /** Sort environment keys alphabetically */
+  const sorted: GroupedTrajectories = new Map(
+    [...envGroups.entries()].sort(([envA], [envB]) => envA.localeCompare(envB)),
+  );
+
+  return sorted;
 }
 
 export function TrajectoryList({ trajectories }: TrajectoryListProps) {

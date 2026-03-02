@@ -2,6 +2,10 @@
  * Setup Compare — group trajectories by configurable dimensions and compare medians.
  * Client component: manages grouping dimensions, visibility toggles, and interactions.
  *
+ * Charts use percentage Y-axis (0–100%) so groups spanning different environments
+ * are normalized. Per-suite median table is grouped by environment to prevent
+ * mixing cross-environment suite data.
+ *
  * Sidebar: Dimension chips (add/remove) + group list with eye toggles.
  * Main: Median progress curves per group, per-suite median table, group->trace breakdown.
  */
@@ -12,21 +16,22 @@ import { useState, useMemo } from "react";
 import { Eye, EyeOff, X, Plus, ChevronDown, ChevronRight } from "lucide-react";
 import type { Trajectory, TrajectoryGroup, Commit, Suite } from "@/lib/types";
 import { GROUP_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
-import { GROUPABLE_DIMENSIONS, TOTAL_TESTS as DEFAULT_TOTAL_TESTS, SUITES as DEFAULT_SUITES } from "@/lib/constants";
-import { groupTraces, median, formatPercent, formatDuration, computeMaxDuration, getXTicks, getYTicks, formatXTick } from "@/lib/utils";
+import { GROUPABLE_DIMENSIONS } from "@/lib/constants";
+import { groupTraces, median, formatPercent, formatDuration, computeMaxDuration, getXTicks, formatXTick } from "@/lib/utils";
 
 type SetupCompareProps = {
   allTraces: Trajectory[];
-  suites?: Suite[];
-  totalTests?: number;
 };
 
 /** Chart layout constants for the median curves chart */
 const VIEW_WIDTH = 900;
 const VIEW_HEIGHT = 340;
-const MARGIN = { top: 20, right: 60, bottom: 40, left: 55 };
+const MARGIN = { top: 20, right: 20, bottom: 40, left: 55 };
 const PLOT_WIDTH = VIEW_WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = VIEW_HEIGHT - MARGIN.top - MARGIN.bottom;
+
+/** Fixed percentage ticks for Y axis */
+const Y_PCT_TICKS = [0, 25, 50, 75, 100];
 
 function toX(minutes: number, maxDuration: number): number {
   if (maxDuration === 0) {
@@ -35,14 +40,15 @@ function toX(minutes: number, maxDuration: number): number {
   return MARGIN.left + (minutes / maxDuration) * PLOT_WIDTH;
 }
 
-function toY(passed: number, totalTests: number): number {
-  return MARGIN.top + PLOT_HEIGHT - (passed / totalTests) * PLOT_HEIGHT;
+/** Map percentage (0–100) to Y pixel position */
+function toYPct(pct: number): number {
+  return MARGIN.top + PLOT_HEIGHT - (pct / 100) * PLOT_HEIGHT;
 }
 
-/** Compute a median progress curve from a set of traces */
+/** Compute a median progress curve from a set of traces (returns percentages) */
 type MedianPoint = {
   minutes: number;
-  medianPassed: number;
+  medianPct: number;
 };
 
 function computeMedianCurve(traces: Trajectory[], maxDuration: number): MedianPoint[] {
@@ -56,33 +62,34 @@ function computeMedianCurve(traces: Trajectory[], maxDuration: number): MedianPo
 
   return Array.from({ length: numSamples + 1 }, (_, sampleIdx) => {
     const targetMinutes = sampleIdx * stepMinutes;
-    const passedValues = traces.map((trace) => {
+    const pctValues = traces.map((trace) => {
       const eligible = trace.commits.filter(
         (commit) => commit.minutesElapsed <= targetMinutes,
       );
       const lastEligible = eligible[eligible.length - 1];
-      return lastEligible?.totalPassed ?? 0;
+      const passed = lastEligible?.totalPassed ?? 0;
+      return trace.totalTests > 0 ? (passed / trace.totalTests) * 100 : 0;
     });
 
     return {
       minutes: targetMinutes,
-      medianPassed: median(passedValues),
+      medianPct: median(pctValues),
     };
   });
 }
 
 /** Build SVG line path from median points */
-function buildMedianLinePath(points: MedianPoint[], totalTests: number, maxDuration: number): string {
+function buildMedianLinePath(points: MedianPoint[], maxDuration: number): string {
   return points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.medianPct).toFixed(1)}`;
     })
     .join(" ");
 }
 
 /** Build SVG area path from median points */
-function buildMedianAreaPath(points: MedianPoint[], totalTests: number, maxDuration: number): string {
+function buildMedianAreaPath(points: MedianPoint[], maxDuration: number): string {
   if (points.length === 0) {
     return "";
   }
@@ -94,11 +101,11 @@ function buildMedianAreaPath(points: MedianPoint[], totalTests: number, maxDurat
   const lineSegments = points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toY(point.medianPassed, totalTests).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.medianPct).toFixed(1)}`;
     })
     .join(" ");
-  const bottomRight = `L${toX(lastPoint.minutes, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
-  const bottomLeft = `L${toX(firstPoint.minutes, maxDuration).toFixed(1)},${toY(0, totalTests).toFixed(1)}`;
+  const bottomRight = `L${toX(lastPoint.minutes, maxDuration).toFixed(1)},${toYPct(0).toFixed(1)}`;
+  const bottomLeft = `L${toX(firstPoint.minutes, maxDuration).toFixed(1)},${toYPct(0).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
 }
 
@@ -111,9 +118,38 @@ function suiteMedianFinal(traces: Trajectory[], suiteName: string): number {
   return median(values);
 }
 
-export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalTestsProp }: SetupCompareProps) {
-  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
-  const effectiveTotal = totalTestsProp ?? DEFAULT_TOTAL_TESTS;
+/** Derive which suites belong to which environment from trace data */
+function deriveEnvSuites(traces: Trajectory[]): Map<string, Suite[]> {
+  const envSuiteMap = new Map<string, Map<string, number>>();
+  for (const trace of traces) {
+    const env = trace.environment || "unknown";
+    let suiteMap = envSuiteMap.get(env);
+    if (!suiteMap) {
+      suiteMap = new Map();
+      envSuiteMap.set(env, suiteMap);
+    }
+    if (trace.suites) {
+      for (const suite of trace.suites) {
+        const existing = suiteMap.get(suite.name);
+        if (existing === undefined || suite.total > existing) {
+          suiteMap.set(suite.name, suite.total);
+        }
+      }
+    }
+  }
+  return new Map(
+    [...envSuiteMap.entries()]
+      .sort(([envA], [envB]) => envA.localeCompare(envB))
+      .map(([env, suiteMap]) => [
+        env,
+        [...suiteMap.entries()]
+          .map(([name, total]) => ({ name, total }))
+          .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name)),
+      ] as [string, Suite[]]),
+  );
+}
+
+export function SetupCompare({ allTraces }: SetupCompareProps) {
   const [activeDimensions, setActiveDimensions] = useState<string[]>(["model"]);
   const [hiddenGroups, setHiddenGroups] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -127,6 +163,8 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
     () => groups.filter((group) => !hiddenGroups.has(group.key)),
     [groups, hiddenGroups],
   );
+
+  const envSuites = useMemo(() => deriveEnvSuites(allTraces), [allTraces]);
 
   const availableDimensions = GROUPABLE_DIMENSIONS.filter(
     (dim) => !activeDimensions.includes(dim.key),
@@ -168,7 +206,6 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
   const maxDuration = useMemo(() => computeMaxDuration(allTraces), [allTraces]);
   const xTicks = useMemo(() => getXTicks(maxDuration), [maxDuration]);
-  const yTicks = getYTicks(effectiveTotal);
 
   return (
     <div className="flex flex-1 gap-0 overflow-hidden">
@@ -221,7 +258,11 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               return undefined;
             }
             const isHidden = hiddenGroups.has(group.key);
-            const medianFinal = median(group.traces.map((trace) => trace.finalPassed));
+            const medianPct = median(
+              group.traces.map((trace) =>
+                trace.totalTests > 0 ? (trace.finalPassed / trace.totalTests) * 100 : 0,
+              ),
+            );
 
             return (
               <div
@@ -244,7 +285,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                       {group.label}
                     </span>
                     <span className="text-[13px] text-envoi-text-dim">
-                      {group.traces.length} traces &middot; med {Math.round(medianFinal)} passed
+                      {group.traces.length} traces &middot; med {medianPct.toFixed(1)}%
                     </span>
                   </div>
 
@@ -264,7 +305,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
 
       {/* Main area */}
       <div className="flex flex-1 flex-col overflow-y-auto p-4">
-        {/* Median progress curves */}
+        {/* Median progress curves (percentage Y axis) */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg p-3">
           <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Median Progress Curves
@@ -275,13 +316,13 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             style={{ fontFamily: T.mono }}
           >
             {/* Grid */}
-            {yTicks.map((tick) => (
+            {Y_PCT_TICKS.map((pct) => (
               <line
-                key={`y-grid-${tick}`}
+                key={`y-grid-${pct}`}
                 x1={MARGIN.left}
-                y1={toY(tick, effectiveTotal)}
+                y1={toYPct(pct)}
                 x2={VIEW_WIDTH - MARGIN.right}
-                y2={toY(tick, effectiveTotal)}
+                y2={toYPct(pct)}
                 stroke={T.borderLight}
                 strokeWidth={1}
               />
@@ -298,29 +339,16 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               />
             ))}
 
-            {/* Y labels (left: absolute count) */}
-            {yTicks.map((tick) => (
+            {/* Y labels (left: percentage) */}
+            {Y_PCT_TICKS.map((pct) => (
               <text
-                key={`y-label-${tick}`}
+                key={`y-label-${pct}`}
                 x={MARGIN.left - 8}
-                y={toY(tick, effectiveTotal) + 3}
+                y={toYPct(pct) + 3}
                 textAnchor="end"
                 style={{ fontSize: "9px", fill: T.textDim }}
               >
-                {tick}
-              </text>
-            ))}
-
-            {/* Y labels (right: percentage) */}
-            {yTicks.map((tick) => (
-              <text
-                key={`y-pct-${tick}`}
-                x={VIEW_WIDTH - MARGIN.right + 8}
-                y={toY(tick, effectiveTotal) + 3}
-                textAnchor="start"
-                style={{ fontSize: "9px", fill: T.textDim }}
-              >
-                {`${Math.round((tick / effectiveTotal) * 100)}%`}
+                {pct}%
               </text>
             ))}
 
@@ -353,7 +381,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               transform={`rotate(-90, 12, ${MARGIN.top + PLOT_HEIGHT / 2})`}
               style={{ fontSize: "9px", fill: T.textMuted, fontWeight: 600 }}
             >
-              MEDIAN TESTS PASSED
+              MEDIAN TESTS PASSED (%)
             </text>
 
             {/* Group curves */}
@@ -368,11 +396,11 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               return (
                 <g key={group.key}>
                   <path
-                    d={buildMedianAreaPath(curve, effectiveTotal, maxDuration)}
+                    d={buildMedianAreaPath(curve, maxDuration)}
                     fill={color.fill}
                   />
                   <path
-                    d={buildMedianLinePath(curve, effectiveTotal, maxDuration)}
+                    d={buildMedianLinePath(curve, maxDuration)}
                     fill="none"
                     stroke={color.line}
                     strokeWidth={1.5}
@@ -380,10 +408,10 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                   {lastPoint && (
                     <text
                       x={toX(lastPoint.minutes, maxDuration) + 6}
-                      y={toY(lastPoint.medianPassed, effectiveTotal) + 3}
+                      y={toYPct(lastPoint.medianPct) + 3}
                       style={{ fontSize: "10px", fill: color.line, fontWeight: 700 }}
                     >
-                      {Math.round(lastPoint.medianPassed)}
+                      {lastPoint.medianPct.toFixed(1)}%
                     </text>
                   )}
                 </g>
@@ -392,7 +420,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
           </svg>
         </div>
 
-        {/* Per-suite median table */}
+        {/* Per-suite median table (grouped by environment) */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg">
           <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
             <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
@@ -429,54 +457,81 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
             })}
           </div>
 
-          {/* Suite rows */}
-          {effectiveSuites.map((suite) => {
-            const suiteColor = SUITE_COLORS[suite.name];
-            return (
-              <div
-                key={suite.name}
-                className="flex items-center border-b border-envoi-border-light px-3.5 py-2 transition-colors hover:bg-envoi-surface"
-              >
-                <span className="flex min-w-25 items-center gap-2 text-[13px] font-medium text-envoi-text">
-                  <span
-                    className="h-1.5 w-1.5 rounded-full"
-                    style={{ background: suiteColor?.color ?? T.textMuted }}
-                  />
-                  {suite.name}
-                </span>
-                <span className="min-w-12.5 text-right text-[13px] text-envoi-text-muted">
-                  {suite.total}
-                </span>
-                {visibleGroups.map((group, groupIndex) => {
-                  const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
-                  if (!color) {
-                    return undefined;
-                  }
-                  const medianVal = suiteMedianFinal(group.traces, suite.name);
-                  const pct = (medianVal / suite.total) * 100;
-                  return (
-                    <div
-                      key={`${group.key}-${suite.name}`}
-                      className="flex min-w-40 flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
-                    >
-                      <div className="h-1 w-20 rounded-full bg-envoi-border-light">
+          {/* Suite rows grouped by environment */}
+          {[...envSuites.entries()].map(([environment, suites]) => (
+            <div key={environment}>
+              {/* Environment section header — only if multiple environments */}
+              {envSuites.size > 1 && (
+                <div className="border-b border-envoi-border bg-envoi-bg px-3.5 py-1.5">
+                  <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
+                    {environment}
+                  </span>
+                </div>
+              )}
+
+              {suites.map((suite) => {
+                const suiteColor = SUITE_COLORS[suite.name];
+                return (
+                  <div
+                    key={suite.name}
+                    className="flex items-center border-b border-envoi-border-light px-3.5 py-2 transition-colors hover:bg-envoi-surface"
+                  >
+                    <span className="flex min-w-25 items-center gap-2 text-[13px] font-medium text-envoi-text">
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{ background: suiteColor?.color ?? T.textMuted }}
+                      />
+                      {suite.name}
+                    </span>
+                    <span className="min-w-12.5 text-right text-[13px] text-envoi-text-muted">
+                      {suite.total}
+                    </span>
+                    {visibleGroups.map((group, groupIndex) => {
+                      const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+                      if (!color) {
+                        return undefined;
+                      }
+                      /** Only compute median from traces in this environment */
+                      const envTraces = group.traces.filter(
+                        (trace) => (trace.environment || "unknown") === environment,
+                      );
+                      if (envTraces.length === 0) {
+                        return (
+                          <div
+                            key={`${group.key}-${suite.name}`}
+                            className="flex min-w-40 flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
+                          >
+                            <span className="text-[12px] text-envoi-text-dim">&mdash;</span>
+                          </div>
+                        );
+                      }
+                      const medianVal = suiteMedianFinal(envTraces, suite.name);
+                      const pct = (medianVal / suite.total) * 100;
+                      return (
                         <div
-                          className="h-full rounded-full"
-                          style={{ width: `${pct}%`, background: color.line }}
-                        />
-                      </div>
-                      <span className="text-[13px] font-semibold" style={{ color: color.line }}>
-                        {Math.round(medianVal)}
-                      </span>
-                      <span className="text-[13px] text-envoi-text-dim">
-                        {formatPercent(medianVal, suite.total)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
+                          key={`${group.key}-${suite.name}`}
+                          className="flex min-w-40 flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
+                        >
+                          <div className="h-1 w-20 rounded-full bg-envoi-border-light">
+                            <div
+                              className="h-full rounded-full"
+                              style={{ width: `${pct}%`, background: color.line }}
+                            />
+                          </div>
+                          <span className="text-[13px] font-semibold" style={{ color: color.line }}>
+                            {Math.round(medianVal)}
+                          </span>
+                          <span className="text-[13px] text-envoi-text-dim">
+                            {formatPercent(medianVal, suite.total)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
 
         {/* Group -> Trace breakdown table */}
@@ -493,7 +548,11 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
               return undefined;
             }
             const isExpanded = expandedGroups.has(group.key);
-            const medianFinal = median(group.traces.map((trace) => trace.finalPassed));
+            const medianPct = median(
+              group.traces.map((trace) =>
+                trace.totalTests > 0 ? (trace.finalPassed / trace.totalTests) * 100 : 0,
+              ),
+            );
             const lastCommits: Commit[] = group.traces
               .map((trace) => trace.commits[trace.commits.length - 1])
               .filter((commit): commit is Commit => commit !== undefined);
@@ -524,7 +583,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                     {group.traces.length} traces
                   </span>
                   <span className="text-[12px] text-envoi-text-muted">
-                    med {Math.round(medianFinal)} &middot; {formatDuration(Math.round(medianDuration))}
+                    med {medianPct.toFixed(1)}% &middot; {formatDuration(Math.round(medianDuration))}
                   </span>
                 </button>
 
@@ -533,6 +592,9 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                   <div className="border-t border-envoi-border-light bg-envoi-surface/50">
                     {group.traces.map((trace) => {
                       const lastTraceCommit = trace.commits[trace.commits.length - 1];
+                      const tracePct = trace.totalTests > 0
+                        ? ((lastTraceCommit?.totalPassed ?? 0) / trace.totalTests) * 100
+                        : 0;
                       return (
                         <div
                           key={trace.id}
@@ -552,7 +614,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                               <div
                                 className="h-full rounded-full"
                                 style={{
-                                  width: `${((lastTraceCommit?.totalPassed ?? 0) / effectiveTotal) * 100}%`,
+                                  width: `${tracePct}%`,
                                   background: color.line,
                                 }}
                               />
@@ -561,7 +623,7 @@ export function SetupCompare({ allTraces, suites: suitesProp, totalTests: totalT
                               {lastTraceCommit?.totalPassed ?? 0}
                             </span>
                             <span className="text-[13px] text-envoi-text-dim">
-                              / {effectiveTotal}
+                              / {trace.totalTests}
                             </span>
                           </div>
                         </div>

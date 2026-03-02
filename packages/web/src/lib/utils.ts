@@ -61,6 +61,9 @@ export function getTrajectoryParam(trace: Trajectory, dimensionKey: string): str
   if (dimensionKey === "model") {
     return trace.model;
   }
+  if (dimensionKey === "environment") {
+    return trace.environment || "unknown";
+  }
   const value = Object.entries(trace.params).find(([key]) => key === dimensionKey)?.[1];
   return value ?? "\u2014";
 }

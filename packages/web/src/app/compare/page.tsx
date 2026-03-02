@@ -1,13 +1,9 @@
 /**
- * Compare page — server component.
- * Fetches all trajectories from data layer (S3 or mock fallback).
+ * Compare index — redirects to the default sub-route (curves).
  */
 
-import { getAllTrajectories } from "@/lib/server/data";
-import { CompareClient } from "@/components/compare/compare-client";
+import { redirect } from "next/navigation";
 
-export default async function ComparePage() {
-  const allTraces = await getAllTrajectories();
-
-  return <CompareClient allTraces={allTraces} />;
+export default function ComparePage() {
+  redirect("/compare/curves");
 }

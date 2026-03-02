@@ -151,12 +151,6 @@ export type MilestoneDef = {
   group: string;
 };
 
-/** Compare page mode */
-export type CompareMode = "traces" | "setups";
-
-/** Compare tab selection */
-export type CompareTab = "curves" | "milestones" | "suites";
-
 /** Trajectory detail right panel tab */
 export type DetailRightTab = "steps" | "code" | "tests" | "waste";
 

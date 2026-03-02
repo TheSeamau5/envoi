@@ -1,6 +1,9 @@
 /**
  * Milestone Divergence Table — shows when each selected trace reached key milestones.
- * Server-renderable: receives pre-computed data, no client state needed.
+ *
+ * When traces span multiple environments, milestones are split by environment.
+ * Each environment gets its own table section with environment-specific milestones,
+ * preventing nonsensical mixing (e.g. showing gameboy milestone columns for c_compiler traces).
  *
  * Transposed layout: Rows = traces (observations), Columns = milestones grouped by suite.
  * First column (trace labels) is sticky with a right border.
@@ -11,7 +14,7 @@
 import { Star, Minus } from "lucide-react";
 import type { Trajectory, Commit, Suite, MilestoneDef } from "@/lib/types";
 import { TRACE_COLORS, T } from "@/lib/tokens";
-import { MILESTONES as DEFAULT_MILESTONES, SUITES as DEFAULT_SUITES, computeMilestones } from "@/lib/constants";
+import { SUITES as DEFAULT_SUITES, computeMilestones } from "@/lib/constants";
 import { findMilestone, formatDuration } from "@/lib/utils";
 
 type MilestoneTableProps = {
@@ -19,6 +22,14 @@ type MilestoneTableProps = {
   /** Stable color index for each trace (parallel to `traces` array) */
   colorIndices?: number[];
   suites?: Suite[];
+};
+
+/** Environment group for milestone rendering */
+type EnvMilestoneGroup = {
+  environment: string;
+  traces: Trajectory[];
+  colorIndices: number[];
+  milestones: MilestoneDef[];
 };
 
 /** Result of looking up a milestone for one trace */
@@ -78,15 +89,67 @@ function buildGroups(grid: ReturnType<typeof buildHitsGrid>) {
   return groups;
 }
 
-export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: MilestoneTableProps) {
-  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
-  const milestones = suitesProp ? computeMilestones(effectiveSuites) : DEFAULT_MILESTONES;
-  const grid = buildHitsGrid(traces, milestones);
+/** Group traces by environment for separate milestone tables */
+function groupByEnvironment(
+  traces: Trajectory[],
+  allSuites: Suite[],
+  colorIndices?: number[],
+): EnvMilestoneGroup[] {
+  const envIndices = new Map<string, number[]>();
+  const envSuiteNames = new Map<string, Set<string>>();
+
+  for (let traceIdx = 0; traceIdx < traces.length; traceIdx++) {
+    const trace = traces[traceIdx];
+    if (!trace) {
+      continue;
+    }
+    const env = trace.environment || "unknown";
+
+    const indices = envIndices.get(env);
+    if (indices) {
+      indices.push(traceIdx);
+    } else {
+      envIndices.set(env, [traceIdx]);
+    }
+
+    let suiteNames = envSuiteNames.get(env);
+    if (!suiteNames) {
+      suiteNames = new Set();
+      envSuiteNames.set(env, suiteNames);
+    }
+    if (trace.suites) {
+      for (const suite of trace.suites) {
+        suiteNames.add(suite.name);
+      }
+    }
+  }
+
+  return [...envIndices.entries()]
+    .sort(([envA], [envB]) => envA.localeCompare(envB))
+    .map(([environment, parentIndices]) => {
+      const envSuites = allSuites
+        .filter((suite) => envSuiteNames.get(environment)?.has(suite.name) ?? false)
+        .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name));
+      return {
+        environment,
+        traces: parentIndices.map((idx) => traces[idx] as Trajectory),
+        colorIndices: parentIndices.map((idx) => colorIndices?.[idx] ?? idx),
+        milestones: computeMilestones(envSuites),
+      };
+    });
+}
+
+/** Single environment milestone table */
+function EnvMilestoneTable({
+  envGroup,
+}: {
+  envGroup: EnvMilestoneGroup;
+}) {
+  const grid = buildHitsGrid(envGroup.traces, envGroup.milestones);
   const groups = buildGroups(grid);
 
   return (
     <div className="rounded border border-envoi-border bg-envoi-bg">
-      {/* Scrollable container */}
       <div className="overflow-x-auto">
         <table className="w-full border-collapse" style={{ minWidth: "max-content" }}>
           <thead>
@@ -135,8 +198,8 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
 
           <tbody>
             {/* One row per trace */}
-            {traces.map((trace, traceIndex) => {
-              const colorIdx = (colorIndices?.[traceIndex] ?? traceIndex) % TRACE_COLORS.length;
+            {envGroup.traces.map((trace, traceIndex) => {
+              const colorIdx = (envGroup.colorIndices[traceIndex] ?? traceIndex) % TRACE_COLORS.length;
               const color = TRACE_COLORS[colorIdx];
               if (!color) {
                 return undefined;
@@ -232,6 +295,34 @@ export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: Mil
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+export function MilestoneTable({ traces, colorIndices, suites: suitesProp }: MilestoneTableProps) {
+  const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
+  const envGroups = groupByEnvironment(traces, effectiveSuites, colorIndices);
+
+  /** Single environment: render table directly without header */
+  if (envGroups.length === 1 && envGroups[0]) {
+    return <EnvMilestoneTable envGroup={envGroups[0]} />;
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      {envGroups.map((envGroup) => (
+        <div key={envGroup.environment}>
+          <div className="mb-3 border-b border-envoi-border pb-1.5">
+            <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
+              {envGroup.environment}
+            </span>
+            <span className="ml-2 text-[12px] text-envoi-text-dim">
+              ({envGroup.traces.length} traces)
+            </span>
+          </div>
+          <EnvMilestoneTable envGroup={envGroup} />
+        </div>
+      ))}
     </div>
   );
 }
