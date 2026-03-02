@@ -1,16 +1,261 @@
 # envoi
 
-API-backed evaluation environments for AI coding agents.
+Envoi is a Python SDK for building **evaluation environments** — HTTP servers that test whether AI-generated code actually works.
 
-## Packages
+You write async Python functions that define what "correct" means. Envoi turns them into an API that any client can call: a script, a CI pipeline, or an AI coding agent.
 
-| Package | Install | Description |
-|---------|---------|-------------|
-| `packages/envoi/` | `pip install envoi` | SDK for authoring evaluation environments |
-| `packages/code/` | `pip install envoi-code` | Coding agent evaluation framework with trace capture |
-| `packages/cli/` | `pip install envoi-cli` | Unified `envoi` CLI |
+```
+pip install envoi-ai
+```
 
-## Quickstart
+## The problem
+
+You want an AI agent to write a C compiler for you. How do you know if it's working?
+
+You need a **test harness** — something that takes the agent's code, compiles it, runs test programs through it, and reports what passed and what failed. That harness needs to run in an isolated environment (a Docker container) so the agent's code can't break your machine. And it needs to be an HTTP service so the agent can call it programmatically during its work, not just at the end.
+
+Envoi is a framework for building these harnesses.
+
+## How it works
+
+An envoi environment is a Python file with decorated functions:
+
+```python
+import envoi
+
+@envoi.setup
+async def build(submission: envoi.Documents):
+    """Receive source code and compile it."""
+    workdir = envoi.session_path()
+    await envoi.run(f"cp -r {submission.dir}/. {workdir}")
+    result = await envoi.run("make", cwd=str(workdir))
+    if result.exit_code != 0:
+        raise RuntimeError(f"Build failed:\n{result.stderr}")
+
+@envoi.test
+async def hello_world():
+    """Compile and run a hello world program."""
+    workdir = envoi.session_path()
+    result = await envoi.run(f"{workdir}/cc tests/hello.c -o /tmp/test && /tmp/test")
+    return {"passed": result.stdout == "hello", "stdout": result.stdout}
+```
+
+When you run `envoi-runtime --file environment.py`, this becomes a FastAPI server. A client connects, uploads source code, and gets back test results as JSON.
+
+The lifecycle is:
+
+1. **Client creates a session** — uploads files, triggers `@envoi.setup`
+2. **Client runs tests** — calls individual tests or entire suites, gets structured results
+3. **Client closes the session** — triggers `@envoi.teardown`, cleans up
+
+For simpler environments that don't need setup (no compilation phase, no uploaded files), skip `@envoi.setup` and tests run statelessly.
+
+## Writing tests
+
+### Single tests
+
+The simplest environment is a single test:
+
+```python
+import envoi
+
+@envoi.test
+async def adds_correctly():
+    result = await envoi.run("echo $((1 + 1))")
+    return {"passed": result.stdout == "2"}
+```
+
+Tests must be `async def`. They can return any JSON-serializable value.
+
+### Test suites
+
+Group related tests with `envoi.suite()`. This creates hierarchical paths — requesting `/test/basics` runs all tests in the suite, while `/test/basics/variables` runs just one:
+
+```python
+basics = envoi.suite("basics")
+
+@basics.test
+async def variables():
+    result = await envoi.run("./cc tests/variables.c -o out && ./out")
+    return {"passed": result.exit_code == 0}
+
+@basics.test
+async def control_flow():
+    result = await envoi.run("./cc tests/control_flow.c -o out && ./out")
+    return {"passed": result.exit_code == 0}
+```
+
+Suites nest:
+
+```python
+advanced = basics.suite("advanced")
+
+@advanced.test
+async def pointers():
+    # path: "basics/advanced/pointers"
+    ...
+```
+
+### Parameterized tests
+
+Test names can contain template variables. The runtime extracts values from the URL and passes them as keyword arguments:
+
+```python
+wacct = envoi.suite("wacct")
+
+@wacct.test("chapter_{chapter}")
+async def run_chapter(chapter: int):
+    result = await envoi.run(f"./run_tests --chapter {chapter}")
+    return {"passed": result.exit_code == 0, "chapter": chapter}
+```
+
+A request to `/test/wacct/chapter_5` runs `run_chapter(chapter=5)`.
+
+### Setup and teardown
+
+For environments where the code under test must be built first, use `@envoi.setup`. This makes the environment session-based — clients must create a session before running tests:
+
+```python
+@envoi.setup
+async def build(submission: envoi.Documents):
+    workdir = envoi.session_path()
+    await envoi.run(f"cp -r {submission.dir}/. {workdir}")
+    result = await envoi.run("make", cwd=str(workdir))
+    if result.exit_code != 0:
+        raise RuntimeError(f"Build failed:\n{result.stderr}")
+
+@envoi.teardown
+async def cleanup():
+    workdir = envoi.session_path()
+    await envoi.run(f"rm -rf {workdir}")
+```
+
+`@envoi.setup` receives uploaded files as a `Documents` argument. `@envoi.teardown` runs when the session closes or times out. Each environment can have at most one of each.
+
+## Running the server
+
+```bash
+envoi-runtime --file environment.py --host 0.0.0.0 --port 8000
+```
+
+This serves:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/schema` | Discover available tests, capabilities, and parameter types |
+| `POST` | `/test/{path}` | Run a test (stateless environments only) |
+| `POST` | `/session` | Create a session (calls `@setup` with uploaded files) |
+| `POST` | `/session/{id}/test/{path}` | Run a test within a session |
+| `DELETE` | `/session/{id}` | Close a session (calls `@teardown`) |
+
+Session-based environments spawn an isolated worker process per session. Each session has an inactivity timeout (default 300 seconds) — if no tests are run within that window, the session is cleaned up automatically.
+
+## Using the client
+
+Connect to a running environment from Python:
+
+```python
+import envoi
+
+# Session-based environment
+async with await envoi.connect("http://localhost:8000") as client:
+    # Upload source code and create a session
+    async with await client.session(
+        submission=envoi.Documents("./my-compiler-src")
+    ) as session:
+        # Run all tests
+        all_results = await session.test()
+
+        # Run a specific suite
+        basics_results = await session.test("basics")
+
+        # Run a specific test
+        one_result = await session.test("basics/variables")
+```
+
+Shorthand for the common case:
+
+```python
+async with await envoi.connect_session(
+    "http://localhost:8000",
+    submission=envoi.Documents("./src"),
+) as session:
+    result = await session.test()
+```
+
+For stateless environments (no `@setup`):
+
+```python
+async with await envoi.connect("http://localhost:8000") as client:
+    result = await client.test("adds_correctly")
+```
+
+## Deploying with Docker
+
+Build and run an environment as a container:
+
+```bash
+python -m envoi.deploy --path ./my_environment --port 9000
+```
+
+If the environment directory contains a `Dockerfile`, it is used (this is how you install compilers, test fixtures, and other heavy dependencies). Otherwise, a base `python:3.12-slim` image is used.
+
+```python
+from envoi import deploy
+
+result = deploy("./my_environment", port=9000)
+# result["url"] == "http://localhost:9000"
+```
+
+## Utilities
+
+### `envoi.run(command, cwd=None, timeout_seconds=30)`
+
+Run a shell command. Returns a `RunResult` with `.stdout`, `.stderr`, `.exit_code`, and `.stdout_bytes`. Inside a session, `cwd` defaults to the session's working directory.
+
+### `envoi.Documents(paths)`
+
+A container for files to upload. Wraps file paths, directory paths, or in-memory text:
+
+```python
+envoi.Documents("./src")                          # a directory
+envoi.Documents(["file1.c", "file2.c"])           # specific files
+envoi.Documents.from_text("main.c", "int main(){}")  # from a string
+```
+
+### `envoi.session_path()`
+
+Returns the working directory for the current session. Use in `@setup` to know where to extract files, and in tests to find the built artifact.
+
+## Repository structure
+
+This repo is a monorepo. The SDK (`envoi-ai` on PyPI) is the foundation. The other packages build on it:
+
+| Directory | PyPI name | What it does |
+|-----------|-----------|--------------|
+| `packages/envoi/` | `envoi-ai` | The SDK described above |
+| `packages/code/` | `envoi-code` | Orchestrates AI coding agents against envoi environments, captures traces |
+| `packages/cli/` | `envoi-cli` | Unified `envoi` CLI |
+
+Dependency chain: `envoi-cli` → `envoi-code` → `envoi-ai`
+
+### Examples
+
+The `examples/` directory contains complete evaluation environments:
+
+```
+examples/c_compiler/         # Evaluate a C compiler across 250+ test programs
+  task/                      # Task definition (prompt, parameters)
+  environment/               # envoi environment (test harness, Dockerfile, test suites)
+
+examples/gameboy_emulator/   # Evaluate a Game Boy emulator across ROM test suites
+  task/
+  environment/
+```
+
+Each example includes a `Dockerfile` that installs the full toolchain (compilers, test fixtures, reference implementations) so the environment is completely self-contained.
+
+## Development
 
 ```bash
 uv sync
@@ -18,131 +263,6 @@ cp .env.example .env  # fill in credentials
 envoi --help
 ```
 
-## Run an agent trajectory
-
-```bash
-envoi code --example examples/c_compiler
-```
-
-Default run behavior:
-- No max part cap unless `--max-parts` is set.
-- No max turn cap unless `--max-turns` is set.
-- Total run timeout defaults to `7200` seconds.
-- Sandbox lifetime adds a shutdown grace window (`SHUTDOWN_GRACE_SECONDS`, default `300`) so end-of-run artifacts can be finalized after timeout.
-- Each run writes `trace.parquet`, `repo.bundle`, and `logs.parquet` to S3.
-
-Set explicit run caps/timeouts:
-
-```bash
-envoi code --example examples/c_compiler --max-parts 500 --max-turns 20
-envoi code --example examples/c_compiler --timeout-seconds 14400
-```
-
-Run selected test paths instead of all tests:
-
-```bash
-envoi code --example examples/c_compiler --test basics
-envoi code --example examples/c_compiler --test basics --test wacct/chapter_1
-```
-
-Override evaluation timeout (commit evals + turn-end evals):
-
-```bash
-envoi code --example examples/c_compiler --test-timeout-seconds 10800
-```
-
-## Evaluation behavior
-
-- If `--test` is omitted, evaluations run all tests (`session.test()`).
-- Repeat `--test` to evaluate one or more specific test paths.
-- `--test-timeout-seconds` applies to both async commit eval and blocking turn-end eval.
-- If `--test-timeout-seconds` is omitted, the default is `EVALUATION_TIMEOUT_SECONDS` (default `7200` seconds).
-- Commit evals run asynchronously on each git checkpoint; turn-end eval runs synchronously before the next turn prompt.
-- On shutdown, async commit eval drain is bounded (`EVALUATOR_DRAIN_TIMEOUT_SECONDS`, default `30`); remaining evals are cancelled.
-- Turn-end feedback includes a regression summary vs the previous turn-end snapshot (`newly_broken`, `newly_fixed`, `passed_delta`).
-- Turn-end feedback includes the top 50 failed tests (priority: `basics -> c_testsuite -> wacct -> torture`) with full test source and failure message.
-- If environment params enable advisor model settings, turn-end feedback also includes an external assessment based on the task prompt, top failed tests, and current commit code snapshot.
-- Runs stop at the first winning commit (`passed == total`), and artifacts are projected to that winning commit.
-- Runtime/worker/orchestrator logs are captured as structured records in `logs.parquet`.
-
-Environment-level advisor config:
-- Create `environment/params.py` with `params()` returning:
-  - `advisor_model` (example: `@anthropic/claude-opus-4.6`)
-  - `advisor_model_thinking_level` (`low|medium|high`)
-  - `failed_tests_feedback_limit` (default: 50)
-
-Param-driven runs:
-
-```bash
-envoi code --example examples/c_compiler \
-  --param-target x86_64-linux \
-  --param-impl-lang rust \
-  --param-lang en \
-  --param-milestone M0
-```
-
-- `--param-*` values are passed through as raw strings to task/environment resolvers.
-- Canonical task prompts are code-driven via `task/task.py` (`async def resolve_task(context)`).
-- `prompt.md` is a fallback convenience when no `task.py` is present.
-
-## Deploy an environment locally
-
-```bash
-envoi deploy examples/c_compiler/environment
-```
-
-## Examples
-
-Examples live in `examples/<name>/` with colocated `task/` and `environment/` directories:
-
-```
-examples/c_compiler/
-  task/
-    task.py               # canonical task resolver (async resolve_task(context))
-    prompt.md             # optional fallback/helper prompt file
-  environment/
-    main.py               # envoi test harness
-    Dockerfile            # sandbox image
-    params.py             # runner params + optional async resolve_params(context)
-    tests/                # test suites
-```
-
-## Structured logs
-
-Per trajectory, S3 now includes:
-- `trajectories/<id>/trace.parquet`
-- `trajectories/<id>/repo.bundle`
-- `trajectories/<id>/logs.parquet`
-
-`logs.parquet` stores structured runtime records (`ts`, `component`, `event`, `level`, `message`, `turn`, `part`, `git_commit`, `session_id`, `fields`).
-
-Flush policy:
-- Periodic during run (default every `5s` or `50` new records, whichever triggers first).
-- Immediate wake-up on warning/error logs.
-- Forced flush on turn boundaries and shutdown.
-
-Tuning:
-- `LOGS_FLUSH_INTERVAL_SECONDS` (default `5`)
-- `LOGS_FLUSH_BATCH_SIZE` (default `50`)
-- `SHUTDOWN_GRACE_SECONDS` (default `300`)
-- `EVALUATOR_DRAIN_TIMEOUT_SECONDS` (default `30`)
-
-Quick DuckDB query example:
-
-```sql
-SELECT ts, component, event, level, message
-FROM read_parquet('s3://<bucket>/trajectories/<id>/logs.parquet')
-ORDER BY ts;
-```
-
-## Development
-
-```bash
-uv sync
-uv run ruff check .
-uv run python -c "import envoi; import envoi_code; from envoi_cli.main import main"
-```
-
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache-2.0

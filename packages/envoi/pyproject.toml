@@ -4,7 +4,30 @@ version = "0.1.0"
 description = "API-backed evaluation environments for AI agents"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-readme = {text = "API-backed evaluation environments for AI agents. See https://github.com/TheSeamau5/envoi for full documentation.", content-type = "text/plain"}
+readme = {text = """# envoi
+
+Python SDK for building evaluation environments — HTTP servers that test whether AI-generated code actually works.
+
+You write async Python functions that define what "correct" means. Envoi turns them into an API that any client can call.
+
+```python
+import envoi
+
+@envoi.setup
+async def build(submission: envoi.Documents):
+    workdir = envoi.session_path()
+    await envoi.run(f"cp -r {submission.dir}/. {workdir}")
+    await envoi.run("make", cwd=str(workdir))
+
+@envoi.test
+async def hello_world():
+    workdir = envoi.session_path()
+    result = await envoi.run(f"{workdir}/cc tests/hello.c -o /tmp/test && /tmp/test")
+    return {"passed": result.stdout == "hello"}
+```
+
+See the [full documentation](https://github.com/TheSeamau5/envoi) for guides, examples, and API reference.
+""", content-type = "text/markdown"}
 dependencies = [
     "fastapi>=0.128.5",
     "httpx>=0.28.1",
