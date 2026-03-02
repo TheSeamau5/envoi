@@ -235,12 +235,72 @@ function mapPartType(
   return "tool_call";
 }
 
+/**
+ * Deduplicate reasoning content where the ingestion pipeline doubles lines.
+ * Pattern: "**A**\n**A**" → "**A**", or "**A**\n**B**\n**A**\n**B**" → "**A**\n**B**"
+ */
+function deduplicateLines(text: string): string {
+  if (!text) {
+    return text;
+  }
+  const lines = text.split("\n");
+  const lineCount = lines.length;
+  if (lineCount < 2 || lineCount % 2 !== 0) {
+    return text;
+  }
+  const half = lineCount / 2;
+  for (let index = 0; index < half; index++) {
+    if (lines[index] !== lines[half + index]) {
+      return text;
+    }
+  }
+  return lines.slice(0, half).join("\n");
+}
+
+/**
+ * Deduplicate reasoning summary where the ingestion pipeline concatenates
+ * the same text with a space: "**A** **A**" → "**A**"
+ */
+function deduplicateSummary(text: string): string {
+  if (!text || text.length < 3) {
+    return text;
+  }
+  const midpoint = Math.floor(text.length / 2);
+  const searchRange = Math.min(10, Math.floor(text.length / 4));
+  for (let offset = 0; offset <= searchRange; offset++) {
+    const positions = offset === 0
+      ? [midpoint]
+      : [midpoint - offset, midpoint + offset];
+    for (const splitPos of positions) {
+      if (splitPos > 0 && splitPos < text.length - 1 && text[splitPos] === " ") {
+        if (text.slice(0, splitPos) === text.slice(splitPos + 1)) {
+          return text.slice(0, splitPos);
+        }
+      }
+    }
+  }
+  return text;
+}
+
 function rowToStep(row: ParquetRow, index: number): Step {
   const stepType = mapPartType(row.part_type, row.item_type, row.tool_name);
+
+  let summary = row.summary ?? "";
+  let detail = row.content ?? "";
+  let reasoningContent: string | undefined =
+    row.part_type === "reasoning" ? row.content ?? undefined : undefined;
+
+  // Deduplicate reasoning text (ingestion pipeline sometimes doubles content)
+  if (row.part_type === "reasoning") {
+    detail = deduplicateLines(detail);
+    summary = deduplicateSummary(summary);
+    reasoningContent = detail || undefined;
+  }
+
   return {
     type: stepType,
-    summary: row.summary ?? "",
-    detail: row.content ?? "",
+    summary,
+    detail,
     index,
     durationMs: toNumber(row.duration_ms) || undefined,
     tokensUsed: row.content_token_estimate ?? undefined,
@@ -251,8 +311,7 @@ function rowToStep(row: ParquetRow, index: number): Step {
       (row.tool_exit_code !== undefined &&
         row.tool_exit_code !== 0),
     errorMessage: row.tool_error ?? undefined,
-    reasoningContent:
-      row.part_type === "reasoning" ? row.content ?? undefined : undefined,
+    reasoningContent,
   };
 }
 
