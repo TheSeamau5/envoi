@@ -461,6 +461,34 @@ function buildSuiteState(
   return state;
 }
 
+/**
+ * Diff two suite states to find per-suite regressions.
+ * Returns one BrokenTest entry per suite that lost tests.
+ */
+function buildBrokenTests(
+  prevSuiteState: SuiteState,
+  currentSuiteState: SuiteState,
+): { suite: string; testId: string; error: string }[] {
+  const broken: { suite: string; testId: string; error: string }[] = [];
+  const allSuites = new Set([
+    ...Object.keys(prevSuiteState),
+    ...Object.keys(currentSuiteState),
+  ]);
+  for (const suite of allSuites) {
+    const prev = prevSuiteState[suite] ?? 0;
+    const curr = currentSuiteState[suite] ?? 0;
+    const lost = prev - curr;
+    if (lost > 0) {
+      broken.push({
+        suite,
+        testId: `${lost} test${lost > 1 ? "s" : ""} regressed`,
+        error: `${prev} → ${curr} passed`,
+      });
+    }
+  }
+  return broken;
+}
+
 // ---------------------------------------------------------------------------
 // Parse suites from the Parquet data
 // ---------------------------------------------------------------------------
@@ -805,6 +833,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // Build commits from evaluation boundaries
   const commits: Commit[] = [];
   let prevTotalPassed = 0;
+  let prevSuiteState: SuiteState = {};
 
   if (completedEvals.length === 0) {
     // No evaluations — create a single "commit" containing all steps
@@ -865,6 +894,9 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
       const suiteState = buildSuiteState(evalRec.suiteResults);
       const delta = evalRec.passed - prevTotalPassed;
+      const brokenTests = delta < 0
+        ? buildBrokenTests(prevSuiteState, suiteState)
+        : [];
 
       // Compute minutes elapsed from trajectory start
       const startTime = new Date(first.started_at ?? "").getTime();
@@ -899,7 +931,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
           passedDelta: delta,
           newlyBroken: delta < 0 ? Math.abs(delta) : 0,
           newlyFixed: delta > 0 ? delta : 0,
-          brokenTests: [],
+          brokenTests,
           totalPassed: evalRec.passed,
           totalFailed: evalRec.failed,
         },
@@ -913,6 +945,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       });
 
       prevTotalPassed = evalRec.passed;
+      prevSuiteState = suiteState;
     }
 
     // Remaining rows after the last evaluation
@@ -1343,6 +1376,7 @@ export function buildCompareTrajectories(
 
     const commits: Commit[] = [];
     let prevPassed = 0;
+    let prevTableSuiteState: SuiteState = {};
 
     for (const evalRow of evals) {
       const suiteResultsParsed = parseJson(evalRow.suite_results);
@@ -1350,6 +1384,9 @@ export function buildCompareTrajectories(
         ? buildSuiteState(narrowSuiteResults(suiteResultsParsed))
         : {};
       const delta = evalRow.passed - prevPassed;
+      const brokenTests = delta < 0
+        ? buildBrokenTests(prevTableSuiteState, suiteState)
+        : [];
 
       commits.push({
         index: commits.length,
@@ -1366,7 +1403,7 @@ export function buildCompareTrajectories(
           passedDelta: delta,
           newlyBroken: delta < 0 ? Math.abs(delta) : 0,
           newlyFixed: delta > 0 ? delta : 0,
-          brokenTests: [],
+          brokenTests,
           totalPassed: evalRow.passed,
           totalFailed: evalRow.failed,
         },
@@ -1380,6 +1417,7 @@ export function buildCompareTrajectories(
       });
 
       prevPassed = evalRow.passed;
+      prevTableSuiteState = suiteState;
     }
 
     // If no evaluations, create a single empty commit

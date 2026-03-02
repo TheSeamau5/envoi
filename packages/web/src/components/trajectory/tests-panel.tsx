@@ -93,44 +93,46 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
       </div>
 
       {/* Broken tests */}
-      <div className="px-[14px] py-[10px]">
-        <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-          Broken Tests ({commit.feedback.newlyBroken})
-        </span>
-        {commit.feedback.brokenTests.length === 0 ? (
-          <div className="mt-[8px] text-[12px] text-envoi-text-dim">
-            No newly broken tests in this commit.
-          </div>
-        ) : (
-          <div className="mt-[8px] space-y-[6px]">
-            {commit.feedback.brokenTests.map((brokenTest, testIndex) => (
-              <div
-                key={`${brokenTest.suite}-${brokenTest.testId}-${testIndex}`}
-                className="rounded border border-envoi-border-light px-[10px] py-[8px]"
-                style={{ background: T.redBg }}
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="rounded-[2px] px-[5px] py-[1px] text-[13px] font-medium"
-                    style={{
-                      color: SUITE_COLORS[brokenTest.suite]?.color ?? T.textMuted,
-                      background: SUITE_COLORS[brokenTest.suite]?.bg ?? T.borderLight,
-                    }}
-                  >
-                    {brokenTest.suite}
-                  </span>
-                  <span className="text-[12px] font-semibold text-envoi-text">
-                    {brokenTest.testId}
-                  </span>
+      {commit.feedback.newlyBroken > 0 && (
+        <div className="px-[14px] py-[10px]">
+          <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
+            Regressions ({commit.feedback.newlyBroken})
+          </span>
+          {commit.feedback.brokenTests.length > 0 ? (
+            <div className="mt-[8px] space-y-[6px]">
+              {commit.feedback.brokenTests.map((brokenTest, testIndex) => (
+                <div
+                  key={`${brokenTest.suite}-${brokenTest.testId}-${testIndex}`}
+                  className="rounded border border-envoi-border-light px-[10px] py-[8px]"
+                  style={{ background: T.redBg }}
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="rounded-[2px] px-[5px] py-[1px] text-[13px] font-medium"
+                      style={{
+                        color: SUITE_COLORS[brokenTest.suite]?.color ?? T.textMuted,
+                        background: SUITE_COLORS[brokenTest.suite]?.bg ?? T.borderLight,
+                      }}
+                    >
+                      {brokenTest.suite}
+                    </span>
+                    <span className="text-[12px] font-semibold text-envoi-text">
+                      {brokenTest.testId}
+                    </span>
+                  </div>
+                  <div className="mt-[4px] text-[13px]" style={{ color: T.redDark }}>
+                    {brokenTest.error}
+                  </div>
                 </div>
-                <div className="mt-[4px] text-[13px] text-envoi-red-dark">
-                  {brokenTest.error}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-[8px] text-[12px] text-envoi-text-dim">
+              {commit.feedback.newlyBroken} test{commit.feedback.newlyBroken > 1 ? "s" : ""} regressed in this commit.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
