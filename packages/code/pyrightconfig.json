@@ -2,7 +2,12 @@
   "extends": "../../pyrightconfig.json",
   "venvPath": "../..",
   "venv": ".venv",
+  "reportMissingModuleSource": "none",
+  "extraPaths": [
+    "."
+  ],
   "include": [
-    "envoi_code"
+    "envoi_code",
+    "tests"
   ]
 }

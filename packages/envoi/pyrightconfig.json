@@ -1,6 +1,11 @@
 {
   "extends": "../../pyrightconfig.json",
+  "reportMissingModuleSource": "none",
+  "extraPaths": [
+    "."
+  ],
   "include": [
-    "envoi"
+    "envoi",
+    "tests"
   ]
 }

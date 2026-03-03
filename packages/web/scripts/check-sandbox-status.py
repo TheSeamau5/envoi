@@ -4,11 +4,13 @@ Usage: python3 check-sandbox-status.py <provider> <sandbox_id>
 Output: JSON {"running": true/false, "exitCode": null/int}
 """
 
+import asyncio
+import importlib
 import json
 import sys
 
 
-def check_modal(sandbox_id: str) -> dict:
+def check_modal(sandbox_id: str) -> dict[str, object]:
     import modal
 
     sandbox = modal.Sandbox.from_id(sandbox_id)
@@ -19,15 +21,16 @@ def check_modal(sandbox_id: str) -> dict:
     }
 
 
-def check_e2b(sandbox_id: str) -> dict:
+def check_e2b(sandbox_id: str) -> dict[str, object]:
     try:
-        from e2b_code_interpreter import AsyncSandbox
-
-        import asyncio
+        e2b_module = importlib.import_module("e2b_code_interpreter")
+        async_sandbox = getattr(e2b_module, "AsyncSandbox", None)
+        if async_sandbox is None:
+            return {"running": False, "exitCode": None, "error": "e2b not installed"}
 
         async def check():
             try:
-                sandbox = await AsyncSandbox.connect(sandbox_id)
+                sandbox = await async_sandbox.connect(sandbox_id)
                 await sandbox.is_running()
                 return {"running": True, "exitCode": None}
             except Exception:

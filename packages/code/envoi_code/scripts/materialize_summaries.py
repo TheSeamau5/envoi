@@ -36,7 +36,6 @@ from envoi_code.utils.trace_parquet import (
     read_trace_parquet,
 )
 
-
 # ---------------------------------------------------------------------------
 # Output schemas
 # ---------------------------------------------------------------------------
@@ -346,7 +345,7 @@ def extract_code_snapshots(
             ordered_commits.append(commit)
 
     if not ordered_commits:
-        print(f"  [code] No commits found in trace")
+        print("  [code] No commits found in trace")
         return []
 
     # Clone bundle to temp directory
@@ -363,7 +362,7 @@ def extract_code_snapshots(
             return []
 
         if not os.path.isdir(repo_dir):
-            print(f"  [code] Clone produced no repo directory")
+            print("  [code] Clone produced no repo directory")
             return []
 
         # Fetch all refs to ensure all commits are available
@@ -422,7 +421,9 @@ def extract_code_snapshots(
                         continue
                     if len(content) > 500_000:
                         continue
-                    line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+                    line_count = content.count("\n") + (
+                        1 if content and not content.endswith("\n") else 0
+                    )
                     added_lines = list(range(line_count))
                     snapshot_rows.append({
                         "commit_hash": commit,

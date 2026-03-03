@@ -4,6 +4,7 @@
   "venv": ".venv",
   "typeCheckingMode": "all",
   "failOnWarnings": true,
+  "reportMissingModuleSource": "none",
   "reportUnreachable": "error",
   "include": [
     "packages/envoi/envoi"

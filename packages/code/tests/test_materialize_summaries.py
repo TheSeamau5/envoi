@@ -8,7 +8,6 @@ import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
-
 from envoi_code.models import AgentTrace, EvalEvent, PartRecord, SessionEnd, TurnRecord
 from envoi_code.scripts.materialize_summaries import (
     compute_added_lines,

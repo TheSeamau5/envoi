@@ -21,10 +21,10 @@ from typing import Any
 
 from envoi.logging import log_event
 
-from envoi_code.agents.shared import (
+from envoi_code.sandbox.base import Sandbox
+from envoi_code.utils.agent_helpers import (
     merge_usage_maps as merge_usage_maps_shared,
 )
-from envoi_code.sandbox.base import Sandbox
 
 SETUP_UPLOAD_CONCURRENCY = max(
     1, int(os.environ.get("SETUP_UPLOAD_CONCURRENCY", "8"))

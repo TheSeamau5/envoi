@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 from envoi_code.orchestrator import load_task
+from envoi_code.task_api import ResolvedTask
 
 
-def load_task_result(task_dir: Path, env_dir: Path) -> object:
+def load_task_result(task_dir: Path, env_dir: Path) -> ResolvedTask:
     return asyncio.run(
         load_task(
             task_dir,

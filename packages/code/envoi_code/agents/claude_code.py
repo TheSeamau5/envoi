@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import json
 import os
 import sys
@@ -25,6 +24,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from envoi_code.utils import agent_helpers as agent_shared
 
 MEANINGFUL_PART_TYPES: set[str] = {
     "reasoning",
@@ -36,15 +37,6 @@ MEANINGFUL_PART_TYPES: set[str] = {
 }
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
-
-def load_agent_shared_module() -> Any:
-    try:
-        return importlib.import_module("envoi_code.agents.shared")
-    except Exception:
-        return importlib.import_module("agent_shared")
-
-
-agent_shared = load_agent_shared_module()
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +597,6 @@ try:
     import builtins
 
     from envoi_code.agents import agent
-    from envoi_code.agents import shared as agent_shared_module
     from envoi_code.agents.base import (
         AgentCredentials,
         AgentSetupContext,
@@ -614,6 +605,7 @@ try:
     )
     from envoi_code.agents.setup import run_workspace_init
     from envoi_code.sandbox.base import Sandbox
+    from envoi_code.utils import agent_helpers as agent_shared_module
     from envoi_code.utils.helpers import (
         compute_turn_timeout_seconds,
         environment_upload_items,
@@ -625,7 +617,7 @@ try:
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     CLAUDE_CODE_SCRIPT = "/sandbox/claude_code_client.py"
-    AGENT_SHARED_SCRIPT = "/sandbox/agent_shared.py"
+    AGENT_SHARED_SCRIPT = "/sandbox/envoi_code/utils/agent_helpers.py"
     CLAUDE_CODE_LABEL = "claude-code-sdk"
     DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-4-6"
     AGENT_SHARED_CONTENT = Path(agent_shared_module.__file__).read_text()

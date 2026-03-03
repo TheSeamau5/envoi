@@ -86,7 +86,9 @@ def test_e2b_resolve_config_ignores_unsupported_fields() -> None:
 
 
 def test_orchestrator_has_no_provider_specific_branching() -> None:
-    source = Path(orchestrator.__file__).read_text()
+    orchestrator_path = orchestrator.__file__
+    assert isinstance(orchestrator_path, str)
+    source = Path(orchestrator_path).read_text()
     assert 'if sandbox_provider ==' not in source
     assert 'sandbox_provider == "modal"' not in source
     assert 'sandbox_provider == "e2b"' not in source

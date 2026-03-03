@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 from envoi_code.param_space import resolve_environment_param_space
+from envoi_code.params_api import ParamSpace
 
 
-def resolve_param_space_result(environment_dir: Path) -> object:
+def resolve_param_space_result(environment_dir: Path) -> ParamSpace:
     return asyncio.run(
         resolve_environment_param_space(
             environment_dir=environment_dir,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from envoi import environment
 from envoi.utils import Documents
@@ -7,7 +9,7 @@ from pydantic import BaseModel
 
 
 @pytest.fixture(autouse=True)
-def clear_registry() -> None:
+def clear_registry() -> Generator[None, None, None]:
     environment.clear_environment()
     yield
     environment.clear_environment()
@@ -106,4 +108,3 @@ def test_schema_v1_includes_capabilities_and_param_schemas() -> None:
     assert set(setup_params["properties"]) == {"config", "count"}
     assert "config" in setup_params["required"]
     assert "count" not in setup_params["required"]
-

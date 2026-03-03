@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import importlib
 import json
 import mimetypes
 import os
@@ -30,6 +29,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from envoi_code.utils import agent_helpers as agent_shared
 
 MEANINGFUL_PART_TYPES: set[str] = {
     "reasoning",
@@ -50,15 +51,6 @@ ALLOWED_IMAGE_SUFFIXES: set[str] = {
     ".bmp",
 }
 MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
-
-def load_agent_shared_module() -> Any:
-    try:
-        return importlib.import_module("envoi_code.agents.shared")
-    except Exception:
-        return importlib.import_module("agent_shared")
-
-
-agent_shared = load_agent_shared_module()
 
 
 class TraceEvent(BaseModel):
@@ -1626,7 +1618,6 @@ if __name__ == "__main__":
 try:
     import builtins
 
-    from envoi_code.agents import shared as agent_shared_module
     from envoi_code.agents.base import (
         AgentCredentials,
         AgentFatalError,
@@ -1636,6 +1627,7 @@ try:
     )
     from envoi_code.agents.setup import run_workspace_init
     from envoi_code.sandbox.base import Sandbox
+    from envoi_code.utils import agent_helpers as agent_shared_module
     from envoi_code.utils.helpers import (
         compute_turn_timeout_seconds,
         decode_b64_to_text,
@@ -1650,7 +1642,7 @@ try:
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     CODEX_SCRIPT = "/sandbox/codex_client.py"
-    AGENT_SHARED_SCRIPT = "/sandbox/agent_shared.py"
+    AGENT_SHARED_SCRIPT = "/sandbox/envoi_code/utils/agent_helpers.py"
     CODEX_LABEL = "codex-cli"
     CODEX_HOME_DIR = "/tmp/codex-home"
     DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
