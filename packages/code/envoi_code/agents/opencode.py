@@ -54,18 +54,14 @@ MEANINGFUL_PART_TYPES: set[str] = {
 }
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
-try:
-    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
-except Exception:
-    agent_shared_module = importlib.import_module("agent_shared")
+def load_agent_shared_module() -> Any:
+    try:
+        return importlib.import_module("envoi_code.agents.shared")
+    except Exception:
+        return importlib.import_module("agent_shared")
 
-event_token_usage_shared = agent_shared_module.event_token_usage
-extract_usage_from_events_shared = agent_shared_module.extract_usage_from_events
-merge_usage_maps_shared = agent_shared_module.merge_usage_maps
-normalize_run_tests_payload_shared = agent_shared_module.normalize_run_tests_payload
-parse_int_maybe_shared = agent_shared_module.parse_int_maybe
-parse_json_maybe_shared = agent_shared_module.parse_json_maybe
-truncate_for_trace_shared = agent_shared_module.truncate_for_trace
+
+agent_shared = load_agent_shared_module()
 
 def build_opencode_config(
     *,
@@ -348,19 +344,19 @@ def part_identifier(part: dict[str, Any], fallback: str) -> str:
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    return truncate_for_trace_shared(value, limit=limit)
+    return agent_shared.truncate_for_trace(value, limit=limit)
 
 
 def parse_json_maybe(value: Any) -> Any:
-    return parse_json_maybe_shared(value)
+    return agent_shared.parse_json_maybe(value)
 
 
 def parse_int_maybe(value: Any) -> int | None:
-    return parse_int_maybe_shared(value)
+    return agent_shared.parse_int_maybe(value)
 
 
 def normalize_run_tests_payload(value: Any) -> dict[str, Any] | None:
-    return normalize_run_tests_payload_shared(value)
+    return agent_shared.normalize_run_tests_payload(value)
 
 
 def extract_run_tests_call_from_part(part: dict[str, Any]) -> dict[str, Any] | None:
@@ -423,7 +419,7 @@ def stream_part_summary(part: dict[str, Any]) -> str | None:
 
 
 def event_token_usage(event_obj: dict[str, Any], part: dict[str, Any]) -> dict[str, Any] | None:
-    return event_token_usage_shared(
+    return agent_shared.event_token_usage(
         event_obj,
         part,
         event_container_keys=("properties",),
@@ -453,11 +449,11 @@ def tool_fields_from_part(
 
 
 def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
-    merge_usage_maps_shared(base, incoming)
+    agent_shared.merge_usage_maps(base, incoming)
 
 
 def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return extract_usage_from_events_shared(
+    return agent_shared.extract_usage_from_events(
         events,
         top_level_container_keys=("properties",),
         usage_keys=("usage", "token_usage", "tokens"),

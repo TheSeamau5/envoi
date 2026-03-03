@@ -51,20 +51,14 @@ ALLOWED_IMAGE_SUFFIXES: set[str] = {
 }
 MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
 
-try:
-    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
-except Exception:
-    agent_shared_module = importlib.import_module("agent_shared")
+def load_agent_shared_module() -> Any:
+    try:
+        return importlib.import_module("envoi_code.agents.shared")
+    except Exception:
+        return importlib.import_module("agent_shared")
 
-emit_trace_event_shared = agent_shared_module.emit_trace_event
-event_token_usage_shared = agent_shared_module.event_token_usage
-extract_usage_from_events_shared = agent_shared_module.extract_usage_from_events
-format_elapsed_shared = agent_shared_module.format_elapsed
-merge_usage_maps_shared = agent_shared_module.merge_usage_maps
-normalize_run_tests_payload_shared = agent_shared_module.normalize_run_tests_payload
-parse_int_maybe_shared = agent_shared_module.parse_int_maybe
-parse_json_maybe_shared = agent_shared_module.parse_json_maybe
-truncate_for_trace_shared = agent_shared_module.truncate_for_trace
+
+agent_shared = load_agent_shared_module()
 
 
 class TraceEvent(BaseModel):
@@ -107,11 +101,11 @@ def json_dumps(value: Any) -> str:
 
 
 def parse_json_maybe(value: Any) -> Any:
-    return parse_json_maybe_shared(value)
+    return agent_shared.parse_json_maybe(value)
 
 
 def parse_int_maybe(value: Any) -> int | None:
-    return parse_int_maybe_shared(value)
+    return agent_shared.parse_int_maybe(value)
 
 
 def extract_image_path_candidates(prompt_text: str) -> list[str]:
@@ -285,7 +279,7 @@ def build_turn_start_candidates(
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    return truncate_for_trace_shared(value, limit=limit)
+    return agent_shared.truncate_for_trace(value, limit=limit)
 
 
 def canonical_token(value: str) -> str:
@@ -343,7 +337,7 @@ def mcp_output_payload(result: Any, error: Any) -> str:
 
 
 def normalize_run_tests_payload(value: Any) -> dict[str, Any] | None:
-    return normalize_run_tests_payload_shared(value)
+    return agent_shared.normalize_run_tests_payload(value)
 
 
 def extract_run_tests_call(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -461,11 +455,11 @@ def format_mcp_output_for_log(tool_name: str, result: Any, error: Any) -> str:
 
 
 def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
-    merge_usage_maps_shared(base, incoming)
+    agent_shared.merge_usage_maps(base, incoming)
 
 
 def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return extract_usage_from_events_shared(
+    return agent_shared.extract_usage_from_events(
         events,
         top_level_container_keys=("params",),
         usage_keys=("usage", "token_usage", "tokenUsage", "tokens"),
@@ -674,7 +668,7 @@ def part_from_item(
 
 
 def event_token_usage(notification: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
-    return event_token_usage_shared(
+    return agent_shared.event_token_usage(
         notification,
         item,
         event_container_keys=("params",),
@@ -784,7 +778,7 @@ def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread 
 
 
 def format_elapsed(total_seconds: int) -> str:
-    return format_elapsed_shared(total_seconds)
+    return agent_shared.format_elapsed(total_seconds)
 
 
 def clean_progress_content(value: Any, *, truncate_content: bool = True, limit: int = 240) -> str:
@@ -884,7 +878,7 @@ def start_progress_heartbeat(
 
 
 def emit_trace_event(payload: TraceEvent) -> None:
-    emit_trace_event_shared(
+    agent_shared.emit_trace_event(
         payload.model_dump(mode="json"),
         prefix=TRACE_EVENT_PREFIX,
     )

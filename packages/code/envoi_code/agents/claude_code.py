@@ -37,14 +37,14 @@ MEANINGFUL_PART_TYPES: set[str] = {
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
-try:
-    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
-except Exception:
-    agent_shared_module = importlib.import_module("agent_shared")
+def load_agent_shared_module() -> Any:
+    try:
+        return importlib.import_module("envoi_code.agents.shared")
+    except Exception:
+        return importlib.import_module("agent_shared")
 
-emit_trace_event_shared = agent_shared_module.emit_trace_event
-format_elapsed_shared = agent_shared_module.format_elapsed
-truncate_for_trace_shared = agent_shared_module.truncate_for_trace
+
+agent_shared = load_agent_shared_module()
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ truncate_for_trace_shared = agent_shared_module.truncate_for_trace
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    return truncate_for_trace_shared(value, limit=limit)
+    return agent_shared.truncate_for_trace(value, limit=limit)
 
 
 def ts() -> str:
@@ -62,7 +62,7 @@ def ts() -> str:
 
 def emit_trace_event(event: dict[str, Any]) -> None:
     """Write a TRACE_EVENT line to stderr."""
-    emit_trace_event_shared(
+    agent_shared.emit_trace_event(
         event,
         prefix=TRACE_EVENT_PREFIX,
     )
@@ -106,7 +106,7 @@ def tool_summary(name: str, inp: Any) -> str:
 
 
 def format_elapsed(total_seconds: int) -> str:
-    return format_elapsed_shared(total_seconds)
+    return agent_shared.format_elapsed(total_seconds)
 
 
 # ---------------------------------------------------------------------------
