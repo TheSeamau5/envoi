@@ -6,6 +6,7 @@ import argparse
 import json
 import tempfile
 from pathlib import Path
+from typing import Any, Literal, TypedDict
 
 import pyarrow.parquet as pq
 from envoi_code.models import AgentTrace, EvalEvent, PartRecord, SessionEnd, TurnRecord
@@ -17,15 +18,24 @@ from envoi_code.scripts.materialize_summaries import (
 from envoi_code.utils.trace_parquet import agent_trace_to_rows, write_trace_parquet
 
 
+class TraceMeta(TypedDict):
+    environment: str
+    task_params: dict[str, Any]
+    suites: dict[str, Any]
+    bundle_uri: str
+
+
 def make_trace(
     trajectory_id: str = "traj-001",
     agent: str = "codex",
     agent_model: str = "gpt-4",
     environment: str = "c_compiler",
     eval_events: list[list[EvalEvent]] | None = None,
-    session_end_reason: str = "solved",
+    session_end_reason: Literal[
+        "solved", "part_limit", "timeout", "agent_error", "envoi_error"
+    ] = "solved",
     num_parts: int = 5,
-) -> tuple[AgentTrace, dict[str, object]]:
+) -> tuple[AgentTrace, TraceMeta]:
     """Create a test AgentTrace with optional evaluation events."""
     parts: list[PartRecord] = []
     for idx in range(num_parts):
@@ -74,7 +84,7 @@ def make_trace(
 
     suites = {"all/basics/smoke": {"passed": 7, "total": 7}}
     task_params = {"target": "x86_64"}
-    meta = {
+    meta: TraceMeta = {
         "environment": environment,
         "task_params": task_params,
         "suites": suites,
@@ -86,17 +96,17 @@ def make_trace(
 def write_test_trace(
     base_dir: Path,
     trace: AgentTrace,
-    meta: dict[str, object],
+    meta: TraceMeta,
 ) -> Path:
     """Write a trace to a subdirectory under base_dir."""
     traj_dir = base_dir / trace.trajectory_id
     traj_dir.mkdir(parents=True, exist_ok=True)
     rows = agent_trace_to_rows(
         trace,
-        environment=str(meta["environment"]),
-        task_params=meta.get("task_params") or {},
-        suites=meta.get("suites") or {},
-        bundle_uri=meta.get("bundle_uri"),
+        environment=meta["environment"],
+        task_params=meta["task_params"],
+        suites=meta["suites"],
+        bundle_uri=meta["bundle_uri"],
     )
     trace_path = traj_dir / "trace.parquet"
     write_trace_parquet(rows, str(trace_path))

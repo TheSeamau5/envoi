@@ -1,7 +1,9 @@
 {
   "extends": "../../pyrightconfig.json",
+  "stubPath": "../../typings",
   "reportMissingModuleSource": "none",
   "extraPaths": [
+    "../../typings",
     "."
   ],
   "include": [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import Any, cast
 
 import pytest
 from envoi import environment
@@ -20,7 +21,7 @@ def test_envoi_test_requires_async_function() -> None:
         return None
 
     with pytest.raises(TypeError, match="async def"):
-        environment.test(sync_test)
+        environment.test(cast(Any, sync_test))
 
 
 def test_suite_test_requires_async_function() -> None:
@@ -30,7 +31,7 @@ def test_suite_test_requires_async_function() -> None:
         return None
 
     with pytest.raises(TypeError, match="async def"):
-        suite.test(sync_test)
+        suite.test(cast(Any, sync_test))
 
 
 def test_setup_and_teardown_require_async_functions() -> None:
@@ -41,10 +42,10 @@ def test_setup_and_teardown_require_async_functions() -> None:
         return None
 
     with pytest.raises(TypeError, match="@envoi.setup"):
-        environment.setup(sync_setup)
+        environment.setup(cast(Any, sync_setup))
 
     with pytest.raises(TypeError, match="@envoi.teardown"):
-        environment.teardown(sync_teardown)
+        environment.teardown(cast(Any, sync_teardown))
 
 
 def test_schema_v1_includes_capabilities_and_param_schemas() -> None:
@@ -80,7 +81,7 @@ def test_schema_v1_includes_capabilities_and_param_schemas() -> None:
         del documents, case_name, cfg, attempts
         return {"ok": True}
 
-    schema = environment.schema()
+    schema = cast(dict[str, Any], environment.schema())
 
     assert schema["schema_version"] == "envoi.schema.v1"
     assert schema["capabilities"] == {
@@ -90,9 +91,13 @@ def test_schema_v1_includes_capabilities_and_param_schemas() -> None:
     }
     assert schema["tests"] == ["basics/smoke"]
 
-    test_metadata = schema["test_metadata"]["basics/smoke"]
+    test_metadata_by_path = cast(
+        dict[str, dict[str, Any]],
+        schema["test_metadata"],
+    )
+    test_metadata = test_metadata_by_path["basics/smoke"]
     assert test_metadata["description"] == "Smoke check for the environment."
-    test_params = test_metadata["params_schema"]
+    test_params = cast(dict[str, Any], test_metadata["params_schema"])
     assert test_params["type"] == "object"
     assert test_params["additionalProperties"] is False
     assert "documents" not in test_params["properties"]
@@ -101,7 +106,7 @@ def test_schema_v1_includes_capabilities_and_param_schemas() -> None:
     assert "cfg" in test_params["required"]
     assert "attempts" not in test_params["required"]
 
-    setup_params = schema["setup_params_schema"]
+    setup_params = cast(dict[str, Any], schema["setup_params_schema"])
     assert setup_params["type"] == "object"
     assert setup_params["additionalProperties"] is False
     assert "documents" not in setup_params["properties"]

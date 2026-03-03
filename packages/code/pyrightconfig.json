@@ -2,8 +2,10 @@
   "extends": "../../pyrightconfig.json",
   "venvPath": "../..",
   "venv": ".venv",
+  "stubPath": "../../typings",
   "reportMissingModuleSource": "none",
   "extraPaths": [
+    "../../typings",
     "."
   ],
   "include": [

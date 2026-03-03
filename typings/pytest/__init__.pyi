@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, ContextManager, TypeVar, overload
+from contextlib import AbstractContextManager
+from typing import Any, overload
 
-FixtureFunction = TypeVar("FixtureFunction", bound=Callable[..., Any])
-
-
-class RaisesContext(ContextManager[BaseException]): ...
+class RaisesContext(AbstractContextManager[BaseException]): ...
 
 
 @overload
 def fixture(
-    function: FixtureFunction,
+    function: Callable[..., Any],
     *,
     scope: str = ...,
     params: Any = ...,
     autouse: bool = ...,
     ids: Any = ...,
     name: str | None = ...,
-) -> FixtureFunction: ...
+) -> Callable[..., Any]: ...
 @overload
 def fixture(
     function: None = ...,
@@ -28,7 +26,7 @@ def fixture(
     autouse: bool = ...,
     ids: Any = ...,
     name: str | None = ...,
-) -> Callable[[FixtureFunction], FixtureFunction]: ...
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
 
 @overload

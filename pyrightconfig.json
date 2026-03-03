@@ -5,11 +5,13 @@
   "typeCheckingMode": "all",
   "failOnWarnings": true,
   "reportMissingModuleSource": "none",
+  "stubPath": "typings",
   "reportUnreachable": "error",
   "include": [
     "packages/envoi/envoi"
   ],
   "extraPaths": [
+    "typings",
     "packages/envoi",
     "packages/code",
     "packages/cli"
@@ -25,6 +27,7 @@
     {
       "root": ".",
       "extraPaths": [
+        "typings",
         "packages/envoi",
         "packages/code",
         "packages/cli"
