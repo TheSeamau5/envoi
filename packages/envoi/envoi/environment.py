@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 from .utils import Documents, mapping_from_object
 
 type TestFunction = Callable[..., Awaitable[object]]
+type TestHandler = TestFunction
 type TestDecorator = Callable[[TestFunction], TestFunction]
 
 
@@ -22,10 +23,20 @@ class ModelJsonSchemaProtocol(Protocol):
     def model_json_schema(cls) -> dict[str, object]: ...
 
 
-test_registry: dict[str, TestFunction] = {}
-_global_suites: list[Suite] = []
-setup_fn: TestFunction | None = None
-teardown_fn: TestFunction | None = None
+class EnvironmentState:
+    test_registry: dict[str, TestFunction]
+    global_suites: list[Suite]
+    setup_fn: TestFunction | None
+    teardown_fn: TestFunction | None
+
+    def __init__(self) -> None:
+        self.test_registry = {}
+        self.global_suites = []
+        self.setup_fn = None
+        self.teardown_fn = None
+
+
+state = EnvironmentState()
 
 
 def require_async_function(
@@ -50,7 +61,36 @@ def validate_segment(name: str) -> str:
 
 def register_test(path: str, function: TestFunction) -> None:
     require_async_function(function, handler_kind="envoi test", handler_name=path)
-    test_registry[path] = function
+    state.test_registry[path] = function
+
+
+def test_path(prefix: str | None, leaf_name: str) -> str:
+    if prefix is None or prefix == "":
+        return leaf_name
+    return f"{prefix}/{leaf_name}"
+
+
+def register_test_for_prefix(
+    prefix: str | None,
+    function_or_name: TestFunction | str | None = None,
+) -> TestFunction | TestDecorator:
+    if callable(function_or_name):
+        function = function_or_name
+        register_test(test_path(prefix, function.__name__), function)
+        return function
+
+    explicit_name = function_or_name
+
+    def decorator(function: TestFunction) -> TestFunction:
+        leaf_name = (
+            function.__name__
+            if explicit_name is None
+            else validate_segment(explicit_name)
+        )
+        register_test(test_path(prefix, leaf_name), function)
+        return function
+
+    return decorator
 
 
 def has_model_validate(value: object) -> TypeGuard[type[ModelValidateProtocol]]:
@@ -88,7 +128,7 @@ class Suite:
         if parent is not None:
             parent._children.append(self)
         else:
-            _global_suites.append(self)
+            state.global_suites.append(self)
 
     @property
     def path(self) -> str:
@@ -109,25 +149,7 @@ class Suite:
         self,
         function_or_name: TestFunction | str | None = None,
     ) -> TestFunction | TestDecorator:
-        if callable(function_or_name):
-            function = function_or_name
-            register_test(f"{self.path}/{function.__name__}", function)
-            return function
-
-        explicit_name = function_or_name
-
-        def decorator(
-            function: TestFunction,
-        ) -> TestFunction:
-            leaf_name = (
-                function.__name__
-                if explicit_name is None
-                else validate_segment(explicit_name)
-            )
-            register_test(f"{self.path}/{leaf_name}", function)
-            return function
-
-        return decorator
+        return register_test_for_prefix(self.path, function_or_name)
 
 
 @overload
@@ -141,25 +163,7 @@ def test(function_or_name: str | None = None) -> TestDecorator: ...
 def test(
     function_or_name: TestFunction | str | None = None,
 ) -> TestFunction | TestDecorator:
-    if callable(function_or_name):
-        function = function_or_name
-        register_test(function.__name__, function)
-        return function
-
-    explicit_name = function_or_name
-
-    def decorator(
-        function: TestFunction,
-    ) -> TestFunction:
-        leaf_name = (
-            function.__name__
-            if explicit_name is None
-            else validate_segment(explicit_name)
-        )
-        register_test(leaf_name, function)
-        return function
-
-    return decorator
+    return register_test_for_prefix(None, function_or_name)
 
 
 def suite(name: str) -> Suite:
@@ -167,33 +171,38 @@ def suite(name: str) -> Suite:
 
 
 def setup(function: TestFunction) -> TestFunction:
-    global setup_fn
     require_async_function(function, handler_kind="@envoi.setup handler")
-    if setup_fn is not None:
+    if state.setup_fn is not None:
         raise ValueError("Only one @envoi.setup is allowed")
-    setup_fn = function
+    state.setup_fn = function
     return function
 
 
 def teardown(function: TestFunction) -> TestFunction:
-    global teardown_fn
     require_async_function(function, handler_kind="@envoi.teardown handler")
-    if teardown_fn is not None:
+    if state.teardown_fn is not None:
         raise ValueError("Only one @envoi.teardown is allowed")
-    teardown_fn = function
+    state.teardown_fn = function
     return function
 
 
 def clear_environment() -> None:
-    global setup_fn, teardown_fn
-    test_registry.clear()
-    _global_suites.clear()
-    setup_fn = None
-    teardown_fn = None
+    state.test_registry.clear()
+    state.global_suites.clear()
+    state.setup_fn = None
+    state.teardown_fn = None
 
 
 def test_registry_items() -> list[tuple[str, TestFunction]]:
-    return list(test_registry.items())
+    return list(state.test_registry.items())
+
+
+def get_setup_fn() -> TestFunction | None:
+    return state.setup_fn
+
+
+def get_teardown_fn() -> TestFunction | None:
+    return state.teardown_fn
 
 
 def resolve_kwargs(
@@ -288,10 +297,10 @@ def docstring_summary(function: TestFunction) -> str | None:
 
 
 def schema() -> dict[str, object]:
-    tests = sorted(test_registry.keys())
+    tests = sorted(state.test_registry.keys())
     test_metadata: dict[str, object] = {}
     for path in tests:
-        function = test_registry[path]
+        function = state.test_registry[path]
         entry: dict[str, object] = {
             "params_schema": params_schema(function),
         }
@@ -303,13 +312,13 @@ def schema() -> dict[str, object]:
     result: dict[str, object] = {
         "schema_version": "envoi.schema.v1",
         "capabilities": {
-            "requires_session": setup_fn is not None,
-            "has_teardown": teardown_fn is not None,
+            "requires_session": state.setup_fn is not None,
+            "has_teardown": state.teardown_fn is not None,
             "handler_mode": "async_only",
         },
         "tests": tests,
         "test_metadata": test_metadata,
     }
-    if setup_fn is not None:
-        result["setup_params_schema"] = params_schema(setup_fn)
+    if state.setup_fn is not None:
+        result["setup_params_schema"] = params_schema(state.setup_fn)
     return result

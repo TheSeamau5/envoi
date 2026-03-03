@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -36,6 +37,15 @@ MEANINGFUL_PART_TYPES: set[str] = {
 
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
+try:
+    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
+except Exception:
+    agent_shared_module = importlib.import_module("agent_shared")
+
+emit_trace_event_shared = agent_shared_module.emit_trace_event
+format_elapsed_shared = agent_shared_module.format_elapsed
+truncate_for_trace_shared = agent_shared_module.truncate_for_trace
+
 
 # ---------------------------------------------------------------------------
 # Sandbox-side helpers
@@ -43,10 +53,7 @@ TRACE_EVENT_PREFIX = "TRACE_EVENT "
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit] + "..."
+    return truncate_for_trace_shared(value, limit=limit)
 
 
 def ts() -> str:
@@ -55,10 +62,9 @@ def ts() -> str:
 
 def emit_trace_event(event: dict[str, Any]) -> None:
     """Write a TRACE_EVENT line to stderr."""
-    print(
-        f"{TRACE_EVENT_PREFIX}{json.dumps(event, separators=(',', ':'))}",
-        file=sys.stderr,
-        flush=True,
+    emit_trace_event_shared(
+        event,
+        prefix=TRACE_EVENT_PREFIX,
     )
 
 
@@ -100,14 +106,7 @@ def tool_summary(name: str, inp: Any) -> str:
 
 
 def format_elapsed(total_seconds: int) -> str:
-    seconds = max(0, int(total_seconds))
-    hours, rem = divmod(seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours > 0:
-        return f"{hours} h {minutes} m {secs} s"
-    if minutes > 0:
-        return f"{minutes} m {secs} s"
-    return f"{secs} s"
+    return format_elapsed_shared(total_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +605,7 @@ try:
     import builtins
 
     from envoi_code.agents import agent
+    from envoi_code.agents import shared as agent_shared_module
     from envoi_code.agents.base import (
         AgentCredentials,
         AgentSetupContext,
@@ -625,8 +625,10 @@ try:
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     CLAUDE_CODE_SCRIPT = "/sandbox/claude_code_client.py"
+    AGENT_SHARED_SCRIPT = "/sandbox/agent_shared.py"
     CLAUDE_CODE_LABEL = "claude-code-sdk"
     DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-4-6"
+    AGENT_SHARED_CONTENT = Path(agent_shared_module.__file__).read_text()
 
     @agent("claude_code")
     class ClaudeCodeAgent:
@@ -656,9 +658,10 @@ try:
 
         @staticmethod
         def resolve_credentials(
-            codex_auth_json_b64: str | None = None,
+            auth_json_b64: str | None = None,
         ) -> AgentCredentials:
             """Resolve Claude Code credentials from env vars."""
+            del auth_json_b64
             api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
             if not api_key:
                 raise RuntimeError("ANTHROPIC_API_KEY not set")
@@ -727,6 +730,10 @@ try:
             )
 
             setup_uploads: list[tuple[str, str]] = [
+                (
+                    AGENT_SHARED_SCRIPT,
+                    AGENT_SHARED_CONTENT,
+                ),
                 (
                     "/sandbox/claude_code_client.py",
                     CLAUDE_CODE_CLIENT_CONTENT,

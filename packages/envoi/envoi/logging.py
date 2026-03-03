@@ -10,6 +10,7 @@ from pathlib import Path
 
 type LogRecord = dict[str, object]
 type LogCallback = Callable[[LogRecord], object]
+type ComponentLogger = Callable[..., None]
 
 
 _LOG_CONTEXT: ContextVar[LogRecord | None] = ContextVar(
@@ -116,3 +117,22 @@ def log_event(
 
     write_log_file(record)
     return record
+
+
+def make_component_logger(component: str) -> ComponentLogger:
+    def emit(
+        event: str,
+        *,
+        message: str = "",
+        level: str = "info",
+        **fields: object,
+    ) -> None:
+        _ = log_event(
+            component=component,
+            event=event,
+            message=message,
+            level=level,
+            **fields,
+        )
+
+    return emit

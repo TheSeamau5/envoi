@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -52,6 +53,19 @@ MEANINGFUL_PART_TYPES: set[str] = {
     "patch",
 }
 TRACE_EVENT_PREFIX = "TRACE_EVENT "
+
+try:
+    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
+except Exception:
+    agent_shared_module = importlib.import_module("agent_shared")
+
+event_token_usage_shared = agent_shared_module.event_token_usage
+extract_usage_from_events_shared = agent_shared_module.extract_usage_from_events
+merge_usage_maps_shared = agent_shared_module.merge_usage_maps
+normalize_run_tests_payload_shared = agent_shared_module.normalize_run_tests_payload
+parse_int_maybe_shared = agent_shared_module.parse_int_maybe
+parse_json_maybe_shared = agent_shared_module.parse_json_maybe
+truncate_for_trace_shared = agent_shared_module.truncate_for_trace
 
 def build_opencode_config(
     *,
@@ -334,52 +348,19 @@ def part_identifier(part: dict[str, Any], fallback: str) -> str:
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit] + "..."
+    return truncate_for_trace_shared(value, limit=limit)
 
 
 def parse_json_maybe(value: Any) -> Any:
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return value
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return value
-    return value
+    return parse_json_maybe_shared(value)
 
 
 def parse_int_maybe(value: Any) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            return int(text)
-        except ValueError:
-            return None
-    return None
+    return parse_int_maybe_shared(value)
 
 
 def normalize_run_tests_payload(value: Any) -> dict[str, Any] | None:
-    parsed = parse_json_maybe(value)
-    if not isinstance(parsed, dict):
-        return None
-    if "path" in parsed and "timestamp" in parsed:
-        return parsed
-    for nested_key in ("result", "data", "output", "structured_content"):
-        if nested_key in parsed:
-            nested = normalize_run_tests_payload(parsed.get(nested_key))
-            if isinstance(nested, dict):
-                return nested
-    return None
+    return normalize_run_tests_payload_shared(value)
 
 
 def extract_run_tests_call_from_part(part: dict[str, Any]) -> dict[str, Any] | None:
@@ -442,25 +423,13 @@ def stream_part_summary(part: dict[str, Any]) -> str | None:
 
 
 def event_token_usage(event_obj: dict[str, Any], part: dict[str, Any]) -> dict[str, Any] | None:
-    properties = event_obj.get("properties")
-    if isinstance(properties, dict):
-        for key in ("usage", "token_usage", "tokens"):
-            value = properties.get(key)
-            if isinstance(value, dict) and value:
-                return value
-    metadata = part.get("metadata")
-    if isinstance(metadata, dict):
-        for key in ("usage", "token_usage", "tokens"):
-            value = metadata.get(key)
-            if isinstance(value, dict) and value:
-                return value
-    state = part.get("state")
-    if isinstance(state, dict):
-        for key in ("usage", "token_usage", "tokens"):
-            value = state.get(key)
-            if isinstance(value, dict) and value:
-                return value
-    return None
+    return event_token_usage_shared(
+        event_obj,
+        part,
+        event_container_keys=("properties",),
+        part_container_keys=("metadata", "state"),
+        usage_keys=("usage", "token_usage", "tokens"),
+    )
 
 
 def tool_fields_from_part(
@@ -484,32 +453,16 @@ def tool_fields_from_part(
 
 
 def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
-    for key, value in incoming.items():
-        if key not in base:
-            base[key] = value
-            continue
-        existing = base[key]
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merge_usage_maps(existing, value)
-        elif isinstance(existing, int | float) and isinstance(value, int | float):
-            base[key] = existing + value
-        else:
-            base[key] = value
+    merge_usage_maps_shared(base, incoming)
 
 
 def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    usage: dict[str, Any] = {}
-    for event_obj in events:
-        if not isinstance(event_obj, dict):
-            continue
-        properties = event_obj.get("properties")
-        if not isinstance(properties, dict):
-            continue
-        for key in ("usage", "token_usage", "tokens"):
-            candidate = properties.get(key)
-            if isinstance(candidate, dict) and candidate:
-                merge_usage_maps(usage, candidate)
-    return usage or None
+    return extract_usage_from_events_shared(
+        events,
+        top_level_container_keys=("properties",),
+        usage_keys=("usage", "token_usage", "tokens"),
+        deep=False,
+    )
 
 
 async def stream_session_events(
@@ -898,6 +851,7 @@ if __name__ == "__main__":
 try:
     import builtins
 
+    from envoi_code.agents import shared as agent_shared_module
     from envoi_code.agents.base import (
         AgentCredentials,
         AgentSetupContext,
@@ -917,8 +871,10 @@ try:
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     OPENCODE_SCRIPT = "/sandbox/opencode_client.py"
+    AGENT_SHARED_SCRIPT = "/sandbox/agent_shared.py"
     OPENCODE_LABEL = "opencode-sdk"
     DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
+    AGENT_SHARED_CONTENT = Path(agent_shared_module.__file__).read_text()
 
     OPENCODE_INSTALL_SCRIPT = """\
 set -euo pipefail
@@ -1080,9 +1036,10 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
 
         @staticmethod
         def resolve_credentials(
-            codex_auth_json_b64: str | None = None,
+            auth_json_b64: str | None = None,
         ) -> AgentCredentials:
             """Resolve OpenCode credentials from env vars."""
+            del auth_json_b64
             api_key = os.environ.get(
                 "OPENCODE_API_KEY", "",
             ).strip()
@@ -1161,6 +1118,10 @@ echo "[setup] setup complete: envoi=:8000 opencode=:4096"
                 ),
             )
             setup_uploads: list[tuple[str, str]] = [
+                (
+                    AGENT_SHARED_SCRIPT,
+                    AGENT_SHARED_CONTENT,
+                ),
                 (
                     "/sandbox/opencode_client.py",
                     OPENCODE_CLIENT_CONTENT,

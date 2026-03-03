@@ -104,7 +104,7 @@ class Agent(Protocol):
 
     @staticmethod
     def resolve_credentials(
-        codex_auth_json_b64: str | None = None,
+        auth_json_b64: str | None = None,
     ) -> AgentCredentials:
         """Resolve credentials from environment variables."""
         ...

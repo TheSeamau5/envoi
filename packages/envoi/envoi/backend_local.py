@@ -13,7 +13,6 @@ import asyncio
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -22,14 +21,12 @@ from fastapi import FastAPI, Form
 from fastapi.responses import JSONResponse
 
 from . import environment
-from .logging import bind_log_context, log_event
+from .logging import bind_log_context, make_component_logger
 from .runtime import load_environment
-from .test_selection import matched_tests
-from .utils import Documents, parse_params, serialize_object, working_dir
+from .test_execution import execute_matched_tests
+from .utils import Documents, parse_params, working_dir
 
 WORKER_COMPONENT_DEFAULT = "session_worker"
-
-TestHandler = Callable[..., Awaitable[object]]
 
 
 class BackendLocalArgs(argparse.Namespace):
@@ -38,20 +35,7 @@ class BackendLocalArgs(argparse.Namespace):
     port: int = 0
 
 
-def emit_worker_log(
-    event: str,
-    *,
-    message: str = "",
-    level: str = "info",
-    **fields: object,
-) -> None:
-    _ = log_event(
-        component=WORKER_COMPONENT_DEFAULT,
-        event=event,
-        message=message,
-        level=level,
-        **fields,
-    )
+emit_worker_log = make_component_logger(WORKER_COMPONENT_DEFAULT)
 
 
 def bind_worker_context(session_id: str | None) -> None:
@@ -76,7 +60,8 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     ) -> object:
         started = time.monotonic()
         emit_worker_log("worker.setup.start")
-        if environment.setup_fn is None:
+        setup_fn = environment.get_setup_fn()
+        if setup_fn is None:
             emit_worker_log("worker.setup.skip", message="no setup fn")
             return {"ok": True}
 
@@ -84,11 +69,11 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
         try:
             documents = Documents.from_dir(Path(session_dir))
             kwargs = environment.resolve_kwargs(
-                environment.setup_fn,
+                setup_fn,
                 documents,
                 parse_params(params),
             )
-            _ = await environment.setup_fn(**kwargs)
+            _ = await setup_fn(**kwargs)
             emit_worker_log(
                 "worker.setup.complete",
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -107,47 +92,27 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     async def run_tests(path: str, params: str) -> object:
         started = time.monotonic()
         emit_worker_log("worker.test.start", path=path or "/")
-        matched = matched_tests(path, environment.test_registry_items())
-        if not matched:
+        parsed_params = parse_params(params)
+        execution = await execute_matched_tests(
+            path=path,
+            registry_items=environment.test_registry_items(),
+            params=parsed_params,
+            workdir=session_dir,
+            documents=None,
+        )
+        if execution is None:
             return JSONResponse(
                 status_code=404,
                 content={"error": f"No tests match: {path}"},
             )
-
-        parsed_params = parse_params(params)
-
-        async def run_one(
-            test_path: str,
-            function: TestHandler,
-            path_params: dict[str, object],
-        ) -> tuple[str, object]:
-            token = working_dir.set(session_dir)
-            try:
-                kwargs_input = {**parsed_params, **path_params}
-                kwargs = environment.resolve_kwargs(function, None, kwargs_input)
-                result = await function(**kwargs)
-                return test_path, serialize_object(result)
-            except Exception as error:
-                return test_path, {"error": str(error)}
-            finally:
-                working_dir.reset(token)
-
-        results = await asyncio.gather(
-            *[
-                run_one(test_path, function, path_params)
-                for test_path, (function, path_params) in matched.items()
-            ]
-        )
+        matched_count, results_payload = execution
         emit_worker_log(
             "worker.test.complete",
             path=path or "/",
-            matched=len(matched),
+            matched=matched_count,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-
-        if len(results) == 1 and (results[0][0] == path or "{" in results[0][0]):
-            return results[0][1]
-        return dict(results)
+        return results_payload
 
     async def run_all_tests_handler(
         params: Annotated[str, Form()] = "{}",
@@ -162,10 +127,11 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
 
     async def teardown_handler() -> object:
         emit_worker_log("worker.teardown.start")
-        if environment.teardown_fn is not None:
+        teardown_fn = environment.get_teardown_fn()
+        if teardown_fn is not None:
             token = working_dir.set(session_dir)
             try:
-                _ = await environment.teardown_fn()
+                _ = await teardown_fn()
             finally:
                 working_dir.reset(token)
 

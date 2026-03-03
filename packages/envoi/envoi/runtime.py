@@ -11,7 +11,6 @@ import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, TypedDict, cast
 
@@ -22,19 +21,20 @@ from fastapi.responses import JSONResponse
 
 from . import environment
 from .constants import DEFAULT_SESSION_TIMEOUT_SECONDS
-from .logging import bind_log_context, log_event
-from .test_selection import matched_tests
+from .http_helpers import (
+    object_dict,
+    parse_json_response,
+    response_error_message,
+    response_has_error,
+)
+from .logging import bind_log_context, make_component_logger
+from .test_execution import execute_matched_tests
 from .utils import (
     Documents,
-    mapping_from_object,
     parse_params,
-    serialize_object,
-    working_dir,
 )
 
 RUNTIME_COMPONENT_DEFAULT = "runtime"
-
-TestHandler = Callable[..., Awaitable[object]]
 
 
 class RuntimeArgs(argparse.Namespace):
@@ -54,26 +54,7 @@ class SessionState(TypedDict):
 sessions: dict[str, SessionState] = {}
 
 
-def emit_runtime_log(
-    event: str,
-    *,
-    message: str = "",
-    level: str = "info",
-    **fields: object,
-) -> None:
-    _ = log_event(
-        component=RUNTIME_COMPONENT_DEFAULT,
-        event=event,
-        message=message,
-        level=level,
-        **fields,
-    )
-
-
-def object_dict(value: object | None) -> dict[str, object] | None:
-    if not isinstance(value, dict):
-        return None
-    return mapping_from_object(cast(object, value))
+emit_runtime_log = make_component_logger(RUNTIME_COMPONENT_DEFAULT)
 
 
 def load_environment(module_file: str) -> None:
@@ -118,7 +99,7 @@ def load_environment(module_file: str) -> None:
     emit_runtime_log(
         "environment.load.complete",
         module_file=str(module_path),
-        has_setup=environment.setup_fn is not None,
+        has_setup=environment.get_setup_fn() is not None,
         test_count=len(environment.test_registry_items()),
     )
 
@@ -224,28 +205,6 @@ async def spawn_worker(
     raise RuntimeError("Timed out waiting for session worker startup")
 
 
-def extract_error_message(response: httpx.Response, payload: object | None) -> str:
-    payload_dict = object_dict(payload)
-    if payload_dict is not None:
-        error_value = payload_dict.get("error")
-        if isinstance(error_value, str):
-            return error_value
-        if error_value is not None:
-            return str(error_value)
-
-    text = response.text.strip()
-    if text:
-        return text
-    return response.reason_phrase or "unknown error"
-
-
-def try_parse_json(response: httpx.Response) -> object | None:
-    try:
-        return cast(object, response.json())
-    except ValueError:
-        return None
-
-
 async def session_timeout(session_id: str, timeout_seconds: int) -> None:
     await asyncio.sleep(timeout_seconds)
     if session_id in sessions:
@@ -324,17 +283,10 @@ def build_app(module_file: str) -> FastAPI:
     ) -> object:
         started = time.monotonic()
         emit_runtime_log("test.local.start", path=path or "/")
-        if environment.setup_fn is not None:
+        if environment.get_setup_fn() is not None:
             return JSONResponse(
                 status_code=400,
                 content={"error": "This environment requires a session."},
-            )
-
-        matched = matched_tests(path, environment.test_registry_items())
-        if not matched:
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"No tests match: {path}"},
             )
 
         temp_dir = Path(tempfile.mkdtemp(prefix="envoi-test-"))
@@ -344,39 +296,26 @@ def build_app(module_file: str) -> FastAPI:
 
             parsed_params = parse_params(params)
             documents = Documents.from_dir(temp_dir)
-
-            async def run_one(
-                test_path: str,
-                function: TestHandler,
-                path_params: dict[str, object],
-            ) -> tuple[str, object]:
-                token = working_dir.set(str(temp_dir))
-                try:
-                    kwargs_input = {**parsed_params, **path_params}
-                    kwargs = environment.resolve_kwargs(function, documents, kwargs_input)
-                    result = await function(**kwargs)
-                    return test_path, serialize_object(result)
-                except Exception as error:
-                    return test_path, {"error": str(error)}
-                finally:
-                    working_dir.reset(token)
-
-            results = await asyncio.gather(
-                *[
-                    run_one(test_path, function, path_params)
-                    for test_path, (function, path_params) in matched.items()
-                ]
+            execution = await execute_matched_tests(
+                path=path,
+                registry_items=environment.test_registry_items(),
+                params=parsed_params,
+                workdir=temp_dir,
+                documents=documents,
             )
+            if execution is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No tests match: {path}"},
+                )
+            matched_count, results_payload = execution
             emit_runtime_log(
                 "test.local.complete",
                 path=path or "/",
-                matched=len(matched),
+                matched=matched_count,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
-
-            if len(results) == 1 and (results[0][0] == path or "{" in results[0][0]):
-                return results[0][1]
-            return dict(results)
+            return results_payload
         except Exception as error:
             emit_runtime_log(
                 "test.local.failed",
@@ -436,12 +375,9 @@ def build_app(module_file: str) -> FastAPI:
                     data={"params": params},
                     timeout=setup_timeout,
                 )
-            setup_payload = try_parse_json(setup_response)
-            setup_payload_dict = object_dict(setup_payload)
-            if setup_response.is_error or (
-                setup_payload_dict is not None and "error" in setup_payload_dict
-            ):
-                raise RuntimeError(extract_error_message(setup_response, setup_payload))
+            setup_payload = parse_json_response(setup_response)
+            if response_has_error(setup_response, setup_payload):
+                raise RuntimeError(response_error_message(setup_response, setup_payload))
 
             timeout_task = asyncio.create_task(session_timeout(session_id, timeout))
             sessions[session_id] = {
@@ -522,7 +458,7 @@ def build_app(module_file: str) -> FastAPI:
                 content={"error": f"Session worker unavailable: {error}"},
             )
 
-        payload = try_parse_json(response)
+        payload = parse_json_response(response)
         emit_runtime_log(
             "session.test.response",
             session_id=session_id,
@@ -537,7 +473,7 @@ def build_app(module_file: str) -> FastAPI:
                 return JSONResponse(status_code=response.status_code, content=payload_dict)
             return JSONResponse(
                 status_code=response.status_code,
-                content={"error": extract_error_message(response, payload)},
+                content={"error": response_error_message(response, payload)},
             )
 
         if payload is None:

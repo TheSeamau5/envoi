@@ -14,7 +14,7 @@ from typing import NotRequired, TypedDict, cast, override
 
 from pydantic import BaseModel, Field
 
-from .logging import log_event
+from .logging import make_component_logger
 
 JsonPrimitive = str | int | float | bool | None
 JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
@@ -92,20 +92,7 @@ class RunResult(BaseModel):
 working_dir: ContextVar[str] = ContextVar("envoi_working_dir")
 
 
-def emit_environment_log(
-    event: str,
-    *,
-    message: str = "",
-    level: str = "info",
-    **fields: object,
-) -> None:
-    _ = log_event(
-        component="environment",
-        event=event,
-        message=message,
-        level=level,
-        **fields,
-    )
+emit_environment_log = make_component_logger("environment")
 
 
 def session_path() -> Path:
@@ -294,6 +281,16 @@ def mapping_from_object(value: object) -> dict[str, object]:
     }
 
 
+def nested_mapping(
+    parent: dict[str, object],
+    key: str,
+) -> dict[str, object]:
+    child = parent.get(key)
+    if not isinstance(child, dict):
+        return {}
+    return mapping_from_object(cast(object, child))
+
+
 def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
@@ -305,10 +302,10 @@ def read_environment_metadata(project_dir: str | Path = ".") -> dict[str, str]:
         tomllib.loads(pyproject_path.read_text(encoding="utf-8")),
     )
     pyproject_data = mapping_from_object(pyproject_raw)
-    project_table = mapping_from_object(pyproject_data.get("project"))
-    tool_table = mapping_from_object(pyproject_data.get("tool"))
-    envoi_table = mapping_from_object(tool_table.get("envoi"))
-    environment_table = mapping_from_object(envoi_table.get("environment"))
+    project_table = nested_mapping(pyproject_data, "project")
+    tool_table = nested_mapping(pyproject_data, "tool")
+    envoi_table = nested_mapping(tool_table, "envoi")
+    environment_table = nested_mapping(envoi_table, "environment")
 
     name_value = first_non_empty_string(
         environment_table.get("name"),

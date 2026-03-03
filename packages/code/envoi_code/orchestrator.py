@@ -24,19 +24,16 @@ import asyncio
 import base64
 import builtins
 import copy
-import importlib.util
 import inspect
 import json
 import os
 import shlex
-import sys
 import time
 import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -47,7 +44,6 @@ from envoi.logging import (
     set_log_callback,
     update_log_context,
 )
-from pydantic import BaseModel
 
 from envoi_code.agents import get_agent_backends
 from envoi_code.agents.base import Agent, AgentFatalError, AgentSetupContext
@@ -61,10 +57,24 @@ from envoi_code.models import (
     SessionEnd,
     TurnRecord,
 )
+from envoi_code.orchestrator_loading import (
+    load_environment_params_from_module,
+    load_environment_params_module,
+    load_environment_resolved_params,
+    load_task,
+)
+from envoi_code.orchestrator_types import (
+    EnvironmentFiles,
+    LogsRuntime,
+    RunStopReason,
+    TrajectoryExecutionResult,
+    TrajectoryPreparedContext,
+    TurnEndEvaluationOutcome,
+    TurnLoopResult,
+)
 from envoi_code.params_api import ParamsResolveContext, ResolvedParams
 from envoi_code.sandbox import SandboxConfig, create_sandbox
 from envoi_code.sandbox.base import Sandbox
-from envoi_code.task_api import ResolvedTask, TaskResolveContext
 from envoi_code.utils.advisor import (
     normalize_advisor_model,
     normalize_thinking_level,
@@ -156,119 +166,6 @@ EXAMPLES_DIR = Path(__file__).parent / "examples"
 DEFAULT_ENVIRONMENT_DIR = EXAMPLES_DIR / "environments" / "c_compiler"
 
 
-def load_python_file_module(
-    module_name: str,
-    file_path: Path,
-) -> ModuleType | None:
-    if not file_path.exists():
-        return None
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    previous_module = sys.modules.get(module_name)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        if previous_module is not None:
-            sys.modules[module_name] = previous_module
-        else:
-            sys.modules.pop(module_name, None)
-        raise
-    return module
-
-
-async def load_task(
-    task_dir: Path,
-    *,
-    environment_dir: Path,
-    raw_params: dict[str, Any],
-    selected_test_paths: list[str],
-    agent: str,
-    model: str | None,
-) -> ResolvedTask:
-    """Load a task definition.
-
-    Canonical path: task_dir/task.py with async resolve_task(context).
-    Fallback: task_dir/prompt.md (static prompt only).
-    """
-    task_module = load_python_file_module("envoi_task", task_dir / "task.py")
-    if task_module is not None:
-        resolve_task = getattr(task_module, "resolve_task", None)
-        if resolve_task is None:
-            raise TypeError("task.py must define async resolve_task(context)")
-        if not inspect.iscoroutinefunction(resolve_task):
-            raise TypeError("task.py resolve_task(context) must be async")
-        context = TaskResolveContext(
-            task_dir=str(task_dir),
-            environment_dir=str(environment_dir),
-            raw_params=raw_params,
-            selected_test_paths=selected_test_paths,
-            agent=agent,
-            model=model,
-        )
-        value = await resolve_task(context)
-        return ResolvedTask.model_validate(value)
-
-    prompt_file = task_dir / "prompt.md"
-    if not prompt_file.exists():
-        raise FileNotFoundError(
-            "No task.py resolver or prompt.md found in "
-            f"{task_dir}"
-        )
-    return ResolvedTask(
-        prompt=prompt_file.read_text().strip(),
-        task_params={},
-        metadata={},
-    )
-
-
-def load_environment_params_module(environment_dir: Path) -> ModuleType | None:
-    return load_python_file_module("envoi_environment_params", environment_dir / "params.py")
-
-
-async def load_environment_params_from_module(
-    module: ModuleType | None,
-) -> dict[str, Any]:
-    """Load optional environment runner config from environment/params.py."""
-    if module is None:
-        return {}
-
-    params_fn = getattr(module, "params", None)
-    if params_fn is not None:
-        value = (
-            await params_fn()
-            if inspect.iscoroutinefunction(params_fn)
-            else params_fn()
-        )
-        if isinstance(value, dict):
-            return value
-        raise TypeError("environment params() must return a dict")
-
-    params_const = getattr(module, "PARAMS", None)
-    if isinstance(params_const, dict):
-        return params_const
-
-    return {}
-
-
-async def load_environment_resolved_params(
-    module: ModuleType | None,
-    *,
-    context: ParamsResolveContext,
-) -> ResolvedParams | None:
-    if module is None:
-        return None
-    resolve_params = getattr(module, "resolve_params", None)
-    if resolve_params is None:
-        return None
-    if not inspect.iscoroutinefunction(resolve_params):
-        raise TypeError("environment resolve_params(context) must be async")
-    value = await resolve_params(context)
-    return ResolvedParams.model_validate(value)
-
-
 WORKSPACE_GITIGNORE = """\
 target/
 cc
@@ -281,26 +178,6 @@ opencode.jsonc
 .opencode/
 .codex/
 """
-
-
-def merge_resource_request(
-    *,
-    resource_name: str,
-    requested: float | int | None,
-    minimum: float | int | None,
-) -> float | int | None:
-    if minimum is None:
-        return requested
-    if requested is None:
-        return minimum
-    if requested < minimum:
-        raise ValueError(
-            f"Requested {resource_name} ({requested}) is below "
-            f"environment minimum ({minimum})"
-        )
-    return requested
-
-
 # ---------------------------------------------------------------------------
 # Sandbox helpers
 # ---------------------------------------------------------------------------
@@ -2008,108 +1885,6 @@ def build_turn_end_eval_event(
     )
 
 
-RunStopReason = Literal[
-    "solved",
-    "part_limit",
-    "timeout",
-    "agent_error",
-    "envoi_error",
-]
-
-EnvironmentFiles = (
-    tuple[
-        dict[str, str],
-        dict[str, str],
-        dict[str, str],
-        dict[str, str],
-    ]
-    | None
-)
-
-
-class TurnEndEvaluationOutcome(BaseModel):
-    feedback: str
-    payload: dict[str, Any] | None
-    passed: int | None
-    total: int | None
-    has_error: bool
-    no_tests_detected: bool
-
-
-class TurnLoopResult(BaseModel):
-    session_id: str
-    prompt_text: str
-    turn_count: int
-    part_count: int
-    latest_git_commit: str | None
-    end_reason: RunStopReason
-    evaluator: EvaluationScheduler
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class TrajectoryExecutionResult(BaseModel):
-    sandbox: Sandbox
-    agent_trace: AgentTrace
-    agent_backend: Agent
-    evaluator: EvaluationScheduler
-    session_id: str
-    prompt_text: str
-    turn_count: int
-    part_count: int
-    latest_git_commit: str | None
-    end_reason: RunStopReason
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class TrajectoryPreparedContext(BaseModel):
-    max_parts: int | None
-    max_turns: int | None
-    selected_test_paths: list[str]
-    agent_name: str
-    task_path: Path
-    env_path: Path
-    environment: str
-    agent_cls: type
-    resolved_model: str
-    credentials: Any
-    prompt: str
-    task_params_loaded: dict[str, Any]
-    effective_resolved_env_params: ResolvedParams
-    normalized_advisor_model: str | None
-    normalized_advisor_thinking_level: str
-    advisor_max_output_tokens: int | None
-    failed_tests_feedback_limit: int
-    advisor_system_prompt_override: str | None
-    advisor_user_prompt_prefix_override: str | None
-    dockerfile_rel_path: str
-    docker_build_args: dict[str, str]
-    sandbox_cpu_request: float | None
-    sandbox_memory_mb_request: int | None
-    sandbox_min_cpu: float | None
-    sandbox_min_memory_mb: int | None
-    run_metadata: dict[str, Any]
-    env_files: EnvironmentFiles
-    existing_trace: AgentTrace | None
-    trace_s3_uri: str
-    bundle_s3_uri: str
-    logs_s3_uri: str
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
-class LogsRuntime(BaseModel):
-    records: list[dict[str, Any]]
-    flush: Callable[..., Awaitable[None]]
-    capture: Callable[[dict[str, Any]], None]
-    task: asyncio.Task[None]
-    wakeup: asyncio.Event
-    stop: asyncio.Event
-
-    model_config = {"arbitrary_types_allowed": True}
-
-
 def normalize_run_stop_reason(
     stop_reason: str | None,
 ) -> RunStopReason:
@@ -2261,7 +2036,7 @@ async def prepare_trajectory_context(
         raise ValueError(f"Unknown agent: {agent_name}")
     resolved_model = agent_cls.resolve_model(model)
     credentials = agent_cls.resolve_credentials(
-        codex_auth_json_b64=codex_auth_json_b64,
+        auth_json_b64=codex_auth_json_b64,
     )
 
     resolved_task = await load_task(

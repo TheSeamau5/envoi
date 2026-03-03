@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import json
 import mimetypes
 import os
@@ -49,6 +50,21 @@ ALLOWED_IMAGE_SUFFIXES: set[str] = {
     ".bmp",
 }
 MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
+
+try:
+    agent_shared_module = importlib.import_module("envoi_code.agents.shared")
+except Exception:
+    agent_shared_module = importlib.import_module("agent_shared")
+
+emit_trace_event_shared = agent_shared_module.emit_trace_event
+event_token_usage_shared = agent_shared_module.event_token_usage
+extract_usage_from_events_shared = agent_shared_module.extract_usage_from_events
+format_elapsed_shared = agent_shared_module.format_elapsed
+merge_usage_maps_shared = agent_shared_module.merge_usage_maps
+normalize_run_tests_payload_shared = agent_shared_module.normalize_run_tests_payload
+parse_int_maybe_shared = agent_shared_module.parse_int_maybe
+parse_json_maybe_shared = agent_shared_module.parse_json_maybe
+truncate_for_trace_shared = agent_shared_module.truncate_for_trace
 
 
 class TraceEvent(BaseModel):
@@ -91,31 +107,11 @@ def json_dumps(value: Any) -> str:
 
 
 def parse_json_maybe(value: Any) -> Any:
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return value
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return value
-    return value
+    return parse_json_maybe_shared(value)
 
 
 def parse_int_maybe(value: Any) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            return int(text)
-        except ValueError:
-            return None
-    return None
+    return parse_int_maybe_shared(value)
 
 
 def extract_image_path_candidates(prompt_text: str) -> list[str]:
@@ -289,10 +285,7 @@ def build_turn_start_candidates(
 
 
 def truncate_for_trace(value: str, limit: int = 240) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit] + "..."
+    return truncate_for_trace_shared(value, limit=limit)
 
 
 def canonical_token(value: str) -> str:
@@ -350,23 +343,7 @@ def mcp_output_payload(result: Any, error: Any) -> str:
 
 
 def normalize_run_tests_payload(value: Any) -> dict[str, Any] | None:
-    parsed = parse_json_maybe(value)
-    if not isinstance(parsed, dict):
-        return None
-    if "path" in parsed and "timestamp" in parsed:
-        return parsed
-    for nested_key in (
-        "result",
-        "data",
-        "output",
-        "structured_content",
-        "structuredContent",
-    ):
-        if nested_key in parsed:
-            nested = normalize_run_tests_payload(parsed.get(nested_key))
-            if isinstance(nested, dict):
-                return nested
-    return None
+    return normalize_run_tests_payload_shared(value)
 
 
 def extract_run_tests_call(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -484,49 +461,16 @@ def format_mcp_output_for_log(tool_name: str, result: Any, error: Any) -> str:
 
 
 def merge_usage_maps(base: dict[str, Any], incoming: dict[str, Any]) -> None:
-    for key, value in incoming.items():
-        if key not in base:
-            base[key] = value
-            continue
-        existing = base[key]
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merge_usage_maps(existing, value)
-        elif isinstance(existing, int | float) and isinstance(value, int | float):
-            base[key] = existing + value
-        else:
-            base[key] = value
-
-
-def collect_usage_candidates(value: Any, sink: list[dict[str, Any]]) -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            lower_key = key.lower()
-            if isinstance(nested, dict) and ("token" in lower_key or "usage" in lower_key):
-                sink.append(nested)
-            collect_usage_candidates(nested, sink)
-        return
-    if isinstance(value, list):
-        for item in value:
-            collect_usage_candidates(item, sink)
+    merge_usage_maps_shared(base, incoming)
 
 
 def extract_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    candidates: list[dict[str, Any]] = []
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        params = as_dict(event.get("params"))
-        for key in ("usage", "token_usage", "tokenUsage", "tokens"):
-            value = params.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-        collect_usage_candidates(params, candidates)
-    if not candidates:
-        return None
-    merged: dict[str, Any] = {}
-    for candidate in candidates:
-        merge_usage_maps(merged, candidate)
-    return merged or None
+    return extract_usage_from_events_shared(
+        events,
+        top_level_container_keys=("params",),
+        usage_keys=("usage", "token_usage", "tokenUsage", "tokens"),
+        deep=True,
+    )
 
 
 def append_text_fragments(value: Any, sink: list[str]) -> None:
@@ -730,20 +674,13 @@ def part_from_item(
 
 
 def event_token_usage(notification: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
-    params = as_dict(notification.get("params"))
-    for source in (
-        params.get("usage"),
-        params.get("token_usage"),
-        params.get("tokenUsage"),
-        params.get("tokens"),
-        item.get("usage"),
-        item.get("token_usage"),
-        item.get("tokenUsage"),
-        item.get("tokens"),
-    ):
-        if isinstance(source, dict) and source:
-            return source
-    return None
+    return event_token_usage_shared(
+        notification,
+        item,
+        event_container_keys=("params",),
+        part_container_keys=(),
+        usage_keys=("usage", "token_usage", "tokenUsage", "tokens"),
+    )
 
 
 def trace_event_from_item(
@@ -847,14 +784,7 @@ def start_stream_drain_thread(stream: Any, sink: list[str]) -> threading.Thread 
 
 
 def format_elapsed(total_seconds: int) -> str:
-    seconds = max(0, int(total_seconds))
-    hours, rem = divmod(seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours > 0:
-        return f"{hours} h {minutes} m {secs} s"
-    if minutes > 0:
-        return f"{minutes} m {secs} s"
-    return f"{secs} s"
+    return format_elapsed_shared(total_seconds)
 
 
 def clean_progress_content(value: Any, *, truncate_content: bool = True, limit: int = 240) -> str:
@@ -954,10 +884,9 @@ def start_progress_heartbeat(
 
 
 def emit_trace_event(payload: TraceEvent) -> None:
-    print(
-        f"{TRACE_EVENT_PREFIX}{payload.model_dump_json()}",
-        file=sys.stderr,
-        flush=True,
+    emit_trace_event_shared(
+        payload.model_dump(mode="json"),
+        prefix=TRACE_EVENT_PREFIX,
     )
 
 
@@ -1304,7 +1233,6 @@ def run_codex_turn(
             return
 
         if key == "thread/token_usage/updated":
-            collect_usage_candidates(params, [])
             for usage_key in ("usage", "token_usage", "tokenUsage", "tokens"):
                 candidate = params.get(usage_key)
                 if isinstance(candidate, dict) and candidate:
@@ -1704,6 +1632,7 @@ if __name__ == "__main__":
 try:
     import builtins
 
+    from envoi_code.agents import shared as agent_shared_module
     from envoi_code.agents.base import (
         AgentCredentials,
         AgentFatalError,
@@ -1727,9 +1656,11 @@ try:
     from envoi_code.utils.parsing import agent_message_id, parse_trace_event_line
 
     CODEX_SCRIPT = "/sandbox/codex_client.py"
+    AGENT_SHARED_SCRIPT = "/sandbox/agent_shared.py"
     CODEX_LABEL = "codex-cli"
     CODEX_HOME_DIR = "/tmp/codex-home"
     DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
+    AGENT_SHARED_CONTENT = Path(agent_shared_module.__file__).read_text()
 
     CODEX_CONFIG_TOML_BASE = """\
 model = "MODEL_PLACEHOLDER"
@@ -1915,7 +1846,7 @@ echo "[setup] codex install complete"
 
         @staticmethod
         def resolve_credentials(
-            codex_auth_json_b64: str | None = None,
+            auth_json_b64: str | None = None,
         ) -> CodexCredentials:
             """Resolve Codex credentials from env vars / b64 arg."""
             codex_auth_json: str | None = None
@@ -1926,9 +1857,9 @@ echo "[setup] codex install complete"
                 "CODEX_AUTH_JSON", "",
             ).strip()
 
-            if codex_auth_json_b64:
+            if auth_json_b64:
                 decoded = decode_b64_to_text(
-                    codex_auth_json_b64,
+                    auth_json_b64,
                     label="codex_auth_json_b64 arg",
                 )
                 codex_auth_json = parse_codex_auth_json(
@@ -2047,6 +1978,7 @@ echo "[setup] codex install complete"
                     + "\n"
                 )
             setup_uploads: list[tuple[str, str]] = [
+                (AGENT_SHARED_SCRIPT, AGENT_SHARED_CONTENT),
                 ("/sandbox/codex_client.py", CODEX_CLIENT_CONTENT),
                 (
                     f"{CODEX_HOME_DIR}/config.toml",

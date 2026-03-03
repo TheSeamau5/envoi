@@ -21,6 +21,9 @@ from typing import Any
 
 from envoi.logging import log_event
 
+from envoi_code.agents.shared import (
+    merge_usage_maps as merge_usage_maps_shared,
+)
 from envoi_code.sandbox.base import Sandbox
 
 SETUP_UPLOAD_CONCURRENCY = max(
@@ -171,27 +174,6 @@ def token_estimate(text: str | None) -> int:
     return max(1, round(len(text) / 4))
 
 
-def is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
-def merge_usage_maps(
-    base: dict[str, Any], incoming: dict[str, Any],
-) -> dict[str, Any]:
-    for key, value in incoming.items():
-        if key not in base:
-            base[key] = value
-            continue
-        existing = base[key]
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merge_usage_maps(existing, value)
-        elif is_number(existing) and is_number(value):
-            base[key] = existing + value
-        else:
-            base[key] = value
-    return base
-
-
 def redact_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
@@ -207,6 +189,14 @@ def redact_secrets(value: Any) -> Any:
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
     return value
+
+
+def merge_usage_maps(
+    base: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merge_usage_maps_shared(base, incoming)
+    return base
 
 
 def compute_turn_timeout_seconds(

@@ -1161,6 +1161,21 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // Build code snapshots from accumulated patch diffs
   populateCodeSnapshots(sortedRows, commits);
 
+  // Enrich changedFiles with LOC from code snapshots when numstat was missing.
+  // The snapshot tracks which lines were added per file per commit, so we can
+  // compute accurate additions even without git numstat data.
+  for (const commit of commits) {
+    for (const file of commit.changedFiles) {
+      if (file.additions === 0 && file.deletions === 0) {
+        const snap = commit.codeSnapshot[file.path];
+        if (snap && snap.touched) {
+          file.additions = snap.added.length;
+          file.isNew = snap.isNew ?? false;
+        }
+      }
+    }
+  }
+
   // Filter out empty commits (no steps) and recompute deltas.
   // Empty commits represent re-evaluations of unchanged code; any score
   // differences are eval noise, not agent progress.
