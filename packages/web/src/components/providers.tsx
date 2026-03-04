@@ -13,5 +13,6 @@ type ProvidersProps = {
 };
 
 export function Providers({ children }: ProvidersProps) {
+  console.log("[DEBUG] Providers render");
   return <TooltipProvider delayDuration={0}>{children}</TooltipProvider>;
 }

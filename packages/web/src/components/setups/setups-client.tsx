@@ -2,11 +2,14 @@
  * Setups Client — wraps SetupCompare with full-data fetching.
  * Fetches all trajectory data (with commit histories) on mount,
  * then renders SetupCompare once loaded.
+ *
+ * ZERO useEffect — fetch is ref-guarded in the render body;
+ * setState happens in async .then callbacks, not in effects.
  */
 
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import type { Trajectory } from "@/lib/types";
 import { SetupCompare } from "@/components/compare/setup-compare";
 
@@ -18,27 +21,21 @@ type SetupsClientProps = {
 
 export function SetupsClient({ allTraces, project }: SetupsClientProps) {
   const [fullTraces, setFullTraces] = useState<Trajectory[]>([]);
-  const [loading, setLoading] = useState(false);
-  const fetched = useRef(false);
+  const [loading, setLoading] = useState(true);
+  const fetchRef = useRef(false);
 
-  useEffect(() => {
-    if (fetched.current || loading) {
-      return;
-    }
-
-    queueMicrotask(() => {
-      setLoading(true);
-    });
+  /** Fire fetch exactly once — guarded by ref, not driven by useEffect */
+  if (!fetchRef.current) {
+    fetchRef.current = true;
     fetch(`/api/compare?project=${encodeURIComponent(project)}`)
       .then((res) => res.json())
       .then((data: Trajectory[]) => {
         const active = data.filter((trace) => trace.finalPassed > 0);
         setFullTraces(active);
-        fetched.current = true;
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [loading, project]);
+  }
 
   if (loading) {
     return (

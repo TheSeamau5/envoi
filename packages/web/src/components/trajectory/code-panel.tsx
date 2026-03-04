@@ -1,12 +1,16 @@
 /**
  * Code panel — file tree (190px left) + code viewer (right).
  * Client component — manages selected file state.
- * Auto-selects first changed file on commit change.
+ * Auto-selects first changed file when commit changes.
+ *
+ * ZERO useEffect — file selection is derived via useMemo.
+ * Manual selection is tracked in state; when commit changes
+ * and the selected file no longer exists, we auto-select.
  */
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import type { Commit } from "@/lib/types";
 import { FileTree } from "./file-tree";
 import { CodeView } from "./code-view";
@@ -16,28 +20,26 @@ type CodePanelProps = {
 };
 
 export function CodePanel({ commit }: CodePanelProps) {
-  const [selectedFile, setSelectedFile] = useState<string>();
+  const [manualSelection, setManualSelection] = useState<string | undefined>(
+    undefined,
+  );
 
-  /** Auto-select file when commit changes.
-   *  If the currently viewed file exists in the new commit, stay on it.
-   *  Otherwise fall back to first changed file, then first snapshot file. */
-  useEffect(() => {
-    if (selectedFile && commit.codeSnapshot[selectedFile]) {
-      return;
+  /**
+   * Derive the effective selected file:
+   * - If user manually selected a file and it exists in the snapshot, use it.
+   * - Otherwise auto-select first changed file, then first snapshot file.
+   */
+  const selectedFile = useMemo(() => {
+    if (manualSelection && commit.codeSnapshot[manualSelection]) {
+      return manualSelection;
     }
     const firstChanged = commit.changedFiles[0];
     if (firstChanged) {
-      queueMicrotask(() => {
-        setSelectedFile(firstChanged.path);
-      });
-    } else {
-      /** Fallback to first file in snapshot */
-      const allFiles = Object.keys(commit.codeSnapshot);
-      queueMicrotask(() => {
-        setSelectedFile(allFiles[0]);
-      });
+      return firstChanged.path;
     }
-  }, [commit.index, commit.changedFiles, commit.codeSnapshot, selectedFile]);
+    const allFiles = Object.keys(commit.codeSnapshot);
+    return allFiles[0];
+  }, [manualSelection, commit.codeSnapshot, commit.changedFiles]);
 
   const fileSnapshot = selectedFile
     ? commit.codeSnapshot[selectedFile]
@@ -52,7 +54,7 @@ export function CodePanel({ commit }: CodePanelProps) {
       <FileTree
         snapshot={commit.codeSnapshot}
         selectedFile={selectedFile}
-        onSelectFile={setSelectedFile}
+        onSelectFile={setManualSelection}
       />
       <CodeView
         snapshot={fileSnapshot}

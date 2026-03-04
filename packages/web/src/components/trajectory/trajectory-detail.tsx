@@ -11,7 +11,7 @@
 
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
 import type { Trajectory, Suite, CodeSnapshot, Commit } from "@/lib/types";
@@ -71,38 +71,39 @@ export function TrajectoryDetail({
   /** Critical-only filter */
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
 
-  /** Code history — fetched lazily from code_snapshots.parquet */
+  /** Code history — fetched lazily from code_snapshots.parquet.
+   *  Ref-guarded fetch in render body — no useEffect needed. */
   const [codeHistory, setCodeHistory] =
     useState<Record<number, CodeSnapshot>>();
+  const codeHistoryFetchRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function fetchCodeHistory() {
-      try {
-        const response = await fetch(
-          `/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history?project=${encodeURIComponent(project)}`,
-        );
+  if (codeHistoryFetchRef.current !== trajectory.id) {
+    codeHistoryFetchRef.current = trajectory.id;
+    const fetchId = trajectory.id;
+    fetch(
+      `/api/trajectories/${encodeURIComponent(fetchId)}/code-history?project=${encodeURIComponent(project)}`,
+    )
+      .then((response) => {
         if (!response.ok) {
+          return null;
+        }
+        return response.json();
+      })
+      .then((data: Record<string, CodeSnapshot> | null) => {
+        if (!data || codeHistoryFetchRef.current !== fetchId) {
           return;
         }
-        const data: Record<string, CodeSnapshot> = await response.json();
-        if (!cancelled) {
-          /** Convert string keys from JSON to numeric keys */
-          const mapped: Record<number, CodeSnapshot> = {};
-          for (const [key, snapshot] of Object.entries(data)) {
-            mapped[Number(key)] = snapshot;
-          }
-          setCodeHistory(mapped);
+        /** Convert string keys from JSON to numeric keys */
+        const mapped: Record<number, CodeSnapshot> = {};
+        for (const [key, snapshot] of Object.entries(data)) {
+          mapped[Number(key)] = snapshot;
         }
-      } catch {
+        setCodeHistory(mapped);
+      })
+      .catch(() => {
         /** Code history is optional — silently ignore fetch errors */
-      }
-    }
-    fetchCodeHistory();
-    return () => {
-      cancelled = true;
-    };
-  }, [trajectory.id, project]);
+      });
+  }
 
   /**
    * Right panel open/close + divider position.
@@ -236,10 +237,14 @@ export function TrajectoryDetail({
     [selectedIndex, commits.length, handleSelectCommit, handleTogglePlay],
   );
 
-  /** Auto-focus on mount for keyboard */
-  useEffect(() => {
-    containerRef.current?.focus();
-  }, []);
+  /** Auto-focus via ref callback — no useEffect needed */
+  const containerCallbackRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      containerRef.current = node;
+      node?.focus();
+    },
+    [],
+  );
 
   /** Draggable divider handlers — uses raw state during drag (no cookie, no spring) for responsiveness */
   const handleDividerMouseDown = useCallback(() => {
@@ -283,7 +288,7 @@ export function TrajectoryDetail({
 
   return (
     <div
-      ref={containerRef}
+      ref={containerCallbackRef}
       className="flex flex-1 overflow-hidden outline-none"
       tabIndex={0}
       onKeyDown={handleKeyDown}

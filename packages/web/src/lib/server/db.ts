@@ -4,7 +4,12 @@
  */
 
 import { DuckDBInstance } from "@duckdb/node-api";
-import { execFileSync, execSync } from "node:child_process";
+import {
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+import { spawn } from "node:child_process";
 import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { cookies } from "next/headers";
@@ -12,14 +17,34 @@ import { cookies } from "next/headers";
 let instance: DuckDBInstance | undefined;
 let initPromise: Promise<DuckDBInstance> | undefined;
 let loadedProject: string | undefined;
-let refreshInterval: ReturnType<typeof setInterval> | undefined;
 let warnedLegacyBucket = false;
-const syncedProjects = new Set<string>();
+
+/** Tracks in-flight and recently completed syncs to prevent spam. */
+const syncInFlight = new Set<string>();
+const lastSyncTime = new Map<string, number>();
+const SYNC_MIN_INTERVAL_MS = 30_000;
+
+/** Mutex for switchProject to prevent concurrent table re-creation. */
+let switchPromise: Promise<void> | undefined;
 
 const DB_PATH = path.resolve(process.cwd(), ".cache", "envoi.duckdb");
-const SYNC_COOLDOWN_MS = 5 * 60_000;
-const BACKGROUND_REFRESH_MS = 5 * 60_000;
 const PROJECT_COOKIE = "envoi:project";
+const PROJECTS_JSON_KEY = "projects.json";
+
+/** Lazy S3 client singleton — created on first use. */
+let s3Client: S3Client | undefined;
+function getS3Client(): S3Client {
+  if (!s3Client) {
+    s3Client = new S3Client({
+      region: process.env.AWS_REGION ?? "us-east-1",
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
+      },
+    });
+  }
+  return s3Client;
+}
 
 export type ProjectMeta = {
   name: string;
@@ -34,10 +59,6 @@ function validateProjectName(project: string): string {
     throw new Error(`Invalid project name: ${project}`);
   }
   return value;
-}
-
-function syncStampPath(project: string): string {
-  return path.resolve(process.cwd(), ".cache", `last-s3-sync-${project}`);
 }
 
 function cacheDir(project: string): string {
@@ -143,7 +164,24 @@ function awsEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function syncFromS3(project: string): void {
+/** Run a single `aws s3 sync` command as a child process, returning a promise. */
+function spawnS3Sync(source: string, dest: string, include: string): Promise<void> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "aws",
+      ["s3", "sync", source, dest, "--exclude", "*", "--include", include],
+      { stdio: ["ignore", "pipe", "pipe"], env: awsEnv() },
+    );
+    child.on("close", () => resolve());
+    child.on("error", () => resolve());
+  });
+}
+
+/**
+ * Sync project data from S3 to local cache — runs as background child processes.
+ * Returns a promise that resolves when all syncs complete.
+ */
+async function syncFromS3(project: string): Promise<void> {
   if (!isS3Configured()) {
     return;
   }
@@ -152,48 +190,13 @@ function syncFromS3(project: string): void {
   const source = `s3://${prefix}/project/${project}/trajectories/`;
   const dest = cacheDir(project);
 
-  try {
-    console.log(`[db] Syncing traces from ${source}`);
-    execSync(
-      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "*/trace.parquet"`,
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 60_000,
-        env: awsEnv(),
-      },
-    );
-  } catch (error) {
-    console.warn(
-      "[db] S3 trace sync failed, will fallback to remote parquet reads:",
-      error,
-    );
-  }
-
-  try {
-    execSync(
-      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "summaries/*.parquet"`,
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 60_000,
-        env: awsEnv(),
-      },
-    );
-  } catch {
-    // summary files optional
-  }
-
-  try {
-    execSync(
-      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "*/code_snapshots.parquet"`,
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 60_000,
-        env: awsEnv(),
-      },
-    );
-  } catch {
-    // code snapshots optional
-  }
+  console.log(`[db] Background sync from ${source}`);
+  await Promise.all([
+    spawnS3Sync(source, dest, "*/trace.parquet"),
+    spawnS3Sync(source, dest, "summaries/*.parquet"),
+    spawnS3Sync(source, dest, "*/code_snapshots.parquet"),
+  ]);
+  console.log(`[db] Background sync complete for ${project}`);
 }
 
 async function hasLocalCache(project: string): Promise<boolean> {
@@ -211,39 +214,46 @@ async function hasLocalCache(project: string): Promise<boolean> {
   }
 }
 
-async function isSyncFresh(project: string): Promise<boolean> {
-  try {
-    const st = await stat(syncStampPath(project));
-    return Date.now() - st.mtimeMs < SYNC_COOLDOWN_MS;
-  } catch {
-    return false;
-  }
-}
-
-async function touchSyncStamp(project: string): Promise<void> {
-  const stamp = syncStampPath(project);
-  await mkdir(path.dirname(stamp), { recursive: true });
-  await writeFile(stamp, String(Date.now()));
-}
-
+/**
+ * Ensure project data is available locally.
+ * - If local cache exists: return immediately, kick off background sync.
+ * - If no local cache (first load): await the sync so we have data to show.
+ */
 async function ensureSynced(project: string): Promise<void> {
-  if (syncedProjects.has(project)) {
+  await ensureCacheDir(project);
+
+  if (await hasLocalCache(project)) {
+    // Data exists locally — serve it now, maybe sync in background
+    const lastSync = lastSyncTime.get(project) ?? 0;
+    if (syncInFlight.has(project) || Date.now() - lastSync < SYNC_MIN_INTERVAL_MS) {
+      return;
+    }
+    syncInFlight.add(project);
+    syncFromS3(project)
+      .then(() => {
+        lastSyncTime.set(project, Date.now());
+        if (instance && loadedProject === project) {
+          return loadSummaryTables(instance, project)
+            .then(() => createAnalyticsViews(instance!, project));
+        }
+      })
+      .catch((error) => {
+        console.warn("[db] Background sync failed:", error);
+      })
+      .finally(() => {
+        syncInFlight.delete(project);
+      });
     return;
   }
 
-  syncedProjects.add(project);
-  if (await isSyncFresh(project)) {
-    return;
-  }
-
-  syncFromS3(project);
-  await touchSyncStamp(project);
+  // No local cache — await initial sync so we have data to show
+  await syncFromS3(project);
+  lastSyncTime.set(project, Date.now());
 }
 
-/** Glob for all trace parquet files */
+/** Glob for all trace parquet files — uses local cache if available, else S3. */
 export async function allTracesGlob(project?: string): Promise<string> {
   const activeProject = await getActiveProject(project);
-  await ensureSynced(activeProject);
   if (await hasLocalCache(activeProject)) {
     return path.join(cacheDir(activeProject), "*", "trace.parquet");
   }
@@ -258,13 +268,12 @@ export function validateTrajectoryId(id: string): string {
   return id;
 }
 
-/** URI for a single trajectory's parquet file */
+/** URI for a single trajectory's parquet file — uses local cache if available, else S3. */
 export async function traceUri(
   trajectoryId: string,
   project?: string,
 ): Promise<string> {
   const activeProject = await getActiveProject(project);
-  await ensureSynced(activeProject);
   const validId = validateTrajectoryId(trajectoryId);
   const localPath = path.join(
     cacheDir(activeProject),
@@ -287,13 +296,12 @@ export async function freshTraceUri(
   return `s3://${getPrefix()}/project/${activeProject}/trajectories/${validId}/trace.parquet`;
 }
 
-/** URI for code_snapshots.parquet (may not exist) */
+/** URI for code_snapshots.parquet (may not exist) — checks local cache only. */
 export async function codeSnapshotsUri(
   trajectoryId: string,
   project?: string,
 ): Promise<string | undefined> {
   const activeProject = await getActiveProject(project);
-  await ensureSynced(activeProject);
   const validId = validateTrajectoryId(trajectoryId);
   const localPath = path.join(
     cacheDir(activeProject),
@@ -536,6 +544,11 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
   await ensureCacheDir(project);
   await ensureSynced(project);
 
+  // Remove stale DB + WAL to avoid catalog errors on WAL replay.
+  // All data is rebuilt from parquet files, so nothing is lost.
+  await rm(DB_PATH, { force: true });
+  await rm(`${DB_PATH}.wal`, { force: true });
+
   const inst = await DuckDBInstance.create(DB_PATH);
   const cfgConn = await inst.connect();
   try {
@@ -549,7 +562,9 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
     cfgConn.disconnectSync();
   }
 
-  if (isS3Configured() && !(await hasLocalCache(project))) {
+  if (isS3Configured()) {
+    // Always load httpfs when S3 is configured — fresh reads bypass the
+    // local cache and go directly to S3 even when a cached copy exists.
     const conn = await inst.connect();
     try {
       await conn.run("INSTALL httpfs");
@@ -563,6 +578,10 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
       await conn.run(
         `SET s3_secret_access_key='${process.env.AWS_SECRET_ACCESS_KEY ?? ""}'`,
       );
+      // Disable ETag checks for live S3 reads. The parquet file is
+      // overwritten on every part during a live run, causing ETag
+      // mismatches that abort the query mid-read.
+      await conn.run("SET unsafe_disable_etag_checks=true");
     } finally {
       conn.disconnectSync();
     }
@@ -578,7 +597,6 @@ async function switchProject(project: string): Promise<void> {
   if (!instance) {
     return;
   }
-  await ensureCacheDir(project);
   await ensureSynced(project);
   await loadSummaryTables(instance, project);
   await createAnalyticsViews(instance, project);
@@ -597,7 +615,6 @@ export async function getDb(project?: string): Promise<DuckDBInstance> {
     initPromise = createInstance(activeProject).then((inst) => {
       instance = inst;
       initPromise = undefined;
-      startBackgroundRefresh();
       return inst;
     });
     return initPromise;
@@ -606,12 +623,32 @@ export async function getDb(project?: string): Promise<DuckDBInstance> {
   if (initPromise) {
     const inst = await initPromise;
     if (loadedProject !== activeProject) {
-      await switchProject(activeProject);
+      // Serialize project switches to prevent write-write conflicts
+      if (switchPromise) {
+        await switchPromise;
+        if (loadedProject === activeProject) {
+          return inst;
+        }
+      }
+      switchPromise = switchProject(activeProject).finally(() => {
+        switchPromise = undefined;
+      });
+      await switchPromise;
     }
     return inst;
   }
 
-  await switchProject(activeProject);
+  // Serialize project switches to prevent write-write conflicts
+  if (switchPromise) {
+    await switchPromise;
+    if (loadedProject === activeProject && instance) {
+      return instance;
+    }
+  }
+  switchPromise = switchProject(activeProject).finally(() => {
+    switchPromise = undefined;
+  });
+  await switchPromise;
   if (!instance) {
     throw new Error("DuckDB instance unavailable");
   }
@@ -681,124 +718,82 @@ export async function hasSummaryTables(project?: string): Promise<boolean> {
 /** Re-sync from S3 and reload summary/materialized tables. */
 export async function refreshData(project?: string): Promise<void> {
   const activeProject = await getActiveProject(project);
-  syncedProjects.delete(activeProject);
-  try {
-    await rm(syncStampPath(activeProject));
-  } catch {
-    // ignore
-  }
-
+  syncInFlight.delete(activeProject);
+  lastSyncTime.delete(activeProject);
   await ensureSynced(activeProject);
-  const db = await getDb(activeProject);
-  await loadSummaryTables(db, activeProject);
-  await createAnalyticsViews(db, activeProject);
 }
 
-function startBackgroundRefresh(): void {
-  if (refreshInterval) {
-    return;
-  }
-
-  refreshInterval = setInterval(() => {
-    if (!loadedProject) {
-      return;
+/**
+ * Read the aggregate projects.json from S3.
+ * Returns all project metadata in a single S3 GetObject call.
+ */
+async function readProjectsJson(): Promise<ProjectMeta[]> {
+  const bucket = getPrefix();
+  try {
+    const response = await getS3Client().send(
+      new GetObjectCommand({ Bucket: bucket, Key: PROJECTS_JSON_KEY }),
+    );
+    const body = await response.Body?.transformToString("utf-8");
+    if (!body) {
+      return [];
     }
-    refreshData(loadedProject).catch((error) => {
-      console.warn("[db] Background refresh failed:", error);
-    });
-  }, BACKGROUND_REFRESH_MS);
-
-  if (refreshInterval.unref) {
-    refreshInterval.unref();
+    const parsed: unknown = JSON.parse(body);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (entry): entry is ProjectMeta =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof entry.name === "string",
+    );
+  } catch (error: unknown) {
+    const code =
+      error instanceof Error ? (error as { name?: string }).name : "";
+    if (code === "NoSuchKey") {
+      return [];
+    }
+    console.error("[db] readProjectsJson error:", error);
+    return [];
   }
 }
 
-function runAwsCommand(args: string[], input?: string): string {
-  const output = execFileSync("aws", args, {
-    encoding: "utf8",
-    env: awsEnv(),
-    input,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  return output;
+/**
+ * Write the aggregate projects.json to S3.
+ */
+async function writeProjectsJson(projects: ProjectMeta[]): Promise<void> {
+  const bucket = getPrefix();
+  await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: PROJECTS_JSON_KEY,
+      Body: JSON.stringify(projects, null, 2),
+      ContentType: "application/json",
+    }),
+  );
 }
 
-/** List all project prefixes and hydrate project.json metadata. */
+/** List all projects — single S3 read of projects.json. */
 export async function listProjects(): Promise<ProjectMeta[]> {
   if (!isS3Configured()) {
     return [];
   }
-
-  const prefix = getPrefix();
-  let raw = "";
-  try {
-    raw = runAwsCommand([
-      "s3api",
-      "list-objects-v2",
-      "--bucket",
-      prefix,
-      "--prefix",
-      "project/",
-      "--delimiter",
-      "/",
-      "--output",
-      "json",
-    ]);
-  } catch {
-    return [];
-  }
-
-  let payload: { CommonPrefixes?: Array<{ Prefix?: string }> };
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-
-  const names = (payload.CommonPrefixes ?? [])
-    .map((entry) => entry.Prefix ?? "")
-    .map((entry) => entry.replace(/^project\//, "").replace(/\/$/, ""))
-    .filter((entry) => entry.length > 0);
-
-  const metas = await Promise.all(names.map((name) => getProjectMeta(name)));
-  return metas
-    .filter((meta): meta is ProjectMeta => meta !== undefined)
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return readProjectsJson();
 }
 
-/** Load project.json metadata for a project. */
+/** Load project.json metadata for a single project. */
 export async function getProjectMeta(
   project: string,
 ): Promise<ProjectMeta | undefined> {
   if (!isS3Configured()) {
     return undefined;
   }
-
   const name = validateProjectName(project);
-  const prefix = getPrefix();
-  const uri = `s3://${prefix}/project/${name}/project.json`;
-  try {
-    const raw = runAwsCommand(["s3", "cp", uri, "-"]);
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) {
-      return undefined;
-    }
-    const created = String(Reflect.get(parsed, "created_at") ?? "");
-    const updated = String(Reflect.get(parsed, "updated_at") ?? "");
-    const rawDescription = Reflect.get(parsed, "description");
-    return {
-      name,
-      description:
-        typeof rawDescription === "string" ? rawDescription : undefined,
-      created_at: created,
-      updated_at: updated,
-    };
-  } catch {
-    return undefined;
-  }
+  const all = await readProjectsJson();
+  return all.find((meta) => meta.name === name);
 }
 
-/** Write project.json metadata for a project. */
+/** Create a new project — adds to projects.json and writes individual project.json. */
 export async function createProjectMeta(
   project: string,
   meta: { description?: string },
@@ -812,8 +807,21 @@ export async function createProjectMeta(
     updated_at: now,
   };
 
-  const prefix = getPrefix();
-  const uri = `s3://${prefix}/project/${name}/project.json`;
-  runAwsCommand(["s3", "cp", "-", uri], JSON.stringify(payload, null, 2));
+  const all = await readProjectsJson();
+  const filtered = all.filter((entry) => entry.name !== name);
+  filtered.push(payload);
+  await writeProjectsJson(filtered);
+
+  // Also write individual project.json for backwards compatibility
+  const bucket = getPrefix();
+  await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: `project/${name}/project.json`,
+      Body: JSON.stringify(payload, null, 2),
+      ContentType: "application/json",
+    }),
+  );
+
   return payload;
 }

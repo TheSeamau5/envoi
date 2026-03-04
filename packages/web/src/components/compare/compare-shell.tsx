@@ -47,6 +47,7 @@ type CompareShellProps = {
 };
 
 export function CompareShell({ children, project }: CompareShellProps) {
+  console.log("[DEBUG] CompareShell render");
   const pathname = usePathname();
   const tabs = [
     {

@@ -7,10 +7,12 @@
  * and /compare/suites navigations — sidebar state survives tab changes.
  */
 
+import { Suspense } from "react";
 import type { ReactNode } from "react";
 import { getAllTrajectories } from "@/lib/server/data";
 import { CompareProvider } from "@/components/compare/compare-context";
 import { CompareShell } from "@/components/compare/compare-shell";
+import { LoadingSkeleton } from "@/components/loading-skeleton";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function CompareLayout({
@@ -19,6 +21,21 @@ export default async function CompareLayout({
   children: ReactNode;
 }) {
   const project = await requireActiveProject();
+
+  return (
+    <Suspense fallback={<LoadingSkeleton message="Loading compare data..." />}>
+      <CompareContent project={project}>{children}</CompareContent>
+    </Suspense>
+  );
+}
+
+async function CompareContent({
+  project,
+  children,
+}: {
+  project: string;
+  children: ReactNode;
+}) {
   const allTraces = await getAllTrajectories({ project });
   const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
 

@@ -173,7 +173,7 @@ function getXTimeTicks(totalMinutes: number): number[] {
   if (lastTick !== undefined && totalMinutes - lastTick > intervalMinutes * 0.4) {
     ticks.push(totalMinutes);
   }
-  return ticks;
+  return [...new Set(ticks)];
 }
 
 /** Interactive SVG progress curve */

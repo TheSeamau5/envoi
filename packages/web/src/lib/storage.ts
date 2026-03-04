@@ -2,14 +2,14 @@
  * LocalStorage persistence hook with SSR safety and error handling.
  * Always falls back to defaults — never crashes on bad/missing/outdated data.
  *
- * Hydration-safe: always initializes with `defaultValue` on both server and
- * client, then reads localStorage in a post-mount effect. This guarantees
- * SSR output matches the first client render (no FOUC / hydration mismatch).
+ * Initializes directly from localStorage on the client (lazy useState initializer).
+ * On the server, always returns defaultValue.
+ * Persistence is inline in the setter callback — ZERO useEffect.
  */
 
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
 
 /** Prefix all envoi localStorage keys to avoid collisions */
 const STORAGE_PREFIX = "envoi:";
@@ -48,44 +48,35 @@ export function usePersistedState<T>(
   defaultValue: T,
 ): [T, (valueOrUpdater: T | ((prev: T) => T)) => void] {
   const prefixedKey = `${STORAGE_PREFIX}${key}`;
-  const hydrated = useRef(false);
 
-  // Always start with defaultValue — matches SSR output, avoids hydration mismatch
-  const [value, setValue] = useState<T>(defaultValue);
-
-  // After mount: read localStorage and update via a scheduled state update
-  useEffect(() => {
-    if (hydrated.current) {
-      return;
-    }
-    hydrated.current = true;
+  /**
+   * Lazy initializer: reads localStorage on the client, returns defaultValue
+   * on the server. This is a pure read — no side effects, no setState.
+   */
+  const [value, setValue] = useState<T>(() => {
     const stored = readStoredValue(prefixedKey, defaultValue);
-    if (stored !== undefined) {
-      // Use requestAnimationFrame to avoid synchronous setState in effect
-      requestAnimationFrame(() => {
-        setValue(stored);
-      });
-    }
-  }, [prefixedKey, defaultValue]);
+    return stored !== undefined ? stored : defaultValue;
+  });
 
-  // Persist to localStorage whenever value changes (skip the initial default)
-  useEffect(() => {
-    if (!hydrated.current) {
-      return;
-    }
-    try {
-      window.localStorage.setItem(prefixedKey, JSON.stringify(value));
-    } catch {
-      // Storage full or blocked — silently ignore
-    }
-  }, [prefixedKey, value]);
-
+  /**
+   * Setter that persists to localStorage inline — no useEffect needed.
+   */
   const setPersistedValue = useCallback(
     (valueOrUpdater: T | ((prev: T) => T)) => {
-      // React's setValue handles function vs value discrimination internally
-      setValue(valueOrUpdater);
+      setValue((prev) => {
+        const next =
+          typeof valueOrUpdater === "function"
+            ? (valueOrUpdater as (prev: T) => T)(prev)
+            : valueOrUpdater;
+        try {
+          window.localStorage.setItem(prefixedKey, JSON.stringify(next));
+        } catch {
+          /** Storage full or blocked — silently ignore */
+        }
+        return next;
+      });
     },
-    [],
+    [prefixedKey],
   );
 
   return [value, setPersistedValue];

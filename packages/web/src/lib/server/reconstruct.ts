@@ -660,15 +660,34 @@ function mergeSuitesFromEvals(
  * highest `total` (most suites completed). This prevents phantom regressions
  * caused by suite timeouts varying between eval runs.
  */
-function deduplicateEvalsByCommit(evals: EvalRecord[]): EvalRecord[] {
+/**
+ * Deduplicate evals including non-completed ones. For a given commit:
+ * - If a completed eval exists, prefer it (highest total wins)
+ * - Otherwise keep the best non-completed eval (queued/running)
+ * This ensures all commits show up in the UI, not just those with
+ * completed evaluations.
+ */
+function deduplicateAllEvalsByCommit(evals: EvalRecord[]): EvalRecord[] {
   const bestByCommit = new Map<string, EvalRecord>();
   for (const evalRec of evals) {
     const existing = bestByCommit.get(evalRec.commit);
-    if (!existing || evalRec.total > existing.total) {
+    if (!existing) {
+      bestByCommit.set(evalRec.commit, evalRec);
+      continue;
+    }
+    // Prefer completed over non-completed
+    const existingCompleted =
+      existing.status === "completed" && existing.total > 0;
+    const newCompleted =
+      evalRec.status === "completed" && evalRec.total > 0;
+    if (newCompleted && !existingCompleted) {
+      bestByCommit.set(evalRec.commit, evalRec);
+    } else if (newCompleted && existingCompleted && evalRec.total > existing.total) {
       bestByCommit.set(evalRec.commit, evalRec);
     }
+    // If neither is completed, keep the first one (earliest part)
   }
-  // Preserve the original chronological order (sorted by part)
+  // Preserve chronological order (sorted by part)
   return evals.filter(
     (evalRec) => bestByCommit.get(evalRec.commit) === evalRec,
   );
@@ -968,9 +987,12 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
 
   // Build evaluations
   const evalMap = buildEvaluationsFromRows(sortedRows);
-  const completedEvals = [...evalMap.values()]
-    .filter((rec) => rec.status === "completed" && rec.total > 0)
-    .sort((recA, recB) => recA.part - recB.part);
+  const allEvals = [...evalMap.values()].sort(
+    (recA, recB) => recA.part - recB.part,
+  );
+  const completedEvals = allEvals.filter(
+    (rec) => rec.status === "completed" && rec.total > 0,
+  );
 
   // Compute suites: merge the parquet-level definition with the union of all
   // eval suite_results. Older trajectories may have partial suites in the
@@ -979,12 +1001,12 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const suites = mergeSuitesFromEvals(parseSuites(first.suites), completedEvals);
   const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
 
-  // Deduplicate evals on the same git commit: keep only the most complete
-  // result (highest total). Multiple evals can target the same commit when
-  // the agent re-evaluates without changing code, or when async evals
-  // overlap. Without dedup, phantom regressions appear when a suite times
-  // out in one eval but not another.
-  const deduped = deduplicateEvalsByCommit(completedEvals);
+  // Deduplicate evals on the same git commit. Prefer completed results
+  // (highest total) over non-completed ones. Include all evals — not just
+  // completed — so that running/queued evals still produce commit boundaries.
+  // This ensures the commit list grows in real-time during live runs instead
+  // of waiting for async evaluations to finish.
+  const deduped = deduplicateAllEvalsByCommit(allEvals);
 
   // Build commits from evaluation boundaries
   const commits: Commit[] = [];
@@ -1051,10 +1073,27 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         .map((row, rowIndex) => rowToStep(row, rowIndex))
         .filter((step) => !isEmptyStep(step))
         .map((step, filteredIndex) => ({ ...step, index: filteredIndex }));
-      const suiteState = buildSuiteState(evalRec.suiteResults);
-      const delta = evalRec.passed - prevTotalPassed;
-      const suiteDeltas = computeSuiteDeltas(prevSuiteState, suiteState);
-      const brokenTests = buildBrokenTests(prevSuiteState, suiteState);
+
+      // For non-completed evals, carry forward the last known scores
+      // instead of showing 0. This avoids false regressions in the UI
+      // while the eval is still running.
+      const isCompleted =
+        evalRec.status === "completed" && evalRec.total > 0;
+      const effectivePassed = isCompleted
+        ? evalRec.passed
+        : prevTotalPassed;
+      const effectiveSuiteState = isCompleted
+        ? buildSuiteState(evalRec.suiteResults)
+        : prevSuiteState;
+      const delta = effectivePassed - prevTotalPassed;
+      const suiteDeltas = computeSuiteDeltas(
+        prevSuiteState,
+        effectiveSuiteState,
+      );
+      const brokenTests = buildBrokenTests(
+        prevSuiteState,
+        effectiveSuiteState,
+      );
 
       // Compute minutes elapsed from trajectory start.
       // Use the row timestamp (when the agent committed code), not the eval
@@ -1083,8 +1122,8 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
           first.started_at ??
           "",
         minutesElapsed: Math.max(0, minutesElapsed),
-        suiteState,
-        totalPassed: evalRec.passed,
+        suiteState: effectiveSuiteState,
+        totalPassed: effectivePassed,
         delta,
         isRegression: suiteDeltas.newlyBroken > 0,
         isMilestone: false,
@@ -1093,13 +1132,15 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
           newlyBroken: suiteDeltas.newlyBroken,
           newlyFixed: suiteDeltas.newlyFixed,
           brokenTests,
-          totalPassed: evalRec.passed,
-          totalFailed: evalRec.failed,
+          totalPassed: effectivePassed,
+          totalFailed: isCompleted
+            ? evalRec.failed
+            : totalTests - effectivePassed,
         },
         steps,
         changedFiles: extractChangedFiles(checkpoint),
         codeSnapshot: {},
-        phase: totalTests > 0 ? evalRec.passed / totalTests : 0,
+        phase: totalTests > 0 ? effectivePassed / totalTests : 0,
         tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
         partRange: commitRows.length > 0
           ? [commitRows[0]?.part ?? 0, commitRows[commitRows.length - 1]?.part ?? 0]
@@ -1108,8 +1149,11 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         targetCommit: evalRec.commit,
       });
 
-      prevTotalPassed = evalRec.passed;
-      prevSuiteState = suiteState;
+      // Only update running totals when the eval has completed
+      if (isCompleted) {
+        prevTotalPassed = evalRec.passed;
+        prevSuiteState = effectiveSuiteState;
+      }
     }
 
     // Remaining rows after the last evaluation
@@ -1195,9 +1239,15 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     0,
   );
 
-  // Final passed from last completed evaluation
-  const lastEval = deduped[deduped.length - 1];
-  const finalPassed = lastEval ? lastEval.passed : 0;
+  // Final passed from last completed evaluation (not running/queued)
+  let finalPassed = 0;
+  for (let index = deduped.length - 1; index >= 0; index--) {
+    const evalRec = deduped[index];
+    if (evalRec && evalRec.status === "completed" && evalRec.total > 0) {
+      finalPassed = evalRec.passed;
+      break;
+    }
+  }
 
   // Model string
   const agent = first.agent ?? "";

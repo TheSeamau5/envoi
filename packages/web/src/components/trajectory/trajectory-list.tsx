@@ -117,76 +117,91 @@ export function TrajectoryList({
   const [activeTab, setActiveTab] = useState<Tab>("active");
   const [liveIds, setLiveIds] = useState<Set<string>>(new Set());
   const confirmedDeadRef = useRef<Set<string>>(new Set());
-  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
-  const checkedOnMount = useRef(false);
+  const mountedRef = useRef(true);
 
-  const hasLive = liveIds.size > 0;
+  /** Ref indirection so the effect always calls the latest function */
+  const refreshAndPollRef = useRef<() => Promise<void>>(async () => {});
 
-  const refresh = useCallback(async () => {
+  /**
+   * Refresh trajectory list + check liveness, then schedule next poll
+   * if any trajectories are still live. Self-chaining setTimeout pattern.
+   */
+  const refreshAndPoll = useCallback(async () => {
     try {
       const response = await fetch(
         `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
       );
-      if (!response.ok) {
+      if (!response.ok || !mountedRef.current) {
         return;
       }
       const data: Trajectory[] = await response.json();
+      if (!mountedRef.current) {
+        return;
+      }
       setTrajectories(data);
-    } catch {
-      /* network errors are transient */
-    }
-  }, [project]);
 
-  const checkLiveness = useCallback(
-    async (allTrajectories: Trajectory[]) => {
-      const candidates = allTrajectories
+      /** Check liveness for candidates */
+      const candidates = data
         .filter((trace) => isPossiblyLive(trace))
         .map((trace) => trace.id)
         .filter((traceId) => !confirmedDeadRef.current.has(traceId));
+
       if (candidates.length === 0) {
         setLiveIds(new Set());
         return;
       }
+
       const confirmed = await checkLiveTrajectories(candidates, project);
+      if (!mountedRef.current) {
+        return;
+      }
       setLiveIds(confirmed);
       for (const traceId of candidates) {
         if (!confirmed.has(traceId)) {
           confirmedDeadRef.current.add(traceId);
         }
       }
-    },
-    [project],
-  );
 
-  /** Immediate fresh fetch on mount, then one liveness check */
-  useEffect(() => {
-    if (checkedOnMount.current) {
-      return;
+      /** Schedule next poll only if any are still live */
+      if (confirmed.size > 0) {
+        timerRef.current = setTimeout(
+          () => void refreshAndPollRef.current(),
+          LIST_POLL_MS,
+        );
+      }
+    } catch {
+      /** Network errors are transient — retry if still mounted */
+      if (mountedRef.current) {
+        timerRef.current = setTimeout(
+          () => void refreshAndPollRef.current(),
+          LIST_POLL_MS,
+        );
+      }
     }
-    checkedOnMount.current = true;
-    const init = async () => {
-      await refresh();
-      await checkLiveness(initialTrajectories);
-    };
-    void init();
-  }, [refresh, checkLiveness, initialTrajectories]);
+  }, [project]);
 
-  /** Poll every 30s only while at least one trajectory is confirmed live */
+  refreshAndPollRef.current = refreshAndPoll;
+
+  /**
+   * Start poll chain on mount, clean up on unmount.
+   * No synchronous setState in the effect body — only starts an async chain.
+   * Survives React Strict Mode: cleanup kills the timer, re-fire restarts it.
+   */
   useEffect(() => {
-    if (!hasLive) {
-      return;
-    }
-    intervalRef.current = setInterval(async () => {
-      await refresh();
-    }, LIST_POLL_MS);
+    mountedRef.current = true;
+    void refreshAndPollRef.current();
+
     return () => {
-      if (intervalRef.current !== undefined) {
-        clearInterval(intervalRef.current);
+      mountedRef.current = false;
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
       }
     };
-  }, [hasLive, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];

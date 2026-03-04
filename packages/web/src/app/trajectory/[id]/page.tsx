@@ -3,10 +3,12 @@
  * Resolves trajectory by ID from data layer (S3 or mock fallback).
  */
 
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { getTrajectoryById } from "@/lib/server/data";
 import { readLayoutCookies } from "@/lib/cookies";
 import { TrajectoryDetail } from "@/components/trajectory/trajectory-detail";
+import { TrajectoryDetailSkeleton } from "@/components/trajectory/trajectory-detail-skeleton";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 type TrajectoryPageProps = {
@@ -16,13 +18,29 @@ type TrajectoryPageProps = {
 export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
   const project = await requireActiveProject();
   const { id } = await params;
-  const trajectory = await getTrajectoryById(id, { project });
+
+  return (
+    <Suspense fallback={<TrajectoryDetailSkeleton />}>
+      <TrajectoryContent project={project} id={id} />
+    </Suspense>
+  );
+}
+
+async function TrajectoryContent({
+  project,
+  id,
+}: {
+  project: string;
+  id: string;
+}) {
+  const [trajectory, { rightPanelOpen, dividerPct }] = await Promise.all([
+    getTrajectoryById(id, { project }),
+    readLayoutCookies(),
+  ]);
 
   if (!trajectory) {
     notFound();
   }
-
-  const { rightPanelOpen, dividerPct } = await readLayoutCookies();
 
   return (
     <TrajectoryDetail

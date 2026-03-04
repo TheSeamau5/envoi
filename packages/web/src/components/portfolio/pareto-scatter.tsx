@@ -149,7 +149,7 @@ export function ParetoScatter({ points, environments }: ParetoScatterProps) {
     for (let tick = 0; tick <= maxTokens; tick += interval) {
       ticks.push(Math.round(tick));
     }
-    return ticks;
+    return [...new Set(ticks)];
   }, [maxTokens]);
 
   if (filteredPoints.length === 0) {

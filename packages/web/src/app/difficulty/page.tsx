@@ -3,12 +3,23 @@
  * Shows per-(category, model) pass rates as a color-coded matrix.
  */
 
+import { Suspense } from "react";
 import { getDifficultyData } from "@/lib/server/data";
 import { DifficultyHeatmap } from "@/components/difficulty/difficulty-heatmap";
+import { LoadingSkeleton } from "@/components/loading-skeleton";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function DifficultyPage() {
   const project = await requireActiveProject();
+
+  return (
+    <Suspense fallback={<LoadingSkeleton message="Loading difficulty data..." />}>
+      <DifficultyContent project={project} />
+    </Suspense>
+  );
+}
+
+async function DifficultyContent({ project }: { project: string }) {
   const cells = await getDifficultyData(project);
 
   return (
@@ -19,7 +30,7 @@ export default async function DifficultyPage() {
         </span>
       </div>
       <div className="flex-1 overflow-auto px-3.5 py-3.5">
-        <p className="mb-3 max-w-180 text-[12px] leading-normal text-envoi-text-muted">
+        <p className="pb-3 max-w-180 text-[12px] leading-normal text-envoi-text-muted">
           Each cell shows the <strong>aggregate pass rate</strong> for a test
           suite and model: total tests passed / total tests, pooled across all
           trajectories. Hover a cell for the exact percentage and trajectory

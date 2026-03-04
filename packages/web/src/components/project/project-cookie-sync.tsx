@@ -8,6 +8,7 @@ type ProjectCookieSyncProps = {
 };
 
 export function ProjectCookieSync({ project }: ProjectCookieSyncProps) {
+  console.log("[DEBUG] ProjectCookieSync render");
   useEffect(() => {
     setProjectCookie(project);
   }, [project]);

@@ -42,6 +42,7 @@ type SidebarProps = {
 };
 
 export function Sidebar({ initialCollapsed }: SidebarProps) {
+  console.log("[DEBUG] Sidebar render");
   const [collapsed, setCollapsedRaw] = useState(initialCollapsed);
   const pathname = usePathname();
   const [isFirstRender, setIsFirstRender] = useState(true);
@@ -80,14 +81,16 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
             className="min-w-0 flex flex-1 items-center gap-2 overflow-hidden"
             style={{ opacity: spring.contentOpacity }}
           >
-            <span className="flex h-5 w-5 items-center justify-center rounded-xs bg-envoi-accent">
-              <span className="block translate-y-px font-mono text-[12px] leading-none font-semibold text-white">
-                E
+            <Link href="/" className="flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-xs bg-envoi-accent">
+                <span className="block translate-y-px font-mono text-[12px] leading-none font-semibold text-white">
+                  E
+                </span>
               </span>
-            </span>
-            <span className="whitespace-nowrap text-sm font-bold text-envoi-accent">
-              envoi
-            </span>
+              <span className="whitespace-nowrap text-sm font-bold text-envoi-accent">
+                envoi
+              </span>
+            </Link>
           </animated.div>
         )}
         <button

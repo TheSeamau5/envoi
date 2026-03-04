@@ -10,6 +10,9 @@
  *
  * Added lines get green background + green left border (3px) + "+" marker.
  * On file change, scrolls to the first changed line and flashes added lines.
+ *
+ * NO setState in useEffect — prop-change detection uses ref comparison
+ * in the render body; timers managed via refs with cleanup-only effect.
  */
 
 "use client";
@@ -170,39 +173,66 @@ export function CodeView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [flashing, setFlashing] = useState(false);
 
-  /** Scroll to first added line and trigger flash animation on file change */
+  /** Track previous props for change detection */
+  const prevFileRef = useRef(filePath);
+  const prevSnapshotRef = useRef(snapshot);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const flashFrameRef = useRef<number | undefined>(undefined);
+
+  /** Detect file/snapshot changes — scroll + flash without useEffect */
+  if (
+    prevFileRef.current !== filePath ||
+    prevSnapshotRef.current !== snapshot
+  ) {
+    prevFileRef.current = filePath;
+    prevSnapshotRef.current = snapshot;
+
+    /** Clear any pending flash timers */
+    if (flashTimerRef.current !== undefined) {
+      clearTimeout(flashTimerRef.current);
+    }
+    if (flashFrameRef.current !== undefined) {
+      cancelAnimationFrame(flashFrameRef.current);
+    }
+
+    if (scrollRef.current && snapshot) {
+      const firstAdded =
+        snapshot.added.length > 0 ? snapshot.added[0] : undefined;
+      if (firstAdded !== undefined) {
+        /** Scroll to first changed line, centered in viewport */
+        const scrollTarget = Math.max(
+          0,
+          firstAdded * LINE_HEIGHT - scrollRef.current.clientHeight / 3,
+        );
+        scrollRef.current.scrollTop = scrollTarget;
+
+        /** Trigger flash animation from async callbacks (not during render) */
+        flashFrameRef.current = requestAnimationFrame(() => {
+          setFlashing(true);
+        });
+        flashTimerRef.current = setTimeout(() => {
+          setFlashing(false);
+        }, 800);
+      } else {
+        /** No added lines — scroll to top */
+        scrollRef.current.scrollTop = 0;
+      }
+    }
+  }
+
+  /** Cleanup only — no setState in this effect */
   useEffect(() => {
-    if (!scrollRef.current || !snapshot) {
-      return undefined;
-    }
-
-    const firstAdded =
-      snapshot.added.length > 0 ? snapshot.added[0] : undefined;
-    if (firstAdded !== undefined) {
-      /** Scroll to first changed line, centered in viewport */
-      const scrollTarget = Math.max(
-        0,
-        firstAdded * LINE_HEIGHT - scrollRef.current.clientHeight / 3,
-      );
-      scrollRef.current.scrollTop = scrollTarget;
-
-      /** Trigger flash animation on the next frame to avoid sync setState in effect */
-      const startFrame = requestAnimationFrame(() => {
-        setFlashing(true);
-      });
-      const timer = setTimeout(() => {
-        setFlashing(false);
-      }, 800);
-      return () => {
-        cancelAnimationFrame(startFrame);
-        clearTimeout(timer);
-      };
-    }
-
-    /** No added lines — scroll to top */
-    scrollRef.current.scrollTop = 0;
-    return undefined;
-  }, [filePath, snapshot]);
+    return () => {
+      if (flashTimerRef.current !== undefined) {
+        clearTimeout(flashTimerRef.current);
+      }
+      if (flashFrameRef.current !== undefined) {
+        cancelAnimationFrame(flashFrameRef.current);
+      }
+    };
+  }, []);
 
   if (!snapshot || !filePath) {
     return (

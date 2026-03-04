@@ -123,6 +123,7 @@ function tracesShareSuites(traces: Trajectory[]): boolean {
 }
 
 export function ProgressCurves({ traces, colorIndices }: ProgressCurvesProps) {
+  console.log("[DEBUG] ProgressCurves render, traces:", traces.length);
   const [hoveredTrace, setHoveredTrace] = useState<number>();
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint>();
   const chartRef = useRef<HTMLDivElement>(null);

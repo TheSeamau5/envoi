@@ -5,11 +5,15 @@
  * Transport buttons: SkipBack, ChevronLeft, Play/Pause, ChevronRight, SkipForward
  * Speed selectors: 0.5x, 1x, 2x, 4x
  * Position indicator: current / total
+ *
+ * NO setState in useEffect — interval managed via ref-comparison in render body;
+ * "stop at end" logic merged into the advance callback.
+ * Only a cleanup-only effect (no setState) runs on unmount.
  */
 
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import {
   SkipBack,
   ChevronLeft,
@@ -49,29 +53,50 @@ export function PlayControls({
     undefined,
   );
 
-  const advanceCommit = useCallback(() => {
-    onSelect(selectedIndex + 1);
-  }, [selectedIndex, onSelect]);
-
-  useEffect(() => {
-    if (isPlaying && selectedIndex < totalCommits - 1) {
-      const intervalMs = Math.round(1000 / speed);
-      intervalRef.current = setInterval(advanceCommit, intervalMs);
+  /**
+   * Ref-based advance callback — always has latest closure values.
+   * The interval calls through the ref so it sees current props.
+   * Includes "stop at end" logic that was previously in a separate useEffect.
+   */
+  const advanceRef = useRef(() => {});
+  advanceRef.current = () => {
+    if (selectedIndex >= totalCommits - 1) {
+      onTogglePlay();
+      return;
     }
+    onSelect(selectedIndex + 1);
+  };
+
+  /**
+   * Manage interval based on isPlaying and speed — ref-comparison in render body.
+   * When isPlaying or speed changes, clear old interval and create new one.
+   */
+  const prevIsPlayingRef = useRef(isPlaying);
+  const prevSpeedRef = useRef(speed);
+
+  if (prevIsPlayingRef.current !== isPlaying || prevSpeedRef.current !== speed) {
+    prevIsPlayingRef.current = isPlaying;
+    prevSpeedRef.current = speed;
+
+    if (intervalRef.current !== undefined) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = undefined;
+    }
+
+    if (isPlaying) {
+      const intervalMs = Math.round(1000 / speed);
+      intervalRef.current = setInterval(() => advanceRef.current(), intervalMs);
+    }
+  }
+
+  /** Cleanup only — no setState in this effect */
+  useEffect(() => {
     return () => {
       if (intervalRef.current !== undefined) {
         clearInterval(intervalRef.current);
-        intervalRef.current = undefined;
       }
     };
-  }, [isPlaying, selectedIndex, totalCommits, speed, advanceCommit]);
-
-  /** Stop playback when reaching the end */
-  useEffect(() => {
-    if (isPlaying && selectedIndex >= totalCommits - 1) {
-      onTogglePlay();
-    }
-  }, [isPlaying, selectedIndex, totalCommits, onTogglePlay]);
+  }, []);
 
   const canGoBack = selectedIndex > 0;
   const canGoForward = selectedIndex < totalCommits - 1;

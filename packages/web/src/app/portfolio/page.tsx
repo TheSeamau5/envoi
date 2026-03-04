@@ -3,6 +3,7 @@
  * Shows cross-environment model rankings, environment summaries, and Pareto frontier.
  */
 
+import { Suspense } from "react";
 import {
   getPortfolioData,
   getEnvironments,
@@ -10,10 +11,20 @@ import {
   getParetoData,
 } from "@/lib/server/data";
 import { PortfolioClient } from "@/components/portfolio/portfolio-client";
+import { LoadingSkeleton } from "@/components/loading-skeleton";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function PortfolioPage() {
   const project = await requireActiveProject();
+
+  return (
+    <Suspense fallback={<LoadingSkeleton message="Loading portfolio..." />}>
+      <PortfolioContent project={project} />
+    </Suspense>
+  );
+}
+
+async function PortfolioContent({ project }: { project: string }) {
   const [portfolioRows, environments, environmentRows, paretoPoints] =
     await Promise.all([
       getPortfolioData(project),

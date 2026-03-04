@@ -4,7 +4,6 @@ import {
   getProjectMeta,
   isS3Configured,
   listProjects as listProjectMeta,
-  query,
 } from "./db";
 
 function normalizeDescription(value: string | undefined): string | undefined {
@@ -29,39 +28,13 @@ function validateProjectName(name: string): string {
   return value;
 }
 
-/** Compute quick summary stats for a project from materialized trajectories. */
-async function loadProjectStats(project: string): Promise<{
-  trajectoryCount: number;
-  environmentCount: number;
-  modelCount: number;
-}> {
-  try {
-    const rows = await query(
-      `
-        SELECT
-          COUNT(*) AS trajectory_count,
-          COUNT(DISTINCT environment) AS environment_count,
-          COUNT(DISTINCT agent_model) AS model_count
-        FROM trajectories
-      `,
-      project,
-    );
-    const row = rows[0] ?? {};
-    return {
-      trajectoryCount: Number(row.trajectory_count ?? 0),
-      environmentCount: Number(row.environment_count ?? 0),
-      modelCount: Number(row.model_count ?? 0),
-    };
-  } catch {
-    return {
-      trajectoryCount: 0,
-      environmentCount: 0,
-      modelCount: 0,
-    };
-  }
-}
-
-/** List all projects with metadata and lightweight aggregate stats. */
+/**
+ * List all projects with metadata.
+ * Only reads project.json files from S3 — no DuckDB queries, no S3 sync.
+ * Stats (trajectory/environment/model counts) are NOT loaded here because
+ * each would require switching the DuckDB singleton to that project,
+ * triggering a full S3 sync per project (~4-6s each).
+ */
 export async function getProjects(): Promise<Project[]> {
   if (!isS3Configured()) {
     const now = new Date().toISOString();
@@ -79,20 +52,15 @@ export async function getProjects(): Promise<Project[]> {
   }
 
   const metas = await listProjectMeta();
-  const projects = await Promise.all(
-    metas.map(async (meta) => {
-      const stats = await loadProjectStats(meta.name);
-      return {
-        name: meta.name,
-        description: meta.description,
-        createdAt: meta.created_at,
-        updatedAt: meta.updated_at,
-        trajectoryCount: stats.trajectoryCount,
-        environmentCount: stats.environmentCount,
-        modelCount: stats.modelCount,
-      } satisfies Project;
-    }),
-  );
+  const projects = metas.map((meta) => ({
+    name: meta.name,
+    description: meta.description,
+    createdAt: meta.created_at,
+    updatedAt: meta.updated_at,
+    trajectoryCount: 0,
+    environmentCount: 0,
+    modelCount: 0,
+  } satisfies Project));
 
   return projects.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }

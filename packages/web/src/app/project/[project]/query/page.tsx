@@ -1,6 +1,8 @@
+import { Suspense } from "react";
 import { getSchemaInfo } from "@/lib/server/data";
 import { QUERY_TEMPLATES } from "@/lib/query-templates";
 import { QueryClient } from "@/components/query/query-client";
+import { LoadingSkeleton } from "@/components/loading-skeleton";
 
 type ProjectQueryPageProps = {
   params: Promise<{ project: string }>;
@@ -10,6 +12,15 @@ export default async function ProjectQueryPage({
   params,
 }: ProjectQueryPageProps) {
   const { project } = await params;
+
+  return (
+    <Suspense fallback={<LoadingSkeleton message="Loading SQL console..." />}>
+      <QueryContent project={project} />
+    </Suspense>
+  );
+}
+
+async function QueryContent({ project }: { project: string }) {
   const schema = await getSchemaInfo(project);
 
   return (

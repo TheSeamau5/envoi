@@ -7,6 +7,10 @@
  *
  * If sessionEndReason is already present the trajectory is definitely done
  * and we skip the sandbox check entirely.
+ *
+ * The useEffect here starts the async poll chain on mount and cleans up
+ * on unmount. No synchronous setState in the effect body — all state
+ * updates happen inside async callbacks (fetch .then, setTimeout).
  */
 
 "use client";
@@ -63,9 +67,15 @@ export function useLiveTrajectory(
   const [trajectory, setTrajectory] = useState(initial);
   const [lastRefreshed, setLastRefreshed] = useState(() => new Date());
   const [live, setLive] = useState(() => isPossiblyLive(initial));
-  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(
+
+  /** Track mounted state for safe async setState */
+  const mountedRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+
+  /** Ref indirection so the effect always calls the latest refresh */
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
 
   const refresh = useCallback(async () => {
     try {
@@ -73,10 +83,13 @@ export function useLiveTrajectory(
       const response = await fetch(
         `/api/trajectories/${encodeURIComponent(initial.id)}?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
       );
-      if (!response.ok) {
+      if (!response.ok || !mountedRef.current) {
         return;
       }
       const data: Trajectory = await response.json();
+      if (!mountedRef.current) {
+        return;
+      }
       setTrajectory(data);
       setLastRefreshed(new Date());
 
@@ -88,39 +101,54 @@ export function useLiveTrajectory(
 
       /** Ask the sandbox provider if it's still running */
       const running = await checkSandboxStatus(initial.id, project);
+      if (!mountedRef.current) {
+        return;
+      }
       setLive(running);
+
+      /** Schedule next poll only if still running */
+      if (running) {
+        timerRef.current = setTimeout(
+          () => void refreshRef.current(),
+          POLL_INTERVAL_MS,
+        );
+      }
     } catch {
-      /** Network errors are transient — silently retry on next interval */
+      /** Network errors are transient — schedule retry if still mounted */
+      if (mountedRef.current) {
+        timerRef.current = setTimeout(
+          () => void refreshRef.current(),
+          POLL_INTERVAL_MS,
+        );
+      }
     }
   }, [initial.id, project]);
 
-  /** Immediate fresh fetch on mount — but only if possibly live.
-   *  Finished trajectories already have their final data from the server. */
+  refreshRef.current = refresh;
+
+  /**
+   * Start poll chain on mount, clean up on unmount.
+   * The effect body has ZERO synchronous setState calls — it only calls
+   * void refreshRef.current() which is async. All setState happens in
+   * the async fetch callbacks, not in the effect body.
+   * Survives React Strict Mode: cleanup kills the timer, re-fire restarts it.
+   */
   useEffect(() => {
+    mountedRef.current = true;
+
     if (isPossiblyLive(initial)) {
-      const timer = setTimeout(() => {
-        void refresh();
-      }, 0);
-      return () => {
-        clearTimeout(timer);
-      };
-    }
-    return undefined;
-  }, [initial, refresh]);
-
-  /** Poll every 30s while live */
-  useEffect(() => {
-    if (!live) {
-      return;
+      void refreshRef.current();
     }
 
-    intervalRef.current = setInterval(refresh, POLL_INTERVAL_MS);
     return () => {
-      if (intervalRef.current !== undefined) {
-        clearInterval(intervalRef.current);
+      mountedRef.current = false;
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
       }
     };
-  }, [live, refresh]);
+    // mount-once: initial and refreshRef are stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return { trajectory, isLive: live, lastRefreshed };
 }

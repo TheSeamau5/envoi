@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1002.0",
     "@duckdb/node-api": "1.4.4-r.2",
     "@react-spring/web": "^10.0.3",
     "class-variance-authority": "^0.7.1",

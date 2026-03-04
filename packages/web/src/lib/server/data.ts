@@ -374,7 +374,29 @@ async function loadTrajectory(
       ? await freshTraceUri(id, project)
       : await traceUri(id, project);
 
-    // Read parquet without eval_events_delta (5MB vs 181MB for large files)
+    if (fresh) {
+      // Fresh read: include eval_events_delta directly from S3 parquet
+      // so we get the latest evaluation data without relying on the
+      // materialized evaluations table (which refreshes every 5 minutes).
+      const rawRows = await query(
+        `
+        SELECT *
+        FROM read_parquet('${escapeString(uri)}')
+        ORDER BY part
+      `,
+        project,
+      );
+
+      if (rawRows.length === 0) {
+        return undefined;
+      }
+
+      const rows = rawRows.map(toParquetRow);
+      return reconstructTrajectory(rows);
+    }
+
+    // Cached read: exclude eval_events_delta (5MB vs 181MB for large files)
+    // and use the materialized evaluations table instead.
     const [rawRows, evalRows] = await Promise.all([
       query(
         `

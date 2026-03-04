@@ -216,7 +216,7 @@ export function getXTicks(maxDuration: number): number[] {
   if (lastTick !== undefined && maxDuration - lastTick > interval * 0.3) {
     ticks.push(Math.ceil(maxDuration / interval) * interval);
   }
-  return ticks;
+  return [...new Set(ticks)];
 }
 
 /** Format a minute value as a concise label (e.g., "5m", "2h", "3d", "2w") */
