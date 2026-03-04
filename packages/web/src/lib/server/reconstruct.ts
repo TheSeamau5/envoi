@@ -123,9 +123,9 @@ export function buildEvaluationsFromRows(
       if (typeof event !== "object" || event === null) {
         continue;
       }
-      if (event.kind !== "commit_async") {
-        continue;
-      }
+      // Accept any eval event kind that targets a commit (commit_async,
+      // turn_end_blocking, etc.) — completed results may arrive via
+      // a different kind than the original queued/running event.
       const commit = event.target_commit;
       if (typeof commit !== "string" || !commit) {
         continue;

@@ -239,10 +239,43 @@ describe("buildEvaluationsFromRows", () => {
     expect(result.get("commit-bbb")?.passed).toBe(300);
   });
 
-  it("ignores events without kind=commit_async", () => {
+  it("processes turn_end_blocking events (not just commit_async)", () => {
     const rows = [
       rowWithEval(10, [
-        { kind: "something_else", target_commit: "commit-xxx", status: "completed", passed: 999 },
+        makeEvalEvent({
+          kind: "commit_async",
+          target_commit: "commit-aaa",
+          status: "queued",
+          passed: 0,
+          total: 0,
+        }),
+      ]),
+      rowWithEval(20, [
+        {
+          kind: "turn_end_blocking",
+          eval_id: "eval-blocking",
+          target_commit: "commit-aaa",
+          trigger_part: 20,
+          status: "completed",
+          passed: 909,
+          failed: 1275,
+          total: 2184,
+          suite_results: {},
+        },
+      ]),
+    ];
+
+    const result = buildEvaluationsFromRows(rows);
+    expect(result.size).toBe(1);
+    expect(result.get("commit-aaa")?.status).toBe("completed");
+    expect(result.get("commit-aaa")?.passed).toBe(909);
+    expect(result.get("commit-aaa")?.total).toBe(2184);
+  });
+
+  it("ignores events without target_commit", () => {
+    const rows = [
+      rowWithEval(10, [
+        { kind: "something_else", status: "completed", passed: 999 },
         makeEvalEvent({
           target_commit: "commit-aaa",
           status: "completed",
@@ -254,7 +287,6 @@ describe("buildEvaluationsFromRows", () => {
 
     const result = buildEvaluationsFromRows(rows);
     expect(result.size).toBe(1);
-    expect(result.has("commit-xxx")).toBe(false);
     expect(result.get("commit-aaa")?.passed).toBe(50);
   });
 

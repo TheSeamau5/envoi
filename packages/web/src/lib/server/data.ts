@@ -137,17 +137,27 @@ function toParquetRow(row: Record<string, unknown>): ParquetRow {
     tool_exit_code:
       row.tool_exit_code != undefined ? Number(row.tool_exit_code) : undefined,
     token_usage:
-      row.token_usage != undefined ? String(row.token_usage) : undefined,
+      row.token_usage != undefined
+        ? typeof row.token_usage === "string"
+          ? row.token_usage
+          : JSON.stringify(row.token_usage)
+        : undefined,
     patch: row.patch != undefined ? String(row.patch) : undefined,
     repo_checkpoint:
       row.repo_checkpoint != undefined
         ? String(row.repo_checkpoint)
         : undefined,
     testing_state:
-      row.testing_state != undefined ? String(row.testing_state) : undefined,
+      row.testing_state != undefined
+        ? typeof row.testing_state === "string"
+          ? row.testing_state
+          : JSON.stringify(row.testing_state)
+        : undefined,
     eval_events_delta:
       row.eval_events_delta != undefined
-        ? String(row.eval_events_delta)
+        ? typeof row.eval_events_delta === "string"
+          ? row.eval_events_delta
+          : JSON.stringify(row.eval_events_delta)
         : undefined,
     turn: row.turn != undefined ? Number(row.turn) : undefined,
     session_end_reason:
