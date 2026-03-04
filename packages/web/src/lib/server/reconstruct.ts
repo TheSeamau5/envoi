@@ -93,7 +93,7 @@ function toNumber(val: number | bigint | undefined): number {
 // Evaluation reconstruction (port of Python build_evaluations_from_parts)
 // ---------------------------------------------------------------------------
 
-type EvalRecord = {
+export type EvalRecord = {
   evalId: string;
   commit: string;
   part: number;
@@ -108,7 +108,7 @@ type EvalRecord = {
   finishedAt?: string;
 };
 
-function buildEvaluationsFromRows(
+export function buildEvaluationsFromRows(
   rows: ParquetRow[],
 ): Map<string, EvalRecord> {
   const evaluations = new Map<string, EvalRecord>();
@@ -164,8 +164,18 @@ function buildEvaluationsFromRows(
         continue;
       }
 
-      if (typeof event.status === "string" && event.status) {
-        rec.status = event.status;
+      // Once an eval is completed, never let a non-completed event
+      // (queued, running) overwrite its results. This prevents later
+      // re-trigger events from destroying valid pass/fail data.
+      const alreadyCompleted = rec.status === "completed" && rec.total > 0;
+      const eventStatus =
+        typeof event.status === "string" ? event.status : "";
+      if (alreadyCompleted && eventStatus !== "completed") {
+        continue;
+      }
+
+      if (eventStatus) {
+        rec.status = eventStatus;
       }
       if (typeof event.eval_id === "string") {
         rec.evalId = event.eval_id;
@@ -1275,6 +1285,12 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const agentModel = first.agent_model ?? "";
   const model = agent ? `${agent}/${agentModel}` : agentModel;
 
+  // session_end_reason is only populated on the last row of completed
+  // trajectories — reading it from `first` (row 0) always yields undefined.
+  const lastRow = sortedRows[sortedRows.length - 1];
+  const sessionEndReason =
+    lastRow?.session_end_reason ?? first.session_end_reason ?? undefined;
+
   return {
     id: first.trajectory_id,
     model,
@@ -1290,7 +1306,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     suites: suites.length > 0 ? suites : undefined,
     agentHarness: agent || undefined,
     sessionId: first.session_id ?? undefined,
-    sessionEndReason: first.session_end_reason ?? undefined,
+    sessionEndReason,
     sandboxId: first.sandbox_id ?? undefined,
     sandboxProvider: first.sandbox_provider ?? undefined,
   };

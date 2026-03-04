@@ -364,6 +364,60 @@ export async function getTrajectoryById(
  * Excludes eval_events_delta from the parquet read (176MB savings on large
  * files) and injects evaluation data from the materialized evaluations table.
  */
+/** Group materialized eval rows by part and return a map of synthetic eval events. */
+function groupEvalsByPart(
+  evalRows: Record<string, unknown>[],
+): Map<number, Record<string, unknown>[]> {
+  const evalsByPart = new Map<number, Record<string, unknown>[]>();
+  for (const evalRow of evalRows) {
+    const part = Number(evalRow.part ?? 0);
+    let bucket = evalsByPart.get(part);
+    if (!bucket) {
+      bucket = [];
+      evalsByPart.set(part, bucket);
+    }
+    bucket.push({
+      kind: "commit_async",
+      eval_id: String(evalRow.eval_id ?? ""),
+      target_commit: String(evalRow.target_commit ?? ""),
+      trigger_part: part,
+      trigger_turn:
+        evalRow.turn != undefined ? Number(evalRow.turn) : undefined,
+      status: String(evalRow.status ?? ""),
+      passed: Number(evalRow.passed ?? 0),
+      failed: Number(evalRow.failed ?? 0),
+      total: Number(evalRow.total ?? 0),
+      suite_results: (() => {
+        try {
+          return JSON.parse(String(evalRow.suite_results ?? "{}"));
+        } catch {
+          return {};
+        }
+      })(),
+      finished_at:
+        evalRow.finished_at != undefined
+          ? String(evalRow.finished_at)
+          : undefined,
+    });
+  }
+  return evalsByPart;
+}
+
+/** Inject materialized eval data into parquet rows, replacing any raw eval_events_delta. */
+function injectEvalData(
+  rawRows: Record<string, unknown>[],
+  evalsByPart: Map<number, Record<string, unknown>[]>,
+): ParquetRow[] {
+  return rawRows.map((raw) => {
+    const row = toParquetRow(raw);
+    const events = evalsByPart.get(row.part);
+    if (events) {
+      row.eval_events_delta = JSON.stringify(events);
+    }
+    return row;
+  });
+}
+
 async function loadTrajectory(
   id: string,
   fresh: boolean,
@@ -375,9 +429,9 @@ async function loadTrajectory(
       : await traceUri(id, project);
 
     if (fresh) {
-      // Fresh read: include eval_events_delta directly from S3 parquet
-      // so we get the latest evaluation data without relying on the
-      // materialized evaluations table (which refreshes every 5 minutes).
+      // Fresh read: include eval_events_delta directly from S3 parquet.
+      // The raw parquet has the most up-to-date eval data from the agent.
+      // buildEvaluationsFromRows handles deduplication and overwrite protection.
       const rawRows = await query(
         `
         SELECT *
@@ -422,51 +476,27 @@ async function loadTrajectory(
       return undefined;
     }
 
-    // Group materialized evals by part and synthesize eval_events_delta
-    const evalsByPart = new Map<number, Record<string, unknown>[]>();
-    for (const evalRow of evalRows) {
-      const part = Number(evalRow.part ?? 0);
-      let bucket = evalsByPart.get(part);
-      if (!bucket) {
-        bucket = [];
-        evalsByPart.set(part, bucket);
-      }
-      bucket.push({
-        kind: "commit_async",
-        eval_id: String(evalRow.eval_id ?? ""),
-        target_commit: String(evalRow.target_commit ?? ""),
-        trigger_part: part,
-        trigger_turn:
-          evalRow.turn != undefined ? Number(evalRow.turn) : undefined,
-        status: String(evalRow.status ?? ""),
-        passed: Number(evalRow.passed ?? 0),
-        failed: Number(evalRow.failed ?? 0),
-        total: Number(evalRow.total ?? 0),
-        suite_results: (() => {
-          try {
-            return JSON.parse(String(evalRow.suite_results ?? "{}"));
-          } catch {
-            return {};
-          }
-        })(),
-        finished_at:
-          evalRow.finished_at != undefined
-            ? String(evalRow.finished_at)
-            : undefined,
-      });
+    // If the evaluations table has data, inject it into the rows.
+    // Otherwise fall back to a full parquet read including eval_events_delta
+    // so we don't produce a broken 1-commit trajectory.
+    if (evalRows.length > 0) {
+      const evalsByPart = groupEvalsByPart(evalRows);
+      return reconstructTrajectory(injectEvalData(rawRows, evalsByPart));
     }
 
-    // Inject synthetic eval_events_delta into rows
-    const rows = rawRows.map((raw) => {
-      const row = toParquetRow(raw);
-      const events = evalsByPart.get(row.part);
-      if (events) {
-        row.eval_events_delta = JSON.stringify(events);
-      }
-      return row;
-    });
-
-    return reconstructTrajectory(rows);
+    // Evaluations table empty for this trajectory — fall back to full read
+    const fullRows = await query(
+      `
+      SELECT *
+      FROM read_parquet('${escapeString(uri)}')
+      ORDER BY part
+    `,
+      project,
+    );
+    if (fullRows.length === 0) {
+      return undefined;
+    }
+    return reconstructTrajectory(fullRows.map(toParquetRow));
   } catch {
     return undefined;
   }

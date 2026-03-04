@@ -31,6 +31,7 @@ This file contains all rules, conventions, and architectural context for AI agen
 10. Server components first — every `page.tsx` is a server component. Only interactive parts use `"use client"`.
 11. shadcn/ui for UI primitives — buttons, tabs, selects, tables, tooltips.
 12. lucide-react for all icons.
+24. **No `setState` inside `useEffect`** — avoid calling state setters inside effects at all costs. Derive state from props/other state instead, or handle it in event callbacks. If you think you need `setState` in a `useEffect`, you almost certainly have a design problem — fix the design.
 
 ## Styling
 

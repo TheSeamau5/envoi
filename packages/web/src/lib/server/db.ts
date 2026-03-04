@@ -10,7 +10,7 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { spawn } from "node:child_process";
-import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { cookies } from "next/headers";
 
@@ -230,11 +230,11 @@ async function ensureSynced(project: string): Promise<void> {
     }
     syncInFlight.add(project);
     syncFromS3(project)
-      .then(() => {
+      .then(async () => {
         lastSyncTime.set(project, Date.now());
         if (instance && loadedProject === project) {
-          return loadSummaryTables(instance, project)
-            .then(() => createAnalyticsViews(instance!, project));
+          await loadSummaryTables(instance, project);
+          await createAnalyticsViews(instance, project);
         }
       })
       .catch((error) => {

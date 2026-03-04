@@ -19,7 +19,7 @@
 
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Diamond,
   ArrowRight,
@@ -39,6 +39,7 @@ import {
 } from "lucide-react";
 import type { Commit, Step } from "@/lib/types";
 import { T } from "@/lib/tokens";
+import { StepsTimeline } from "./steps-timeline";
 
 type StepsPanelProps = {
   commit: Commit;
@@ -257,9 +258,15 @@ function hasExpandableContent(step: Step): boolean {
 function StepRow({
   step,
   stepIndex,
+  isSelected,
+  onSelect,
+  rowRef,
 }: {
   step: Step;
   stepIndex: number;
+  isSelected: boolean;
+  onSelect: (index: number) => void;
+  rowRef: (element: HTMLDivElement | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const config = STEP_CONFIG[step.type];
@@ -270,16 +277,24 @@ function StepRow({
 
   return (
     <div
+      ref={rowRef}
       className="border-b border-envoi-border-light px-3.5 py-2.5"
       style={{
         animation: `stepFadeIn 0.3s ease both`,
         animationDelay: `${stepIndex * 40}ms`,
+        background: isSelected ? T.accentBg : undefined,
+        borderLeft: isSelected ? `3px solid ${T.accent}` : "3px solid transparent",
       }}
     >
       {/* Clickable header */}
       <div
         className={`flex items-start gap-2.5 ${expandable ? "cursor-pointer" : ""}`}
-        onClick={expandable ? () => setExpanded((prev) => !prev) : undefined}
+        onClick={() => {
+          onSelect(stepIndex);
+          if (expandable) {
+            setExpanded((prev) => !prev);
+          }
+        }}
       >
         {/* Expand chevron */}
         <div className="flex w-3.5 shrink-0 items-center pt-1.5">
@@ -406,20 +421,58 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
   );
 }
 
+/** Steps panel with fixed timeline and scrollable step list */
 export function StepsPanel({ commit }: StepsPanelProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const prevCommitIndex = useRef(commit.index);
+  const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const [selectedStepIndex, setSelectedStepIndex] = useState<number>();
 
-  /** Reset scroll to top when commit changes */
+  /** Filter steps once for both timeline and list */
+  const filteredSteps = useMemo(
+    () => commit.steps.filter((step) => step.summary.length > 0 || step.detail.length > 0),
+    [commit.steps],
+  );
+
+  /** Reset scroll and selection when commit changes */
   useEffect(() => {
-    if (prevCommitIndex.current !== commit.index && containerRef.current) {
-      containerRef.current.scrollTop = 0;
+    if (prevCommitIndex.current !== commit.index) {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = 0;
+      }
+      setSelectedStepIndex(undefined);
+      stepRefs.current.clear();
     }
     prevCommitIndex.current = commit.index;
   }, [commit.index]);
 
+  /** Handle step selection from timeline — scroll to the step */
+  const handleTimelineSelect = useCallback((index: number) => {
+    setSelectedStepIndex(index);
+    const element = stepRefs.current.get(index);
+    if (element) {
+      element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, []);
+
+  /** Handle step selection from list click */
+  const handleStepClick = useCallback((index: number) => {
+    setSelectedStepIndex((prev) => prev === index ? undefined : index);
+  }, []);
+
+  /** Ref callback factory for step rows */
+  const getStepRef = useCallback((index: number) => {
+    return (element: HTMLDivElement | null) => {
+      if (element) {
+        stepRefs.current.set(index, element);
+      } else {
+        stepRefs.current.delete(index);
+      }
+    };
+  }, []);
+
   return (
-    <div ref={containerRef} className="flex flex-1 flex-col overflow-y-auto overflow-x-hidden">
+    <div className="flex flex-1 flex-col overflow-hidden">
       {/* Inline keyframes for stagger animation */}
       <style>{`
         @keyframes stepFadeIn {
@@ -434,19 +487,28 @@ export function StepsPanel({ commit }: StepsPanelProps) {
         }
       `}</style>
 
+      {/* Fixed: feedback banner + timeline */}
       <FeedbackBanner commit={commit} />
+      <StepsTimeline
+        steps={filteredSteps}
+        selectedStepIndex={selectedStepIndex}
+        onSelectStep={handleTimelineSelect}
+      />
 
-      {/* Step list — filter out steps with no displayable content */}
-      <div key={commit.index}>
-        {commit.steps
-          .filter((step) => step.summary.length > 0 || step.detail.length > 0)
-          .map((step, stepIndex) => (
+      {/* Scrollable step list */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div key={commit.index}>
+          {filteredSteps.map((step, stepIndex) => (
             <StepRow
               key={`${commit.index}-${step.index}`}
               step={step}
               stepIndex={stepIndex}
+              isSelected={selectedStepIndex === stepIndex}
+              onSelect={handleStepClick}
+              rowRef={getStepRef(stepIndex)}
             />
           ))}
+        </div>
       </div>
     </div>
   );
