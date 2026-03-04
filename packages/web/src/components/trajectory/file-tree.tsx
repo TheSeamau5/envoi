@@ -39,18 +39,18 @@ type TreeNode = {
   isTouched: boolean;
 };
 
-/** Get the icon for a file based on its extension */
-function getFileIcon(fileName: string) {
+/** Render a file icon based on extension */
+function renderFileIcon(fileName: string, color: string) {
   if (fileName.endsWith(".rs")) {
-    return FileCode2;
+    return <FileCode2 size={11} style={{ color }} />;
   }
   if (fileName.endsWith(".json") || fileName.endsWith(".toml")) {
-    return FileJson;
+    return <FileJson size={11} style={{ color }} />;
   }
   if (fileName.endsWith(".sh")) {
-    return Terminal;
+    return <Terminal size={11} style={{ color }} />;
   }
-  return FileCode2;
+  return <FileCode2 size={11} style={{ color }} />;
 }
 
 /** Build a tree structure from flat file paths */
@@ -140,7 +140,7 @@ function TreeNodeRow({
       <>
         <button
           onClick={() => onToggleFolder(node.path)}
-          className="flex w-full items-center gap-[5px] py-[3px] text-left text-[12px] text-envoi-text-muted transition-colors hover:bg-envoi-surface"
+          className="flex w-full items-center gap-1.25 py-0.75 text-left text-[12px] text-envoi-text-muted transition-colors hover:bg-envoi-surface"
           style={{ paddingLeft: 8 + depth * 12 }}
         >
           <FolderIcon size={12} style={{ color: T.textDim }} />
@@ -165,19 +165,17 @@ function TreeNodeRow({
     );
   }
 
-  const FileIcon = getFileIcon(node.name);
-
   return (
     <button
       onClick={() => onSelectFile(node.path)}
-      className={`flex w-full items-center gap-[5px] py-[3px] text-left text-[12px] transition-colors ${
+      className={`flex w-full items-center gap-1.25 py-0.75 text-left text-[12px] transition-colors ${
         isSelected
           ? "bg-envoi-accent-bg font-semibold text-envoi-accent"
           : "text-envoi-text hover:bg-envoi-surface"
       }`}
       style={{ paddingLeft: 8 + depth * 12 }}
     >
-      <FileIcon size={11} style={{ color: isSelected ? T.accent : T.textDim }} />
+      {renderFileIcon(node.name, isSelected ? T.accent : T.textDim)}
       <span className="truncate">{node.name}</span>
       {node.isTouched && (
         <Circle size={5} fill={T.accent} style={{ color: T.accent }} />
@@ -186,7 +184,11 @@ function TreeNodeRow({
   );
 }
 
-export function FileTree({ snapshot, selectedFile, onSelectFile }: FileTreeProps) {
+export function FileTree({
+  snapshot,
+  selectedFile,
+  onSelectFile,
+}: FileTreeProps) {
   const tree = useMemo(() => buildTree(snapshot), [snapshot]);
 
   /** Start with all folders expanded */
@@ -217,7 +219,10 @@ export function FileTree({ snapshot, selectedFile, onSelectFile }: FileTreeProps
   };
 
   return (
-    <div className="flex flex-col overflow-y-auto border-r border-envoi-border py-[6px]" style={{ width: 190 }}>
+    <div
+      className="flex flex-col overflow-y-auto border-r border-envoi-border py-1.5"
+      style={{ width: 190 }}
+    >
       {tree.map((node) => (
         <TreeNodeRow
           key={node.path}

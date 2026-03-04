@@ -97,7 +97,14 @@ def main() -> None:
 
         graph_parser = code_subparsers.add_parser("graph", help="Analyze a trajectory")
         graph_parser.add_argument("trajectory_id", help="Trajectory ID in S3")
-        graph_parser.add_argument("--bucket", default=None)
+        graph_parser.add_argument("--prefix", default=None)
+        graph_parser.add_argument(
+            "--bucket",
+            dest="prefix",
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+        graph_parser.add_argument("--project", default=None)
         graph_parser.add_argument("--output", default=None)
         graph_parser.add_argument("--part", type=int, default=None)
         graph_parser.add_argument("--checkout-dest", default=None)
@@ -130,6 +137,14 @@ def main() -> None:
                 default=False,
                 help="Only process new/updated trajectories",
             )
+            mat_parser.add_argument(
+                "--project",
+                default=None,
+                help=(
+                    "Project namespace. When provided, source/dest are resolved under "
+                    "project/<name>/trajectories."
+                ),
+            )
 
     normalized_argv = normalize_code_argv(sys.argv[1:])
     is_code_command = bool(normalized_argv) and normalized_argv[0] == "code"
@@ -141,7 +156,12 @@ def main() -> None:
         len(normalized_argv) >= 2 and normalized_argv[0] == "code"
         and normalized_argv[1] == "materialize"
     )
-    if extract_param_flags is not None and is_code_command and not is_code_graph and not is_code_materialize:
+    if (
+        extract_param_flags is not None
+        and is_code_command
+        and not is_code_graph
+        and not is_code_materialize
+    ):
         argv_without_params, raw_params = extract_param_flags(normalized_argv)
     else:
         argv_without_params, raw_params = normalized_argv, {}

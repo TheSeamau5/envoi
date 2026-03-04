@@ -28,20 +28,22 @@ import {
 } from "@/components/ui/tooltip";
 
 const NAV_ITEMS = [
-  { href: "/compare", label: "Compare", icon: BarChart3 },
-  { href: "/setups", label: "Setups", icon: Settings2 },
-  { href: "/trajectory", label: "Trajectories", icon: GitCommitHorizontal },
-  { href: "/difficulty", label: "Difficulty", icon: Grid3x3 },
-  { href: "/portfolio", label: "Portfolio", icon: LayoutDashboard },
-  { href: "/query", label: "Query", icon: Terminal },
+  { href: "compare", label: "Compare", icon: BarChart3 },
+  { href: "setups", label: "Setups", icon: Settings2 },
+  { href: "trajectory", label: "Trajectories", icon: GitCommitHorizontal },
+  { href: "difficulty", label: "Difficulty", icon: Grid3x3 },
+  { href: "portfolio", label: "Portfolio", icon: LayoutDashboard },
+  { href: "query", label: "Query", icon: Terminal },
 ] as const;
 
 type SidebarProps = {
   /** Server-read initial value — eliminates FOUC on collapse state */
   initialCollapsed: boolean;
+  /** Active project name from server cookie */
+  projectName?: string;
 };
 
-export function Sidebar({ initialCollapsed }: SidebarProps) {
+export function Sidebar({ initialCollapsed, projectName }: SidebarProps) {
   const [collapsed, setCollapsedRaw] = useState(initialCollapsed);
   const pathname = usePathname();
   const [isFirstRender, setIsFirstRender] = useState(true);
@@ -60,6 +62,9 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
       setIsFirstRender(false);
     },
   });
+  const baseProjectHref = projectName
+    ? `/project/${encodeURIComponent(projectName)}`
+    : "/";
 
   return (
     <animated.div
@@ -67,7 +72,9 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
       style={{ width: spring.width }}
     >
       {/* Header: logo + collapse toggle */}
-      <div className={`flex h-10.25 shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}>
+      <div
+        className={`flex h-10.25 shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}
+      >
         {!collapsed && (
           <animated.span
             className="min-w-0 flex-1 overflow-hidden text-sm font-bold whitespace-nowrap text-envoi-accent"
@@ -80,20 +87,52 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
           onClick={() => setCollapsed(!collapsed)}
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
         >
-          {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+          {collapsed ? (
+            <PanelLeftOpen size={14} />
+          ) : (
+            <PanelLeftClose size={14} />
+          )}
         </button>
+      </div>
+
+      <div
+        className={`border-b border-envoi-border ${collapsed ? "px-0 py-2" : "px-3 py-2"}`}
+      >
+        {collapsed ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                href="/"
+                className="flex h-6 w-full items-center justify-center text-envoi-text-dim transition-colors hover:text-envoi-accent"
+              >
+                ◆
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {projectName ?? "No project selected"}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <Link
+            href="/"
+            className="flex items-center gap-2 rounded px-1 py-1 text-[12px] text-envoi-text-dim transition-colors hover:text-envoi-accent"
+          >
+            <span>◆</span>
+            <span className="truncate">{projectName ?? "No project"}</span>
+          </Link>
+        )}
       </div>
 
       {/* Navigation */}
       <div className="flex-1 py-2">
         {NAV_ITEMS.map((item) => {
-          const isActive =
-            pathname === item.href || pathname.startsWith(item.href + "/");
+          const href = `${baseProjectHref}/${item.href}`;
+          const isActive = pathname === href || pathname.startsWith(href + "/");
           const Icon = item.icon;
 
           const linkContent = (
             <Link
-              href={item.href}
+              href={href}
               className={`flex items-center ${collapsed ? "justify-center" : "gap-2"} px-3 py-2 text-[13px] transition-colors ${
                 isActive
                   ? collapsed
@@ -105,7 +144,9 @@ export function Sidebar({ initialCollapsed }: SidebarProps) {
               }`}
             >
               <Icon size={14} />
-              {!collapsed && <span className="whitespace-nowrap">{item.label}</span>}
+              {!collapsed && (
+                <span className="whitespace-nowrap">{item.label}</span>
+              )}
             </Link>
           );
 

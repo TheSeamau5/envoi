@@ -7,16 +7,23 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCompareTrajectories } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
 export async function GET(request: NextRequest) {
   try {
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
     const { searchParams } = request.nextUrl;
     const idsParam = searchParams.get("ids");
     const environment = searchParams.get("environment") ?? undefined;
 
-    const ids = idsParam
-      ? idsParam.split(",").filter(Boolean)
-      : undefined;
+    const ids = idsParam ? idsParam.split(",").filter(Boolean) : undefined;
 
     if (!ids || ids.length === 0) {
       return NextResponse.json(
@@ -28,6 +35,7 @@ export async function GET(request: NextRequest) {
     const trajectories = await getCompareTrajectories({
       ids,
       environment,
+      project,
     });
 
     return NextResponse.json(trajectories);

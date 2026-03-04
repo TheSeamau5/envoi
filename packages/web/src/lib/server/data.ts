@@ -8,6 +8,7 @@
  */
 
 import {
+  getActiveProject,
   isS3Configured,
   traceUri,
   freshTraceUri,
@@ -56,6 +57,10 @@ async function getMockTrajectoryById(
   return getTrajectoryById(id);
 }
 
+async function resolveProject(project?: string): Promise<string> {
+  return getActiveProject(project);
+}
+
 // ---------------------------------------------------------------------------
 // Escape helpers (prevent SQL injection for identifiers)
 // ---------------------------------------------------------------------------
@@ -80,8 +85,12 @@ function toSummaryRow(row: Record<string, unknown>): TrajectorySummaryRow {
     total_parts: Number(row.total_parts ?? 0),
     total_turns: Number(row.total_turns ?? 0),
     total_tokens: Number(row.total_tokens ?? 0),
-    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
-    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
+    session_end_reason:
+      row.session_end_reason != undefined
+        ? String(row.session_end_reason)
+        : undefined,
+    task_params:
+      row.task_params != undefined ? String(row.task_params) : undefined,
     suites: row.suites != undefined ? String(row.suites) : undefined,
   };
 }
@@ -90,43 +99,83 @@ function toSummaryRow(row: Record<string, unknown>): TrajectorySummaryRow {
 function toParquetRow(row: Record<string, unknown>): ParquetRow {
   return {
     trajectory_id: String(row.trajectory_id ?? ""),
-    session_id: row.session_id != undefined ? String(row.session_id) : undefined,
+    session_id:
+      row.session_id != undefined ? String(row.session_id) : undefined,
     agent: row.agent != undefined ? String(row.agent) : undefined,
-    agent_model: row.agent_model != undefined ? String(row.agent_model) : undefined,
-    started_at: row.started_at != undefined ? String(row.started_at) : undefined,
-    environment: row.environment != undefined ? String(row.environment) : undefined,
-    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
+    agent_model:
+      row.agent_model != undefined ? String(row.agent_model) : undefined,
+    started_at:
+      row.started_at != undefined ? String(row.started_at) : undefined,
+    environment:
+      row.environment != undefined ? String(row.environment) : undefined,
+    task_params:
+      row.task_params != undefined ? String(row.task_params) : undefined,
     part: Number(row.part ?? 0),
     timestamp: row.timestamp != undefined ? String(row.timestamp) : undefined,
     role: row.role != undefined ? String(row.role) : undefined,
     part_type: row.part_type != undefined ? String(row.part_type) : undefined,
     item_type: row.item_type != undefined ? String(row.item_type) : undefined,
     summary: row.summary != undefined ? String(row.summary) : undefined,
-    duration_ms: row.duration_ms != undefined ? Number(row.duration_ms) : undefined,
-    git_commit: row.git_commit != undefined ? String(row.git_commit) : undefined,
+    duration_ms:
+      row.duration_ms != undefined ? Number(row.duration_ms) : undefined,
+    git_commit:
+      row.git_commit != undefined ? String(row.git_commit) : undefined,
     content: row.content != undefined ? String(row.content) : undefined,
-    content_token_estimate: row.content_token_estimate != undefined ? Number(row.content_token_estimate) : undefined,
+    content_token_estimate:
+      row.content_token_estimate != undefined
+        ? Number(row.content_token_estimate)
+        : undefined,
     tool_name: row.tool_name != undefined ? String(row.tool_name) : undefined,
-    tool_status: row.tool_status != undefined ? String(row.tool_status) : undefined,
-    tool_input: row.tool_input != undefined ? String(row.tool_input) : undefined,
-    tool_output: row.tool_output != undefined ? String(row.tool_output) : undefined,
-    tool_error: row.tool_error != undefined ? String(row.tool_error) : undefined,
-    tool_exit_code: row.tool_exit_code != undefined ? Number(row.tool_exit_code) : undefined,
-    token_usage: row.token_usage != undefined ? String(row.token_usage) : undefined,
+    tool_status:
+      row.tool_status != undefined ? String(row.tool_status) : undefined,
+    tool_input:
+      row.tool_input != undefined ? String(row.tool_input) : undefined,
+    tool_output:
+      row.tool_output != undefined ? String(row.tool_output) : undefined,
+    tool_error:
+      row.tool_error != undefined ? String(row.tool_error) : undefined,
+    tool_exit_code:
+      row.tool_exit_code != undefined ? Number(row.tool_exit_code) : undefined,
+    token_usage:
+      row.token_usage != undefined ? String(row.token_usage) : undefined,
     patch: row.patch != undefined ? String(row.patch) : undefined,
-    repo_checkpoint: row.repo_checkpoint != undefined ? String(row.repo_checkpoint) : undefined,
-    testing_state: row.testing_state != undefined ? String(row.testing_state) : undefined,
-    eval_events_delta: row.eval_events_delta != undefined ? String(row.eval_events_delta) : undefined,
+    repo_checkpoint:
+      row.repo_checkpoint != undefined
+        ? String(row.repo_checkpoint)
+        : undefined,
+    testing_state:
+      row.testing_state != undefined ? String(row.testing_state) : undefined,
+    eval_events_delta:
+      row.eval_events_delta != undefined
+        ? String(row.eval_events_delta)
+        : undefined,
     turn: row.turn != undefined ? Number(row.turn) : undefined,
-    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
-    session_end_total_parts: row.session_end_total_parts != undefined ? Number(row.session_end_total_parts) : undefined,
-    session_end_total_turns: row.session_end_total_turns != undefined ? Number(row.session_end_total_turns) : undefined,
-    session_end_final_commit: row.session_end_final_commit != undefined ? String(row.session_end_final_commit) : undefined,
+    session_end_reason:
+      row.session_end_reason != undefined
+        ? String(row.session_end_reason)
+        : undefined,
+    session_end_total_parts:
+      row.session_end_total_parts != undefined
+        ? Number(row.session_end_total_parts)
+        : undefined,
+    session_end_total_turns:
+      row.session_end_total_turns != undefined
+        ? Number(row.session_end_total_turns)
+        : undefined,
+    session_end_final_commit:
+      row.session_end_final_commit != undefined
+        ? String(row.session_end_final_commit)
+        : undefined,
     suites: row.suites != undefined ? String(row.suites) : undefined,
     files: row.files != undefined ? String(row.files) : undefined,
-    bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
-    sandbox_id: row.sandbox_id != undefined ? String(row.sandbox_id) : undefined,
-    sandbox_provider: row.sandbox_provider != undefined ? String(row.sandbox_provider) : undefined,
+    bundle_uri:
+      row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
+    sandbox_id:
+      row.sandbox_id != undefined ? String(row.sandbox_id) : undefined,
+    sandbox_provider:
+      row.sandbox_provider != undefined
+        ? String(row.sandbox_provider)
+        : undefined,
   };
 }
 
@@ -146,23 +195,25 @@ export async function getAllTrajectories(opts?: {
   limit?: number;
   offset?: number;
   fresh?: boolean;
+  project?: string;
 }): Promise<Trajectory[]> {
   if (!isS3Configured()) {
     return getMockTrajectories();
   }
 
+  const project = await resolveProject(opts?.project);
   const fetch = async () => {
-    if (await hasSummaryTables()) {
-      return getAllTrajectoriesFromSummary(opts);
+    if (await hasSummaryTables(project)) {
+      return getAllTrajectoriesFromSummary(opts, project);
     }
-    return getAllTrajectoriesFromGlob(opts);
+    return getAllTrajectoriesFromGlob(opts, project);
   };
 
   if (opts?.fresh) {
     return fetch();
   }
 
-  const cacheKey = `all-trajectories:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
+  const cacheKey = `all-trajectories:${project}:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
   return cached(cacheKey, fetch);
 }
 
@@ -170,12 +221,15 @@ export async function getAllTrajectories(opts?: {
  * Fast path: query pre-materialized trajectory_summary table.
  * Final scores are already embedded — no N+1 queries needed.
  */
-async function getAllTrajectoriesFromSummary(opts?: {
-  environment?: string;
-  model?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<Trajectory[]> {
+async function getAllTrajectoriesFromSummary(
+  opts?: {
+    environment?: string;
+    model?: string;
+    limit?: number;
+    offset?: number;
+  },
+  project?: string,
+): Promise<Trajectory[]> {
   let sql = `SELECT * FROM trajectory_summary WHERE 1=1`;
 
   if (opts?.environment) {
@@ -194,20 +248,25 @@ async function getAllTrajectoriesFromSummary(opts?: {
     sql += ` OFFSET ${Number(opts.offset)}`;
   }
 
-  const rawRows = await query(sql);
-  return rawRows.map((row) => summaryTableRowToTrajectory(toSummaryTableRow(row)));
+  const rawRows = await query(sql, project);
+  return rawRows.map((row) =>
+    summaryTableRowToTrajectory(toSummaryTableRow(row)),
+  );
 }
 
 /**
  * Slow path: query materialized trajectories + evaluations tables.
  * Used when pre-built summary tables are not available.
  */
-async function getAllTrajectoriesFromGlob(opts?: {
-  environment?: string;
-  model?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<Trajectory[]> {
+async function getAllTrajectoriesFromGlob(
+  opts?: {
+    environment?: string;
+    model?: string;
+    limit?: number;
+    offset?: number;
+  },
+  project?: string,
+): Promise<Trajectory[]> {
   /**
    * Query the materialized trajectories + evaluations tables directly.
    * No parquet scanning at query time — everything was materialized at startup.
@@ -257,17 +316,18 @@ async function getAllTrajectoriesFromGlob(opts?: {
     sql += ` OFFSET ${Number(opts.offset)}`;
   }
 
-  const rawRows = await query(sql);
+  const rawRows = await query(sql, project);
 
   return rawRows.map((row) => {
     const summaryRow = toSummaryRow(row);
-    const finalScore = row.best_passed !== undefined && row.best_passed !== null
-      ? {
-          passed: Number(row.best_passed ?? 0),
-          failed: Number(row.best_failed ?? 0),
-          total: Number(row.best_total ?? 0),
-        }
-      : undefined;
+    const finalScore =
+      row.best_passed !== undefined && row.best_passed !== null
+        ? {
+            passed: Number(row.best_passed ?? 0),
+            failed: Number(row.best_failed ?? 0),
+            total: Number(row.best_total ?? 0),
+          }
+        : undefined;
 
     return summaryRowToTrajectory(
       summaryRow,
@@ -283,17 +343,20 @@ async function getAllTrajectoriesFromGlob(opts?: {
  */
 export async function getTrajectoryById(
   id: string,
-  options?: { fresh?: boolean },
+  options?: { fresh?: boolean; project?: string },
 ): Promise<Trajectory | undefined> {
   if (!isS3Configured()) {
     return getMockTrajectoryById(id);
   }
+  const project = await resolveProject(options?.project);
 
   if (options?.fresh) {
-    return loadTrajectory(id, true);
+    return loadTrajectory(id, true, project);
   }
 
-  return cached(`trajectory:${id}`, () => loadTrajectory(id, false));
+  return cached(`trajectory:${project}:${id}`, () =>
+    loadTrajectory(id, false, project),
+  );
 }
 
 /**
@@ -304,26 +367,33 @@ export async function getTrajectoryById(
 async function loadTrajectory(
   id: string,
   fresh: boolean,
+  project?: string,
 ): Promise<Trajectory | undefined> {
   try {
     const uri = fresh
-      ? freshTraceUri(id)
-      : await traceUri(id);
+      ? await freshTraceUri(id, project)
+      : await traceUri(id, project);
 
     // Read parquet without eval_events_delta (5MB vs 181MB for large files)
     const [rawRows, evalRows] = await Promise.all([
-      query(`
+      query(
+        `
         SELECT * EXCLUDE (eval_events_delta)
         FROM read_parquet('${escapeString(uri)}')
         ORDER BY part
-      `),
-      query(`
+      `,
+        project,
+      ),
+      query(
+        `
         SELECT part, turn, eval_id, status, passed, failed, total,
           target_commit, suite_results, finished_at
         FROM evaluations
         WHERE trajectory_id = '${escapeString(id)}'
         ORDER BY part
-      `),
+      `,
+        project,
+      ),
     ]);
 
     if (rawRows.length === 0) {
@@ -344,7 +414,8 @@ async function loadTrajectory(
         eval_id: String(evalRow.eval_id ?? ""),
         target_commit: String(evalRow.target_commit ?? ""),
         trigger_part: part,
-        trigger_turn: evalRow.turn != undefined ? Number(evalRow.turn) : undefined,
+        trigger_turn:
+          evalRow.turn != undefined ? Number(evalRow.turn) : undefined,
         status: String(evalRow.status ?? ""),
         passed: Number(evalRow.passed ?? 0),
         failed: Number(evalRow.failed ?? 0),
@@ -356,7 +427,10 @@ async function loadTrajectory(
             return {};
           }
         })(),
-        finished_at: evalRow.finished_at != undefined ? String(evalRow.finished_at) : undefined,
+        finished_at:
+          evalRow.finished_at != undefined
+            ? String(evalRow.finished_at)
+            : undefined,
       });
     }
 
@@ -382,17 +456,25 @@ async function loadTrajectory(
  */
 export async function getTrajectorySandboxMeta(
   id: string,
-): Promise<{ sessionEndReason?: string; sandboxId?: string; sandboxProvider?: string } | undefined> {
+  project?: string,
+): Promise<
+  | { sessionEndReason?: string; sandboxId?: string; sandboxProvider?: string }
+  | undefined
+> {
   if (!isS3Configured()) {
     return undefined;
   }
+  const activeProject = await resolveProject(project);
   try {
-    const summaryRows = await query(`
+    const summaryRows = await query(
+      `
       SELECT session_end_reason
       FROM trajectories
       WHERE trajectory_id = '${escapeString(id)}'
       LIMIT 1
-    `);
+    `,
+      activeProject,
+    );
     if (summaryRows.length === 0) {
       return undefined;
     }
@@ -410,6 +492,7 @@ export async function getTrajectorySandboxMeta(
  */
 export async function getTrajectoryEvaluations(
   id: string,
+  project?: string,
 ): Promise<
   {
     evalId: string;
@@ -433,11 +516,15 @@ export async function getTrajectoryEvaluations(
       failed: commit.feedback.totalFailed,
       total: commit.totalPassed + commit.feedback.totalFailed,
       suiteResults: Object.fromEntries(
-        Object.entries(commit.suiteState).map(([key, val]) => [key, { passed: val, total: 0 }]),
+        Object.entries(commit.suiteState).map(([key, val]) => [
+          key,
+          { passed: val, total: 0 },
+        ]),
       ),
       targetCommit: commit.hash,
     }));
   }
+  const activeProject = await resolveProject(project);
 
   try {
     const sql = `
@@ -447,7 +534,7 @@ export async function getTrajectoryEvaluations(
         AND status = 'completed'
       ORDER BY part
     `;
-    const rawRows = await query(sql);
+    const rawRows = await query(sql, activeProject);
 
     return rawRows.map((row) => ({
       evalId: String(row.eval_id ?? ""),
@@ -473,7 +560,7 @@ export async function getTrajectoryEvaluations(
 /**
  * Get distinct environments from the data.
  */
-export async function getEnvironments(): Promise<
+export async function getEnvironments(project?: string): Promise<
   {
     environment: string;
     suites: Suite[];
@@ -492,9 +579,10 @@ export async function getEnvironments(): Promise<
     ];
   }
 
-  return cached("environments", async () => {
+  const activeProject = await resolveProject(project);
+  return cached(`environments:${activeProject}`, async () => {
     // Fast path: use summary table
-    if (await hasSummaryTables()) {
+    if (await hasSummaryTables(project)) {
       const sql = `
         SELECT
           environment,
@@ -505,7 +593,7 @@ export async function getEnvironments(): Promise<
         GROUP BY environment
         ORDER BY environment
       `;
-      const rawRows = await query(sql);
+      const rawRows = await query(sql, activeProject);
       return rawRows.map((row) => ({
         environment: String(row.environment ?? ""),
         suites: parseSuites(
@@ -527,7 +615,7 @@ export async function getEnvironments(): Promise<
       GROUP BY environment
       ORDER BY environment
     `;
-    const rawRows = await query(sql);
+    const rawRows = await query(sql, activeProject);
     return rawRows.map((row) => ({
       environment: String(row.environment ?? ""),
       suites: parseSuites(
@@ -550,6 +638,7 @@ export async function getEnvironments(): Promise<
 export async function getCompareTrajectories(opts?: {
   ids?: string[];
   environment?: string;
+  project?: string;
 }): Promise<Trajectory[]> {
   if (!isS3Configured()) {
     const all = await getMockTrajectories();
@@ -560,23 +649,28 @@ export async function getCompareTrajectories(opts?: {
     return all;
   }
 
+  const project = await resolveProject(opts?.project);
+
   // Fast path: use summary + evaluation tables
-  if (await hasSummaryTables()) {
-    return getCompareTrajectoriesFromSummary(opts);
+  if (await hasSummaryTables(project)) {
+    return getCompareTrajectoriesFromSummary(opts, project);
   }
 
   // Slow path: use materialized trajectories + evaluations tables
-  return getCompareTrajectoriesFromMaterialized(opts);
+  return getCompareTrajectoriesFromMaterialized(opts, project);
 }
 
 /**
  * Fast path for compare: query summary + evaluation tables in two bulk queries,
  * then build trajectories in memory via buildCompareTrajectories.
  */
-async function getCompareTrajectoriesFromSummary(opts?: {
-  ids?: string[];
-  environment?: string;
-}): Promise<Trajectory[]> {
+async function getCompareTrajectoriesFromSummary(
+  opts?: {
+    ids?: string[];
+    environment?: string;
+  },
+  project?: string,
+): Promise<Trajectory[]> {
   let summSql = `SELECT * FROM trajectory_summary WHERE 1=1`;
   let evalSql = `SELECT * FROM evaluation_summary WHERE 1=1`;
 
@@ -594,8 +688,8 @@ async function getCompareTrajectoriesFromSummary(opts?: {
   evalSql += ` ORDER BY trajectory_id, trigger_part`;
 
   const [summaryRows, evalRows] = await Promise.all([
-    query(summSql),
-    query(evalSql),
+    query(summSql, project),
+    query(evalSql, project),
   ]);
 
   return buildCompareTrajectories(summaryRows, evalRows);
@@ -607,10 +701,13 @@ async function getCompareTrajectoriesFromSummary(opts?: {
  * have proper timestamps and minutesElapsed for the progress curves chart.
  * Each trajectory is cached so repeated selections are instant.
  */
-async function getCompareTrajectoriesFromMaterialized(opts?: {
-  ids?: string[];
-  environment?: string;
-}): Promise<Trajectory[]> {
+async function getCompareTrajectoriesFromMaterialized(
+  opts?: {
+    ids?: string[];
+    environment?: string;
+  },
+  project?: string,
+): Promise<Trajectory[]> {
   let ids = opts?.ids ?? [];
 
   // If no specific IDs, get all trajectory IDs from the materialized table
@@ -619,13 +716,17 @@ async function getCompareTrajectoriesFromMaterialized(opts?: {
     if (opts?.environment) {
       sql += ` AND environment = '${escapeString(opts.environment)}'`;
     }
-    const rows = await query(sql);
+    const rows = await query(sql, project);
     ids = rows.map((row) => String(row.trajectory_id ?? ""));
   }
 
   // Load full trajectories in parallel, reusing the cached loadTrajectory path
   const results = await Promise.all(
-    ids.map((id) => cached(`trajectory:${id}`, () => loadTrajectory(id, false))),
+    ids.map((id) =>
+      cached(`trajectory:${project ?? "default"}:${id}`, () =>
+        loadTrajectory(id, false, project),
+      ),
+    ),
   );
 
   return results.filter((traj): traj is Trajectory => traj !== undefined);
@@ -677,12 +778,14 @@ function parseAddedLines(jsonStr: string): number[] {
  */
 export async function getCodeHistory(
   trajectoryId: string,
+  project?: string,
 ): Promise<Record<number, CodeSnapshot> | undefined> {
   if (!isS3Configured()) {
     return undefined;
   }
 
-  const uri = await codeSnapshotsUri(trajectoryId);
+  const activeProject = await resolveProject(project);
+  const uri = await codeSnapshotsUri(trajectoryId, activeProject);
   if (uri === undefined) {
     return undefined;
   }
@@ -693,7 +796,7 @@ export async function getCodeHistory(
       FROM read_parquet('${escapeString(uri)}')
       ORDER BY commit_index, file_path
     `;
-    const rawRows = await query(sql);
+    const rawRows = await query(sql, activeProject);
 
     const result: Record<number, CodeSnapshot> = {};
 
@@ -719,7 +822,10 @@ export async function getCodeHistory(
 
     return result;
   } catch (error) {
-    console.error(`[data] Failed to load code history for ${trajectoryId}:`, error);
+    console.error(
+      `[data] Failed to load code history for ${trajectoryId}:`,
+      error,
+    );
     return undefined;
   }
 }
@@ -732,18 +838,22 @@ export async function getCodeHistory(
  * Get database schema info — table/view names with their columns.
  * Used by the SQL Console to show a schema reference sidebar.
  */
-export async function getSchemaInfo(): Promise<SchemaColumn[]> {
+export async function getSchemaInfo(project?: string): Promise<SchemaColumn[]> {
   if (!isS3Configured()) {
     return [];
   }
+  const activeProject = await resolveProject(project);
 
   try {
-    const rawRows = await query(`
+    const rawRows = await query(
+      `
       SELECT table_name, column_name, data_type
       FROM information_schema.columns
       WHERE table_schema = 'main'
       ORDER BY table_name, ordinal_position
-    `);
+    `,
+      activeProject,
+    );
 
     return rawRows.map((row) => ({
       tableName: String(row.table_name ?? ""),
@@ -759,14 +869,18 @@ export async function getSchemaInfo(): Promise<SchemaColumn[]> {
  * Execute a read-only SQL query from the SQL Console.
  * Returns rows, column names, row count, and duration.
  */
-export async function executeQuery(sql: string): Promise<{
+export async function executeQuery(
+  sql: string,
+  project?: string,
+): Promise<{
   rows: Record<string, unknown>[];
   columns: string[];
   rowCount: number;
   durationMs: number;
 }> {
+  const activeProject = await resolveProject(project);
   const start = Date.now();
-  const rows = await query(sql);
+  const rows = await query(sql, activeProject);
   const durationMs = Date.now() - start;
   const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
   return { rows, columns, rowCount: rows.length, durationMs };
@@ -777,7 +891,12 @@ export async function executeQuery(sql: string): Promise<{
 // ---------------------------------------------------------------------------
 
 /** Known c_compiler suites — everything else is gameboy emulator */
-const C_COMPILER_SUITES = new Set(["basics", "wacct", "c_testsuite", "torture"]);
+const C_COMPILER_SUITES = new Set([
+  "basics",
+  "wacct",
+  "c_testsuite",
+  "torture",
+]);
 
 /** Derive environment name from suite name */
 function suiteToEnvironment(suiteName: string): string {
@@ -791,12 +910,15 @@ function suiteToEnvironment(suiteName: string): string {
  * pass/fail/total breakdown. The `environment` column in the parquet is a
  * placeholder ("environment"), so we derive the real environment from suite names.
  */
-export async function getDifficultyData(): Promise<DifficultyCell[]> {
+export async function getDifficultyData(
+  project?: string,
+): Promise<DifficultyCell[]> {
   if (!isS3Configured()) {
     return getMockDifficultyData();
   }
 
-  return cached("difficulty-data", async () => {
+  const activeProject = await resolveProject(project);
+  return cached(`difficulty-data:${activeProject}`, async () => {
     try {
       /**
        * The `suites` column contains JSON like:
@@ -806,7 +928,8 @@ export async function getDifficultyData(): Promise<DifficultyCell[]> {
        * Unnest the JSON keys, extract suite name (2nd path segment),
        * and aggregate passed/total per (suite, model).
        */
-      const rawRows = await query(`
+      const rawRows = await query(
+        `
         WITH snapshots AS (
           SELECT trajectory_id, agent_model, suites::JSON AS sr
           FROM trajectories
@@ -846,7 +969,9 @@ export async function getDifficultyData(): Promise<DifficultyCell[]> {
           attempts
         FROM aggregated
         ORDER BY category, model
-      `);
+      `,
+        activeProject,
+      );
 
       return rawRows.map((row) => {
         const category = String(row.category ?? "");
@@ -899,18 +1024,22 @@ async function getMockDifficultyData(): Promise<DifficultyCell[]> {
  * is a placeholder. Uses per-trajectory overall pass rates from the latest
  * suites snapshot.
  */
-export async function getPortfolioData(): Promise<PortfolioRow[]> {
+export async function getPortfolioData(
+  project?: string,
+): Promise<PortfolioRow[]> {
   if (!isS3Configured()) {
     return getMockPortfolioData();
   }
 
-  return cached("portfolio-data", async () => {
+  const activeProject = await resolveProject(project);
+  return cached(`portfolio-data:${activeProject}`, async () => {
     try {
       /**
        * Uses materialized trajectories table (suites = latest snapshot via arg_max).
        * Compute overall pass rate per trajectory, derive environment from suite keys.
        */
-      const rawRows = await query(`
+      const rawRows = await query(
+        `
         WITH snapshots AS (
           SELECT
             trajectory_id,
@@ -967,7 +1096,9 @@ export async function getPortfolioData(): Promise<PortfolioRow[]> {
         SELECT agent_model, environment, pass_rate, env_rank
         FROM ranked
         ORDER BY agent_model, environment
-      `);
+      `,
+        activeProject,
+      );
 
       return buildPortfolioRows(rawRows);
     } catch {
@@ -977,7 +1108,9 @@ export async function getPortfolioData(): Promise<PortfolioRow[]> {
 }
 
 /** Build PortfolioRow[] from ranked query results */
-function buildPortfolioRows(rawRows: Record<string, unknown>[]): PortfolioRow[] {
+function buildPortfolioRows(
+  rawRows: Record<string, unknown>[],
+): PortfolioRow[] {
   const modelMap = new Map<string, PortfolioRow>();
 
   for (const row of rawRows) {
@@ -997,17 +1130,26 @@ function buildPortfolioRows(rawRows: Record<string, unknown>[]): PortfolioRow[] 
   /** Compute average rank across environments */
   for (const entry of modelMap.values()) {
     const ranks = Object.values(entry.environments).map((env) => env.rank);
-    entry.avgRank = ranks.length > 0
-      ? ranks.reduce((sum, rank) => sum + rank, 0) / ranks.length
-      : 0;
+    entry.avgRank =
+      ranks.length > 0
+        ? ranks.reduce((sum, rank) => sum + rank, 0) / ranks.length
+        : 0;
   }
 
-  return Array.from(modelMap.values()).sort((rowA, rowB) => rowA.avgRank - rowB.avgRank);
+  return Array.from(modelMap.values()).sort(
+    (rowA, rowB) => rowA.avgRank - rowB.avgRank,
+  );
 }
 
 /** Mock portfolio data */
 async function getMockPortfolioData(): Promise<PortfolioRow[]> {
-  const models = ["gpt-4o", "claude-sonnet-4-20250514", "o3", "gemini-2.5-pro", "deepseek-r1"];
+  const models = [
+    "gpt-4o",
+    "claude-sonnet-4-20250514",
+    "o3",
+    "gemini-2.5-pro",
+    "deepseek-r1",
+  ];
   const environments = ["c_compiler", "gameboy_emulator"];
   const rows: Record<string, unknown>[] = [];
   for (const [modelIndex, model] of models.entries()) {
@@ -1031,14 +1173,18 @@ async function getMockPortfolioData(): Promise<PortfolioRow[]> {
  * Get per-environment summary data for the enriched portfolio dashboard.
  * Returns best score, median pass rate, run count, and total tokens per environment.
  */
-export async function getPortfolioEnvironmentData(): Promise<PortfolioEnvironmentRow[]> {
+export async function getPortfolioEnvironmentData(
+  project?: string,
+): Promise<PortfolioEnvironmentRow[]> {
   if (!isS3Configured()) {
     return getMockPortfolioEnvironmentData();
   }
 
-  return cached("portfolio-env-data", async () => {
+  const activeProject = await resolveProject(project);
+  return cached(`portfolio-env-data:${activeProject}`, async () => {
     try {
-      const rawRows = await query(`
+      const rawRows = await query(
+        `
         WITH best_eval AS (
           SELECT
             trajectory_id,
@@ -1077,7 +1223,9 @@ export async function getPortfolioEnvironmentData(): Promise<PortfolioEnvironmen
         )
         SELECT * FROM env_summary
         ORDER BY environment
-      `);
+      `,
+        activeProject,
+      );
 
       return rawRows.map((row) => {
         /** Count runs per model from the data */
@@ -1110,7 +1258,11 @@ function getMockPortfolioEnvironmentData(): PortfolioEnvironmentRow[] {
       medianPassRate: 0.28,
       runCount: 20,
       totalTokens: 45_000_000,
-      perModelCounts: { "claude-code/opus-4.6": 8, "codex/gpt-5.3-codex": 6, "opencode/glm-5": 6 },
+      perModelCounts: {
+        "claude-code/opus-4.6": 8,
+        "codex/gpt-5.3-codex": 6,
+        "opencode/glm-5": 6,
+      },
     },
     {
       environment: "gameboy_emulator",
@@ -1120,7 +1272,11 @@ function getMockPortfolioEnvironmentData(): PortfolioEnvironmentRow[] {
       medianPassRate: 0.22,
       runCount: 10,
       totalTokens: 22_000_000,
-      perModelCounts: { "claude-code/opus-4.6": 4, "codex/gpt-5.3-codex": 3, "opencode/glm-5": 3 },
+      perModelCounts: {
+        "claude-code/opus-4.6": 4,
+        "codex/gpt-5.3-codex": 3,
+        "opencode/glm-5": 3,
+      },
     },
   ];
 }
@@ -1129,12 +1285,16 @@ function getMockPortfolioEnvironmentData(): PortfolioEnvironmentRow[] {
  * Get Pareto frontier data — one point per trajectory with cost and score.
  * Optionally filter by environment.
  */
-export async function getParetoData(environment?: string): Promise<ParetoPoint[]> {
+export async function getParetoData(
+  environment?: string,
+  project?: string,
+): Promise<ParetoPoint[]> {
   if (!isS3Configured()) {
     return getMockParetoData();
   }
 
-  const cacheKey = `pareto-data:${environment ?? "all"}`;
+  const activeProject = await resolveProject(project);
+  const cacheKey = `pareto-data:${activeProject}:${environment ?? "all"}`;
 
   return cached(cacheKey, async () => {
     try {
@@ -1166,7 +1326,7 @@ export async function getParetoData(environment?: string): Promise<ParetoPoint[]
 
       sql += ` ORDER BY t.total_tokens ASC`;
 
-      const rawRows = await query(sql);
+      const rawRows = await query(sql, activeProject);
 
       return rawRows.map((row) => {
         const passed = Number(row.best_passed ?? 0);
@@ -1189,12 +1349,20 @@ export async function getParetoData(environment?: string): Promise<ParetoPoint[]
 
 /** Mock Pareto data */
 function getMockParetoData(): ParetoPoint[] {
-  const models = ["claude-code/opus-4.6", "codex/gpt-5.3-codex", "opencode/glm-5"];
+  const models = [
+    "claude-code/opus-4.6",
+    "codex/gpt-5.3-codex",
+    "opencode/glm-5",
+  ];
   const points: ParetoPoint[] = [];
   for (let pointIdx = 0; pointIdx < 20; pointIdx++) {
     const model = models[pointIdx % models.length] ?? models[0] ?? "";
-    const tokens = 500_000 + pointIdx * 200_000 + Math.round(Math.random() * 500_000);
-    const passRate = Math.min(0.95, 0.1 + pointIdx * 0.04 + Math.random() * 0.1);
+    const tokens =
+      500_000 + pointIdx * 200_000 + Math.round(Math.random() * 500_000);
+    const passRate = Math.min(
+      0.95,
+      0.1 + pointIdx * 0.04 + Math.random() * 0.1,
+    );
     points.push({
       trajectoryId: `mock-traj-${pointIdx}`,
       model,
@@ -1207,4 +1375,3 @@ function getMockParetoData(): ParetoPoint[] {
   }
   return points;
 }
-

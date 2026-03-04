@@ -12,6 +12,7 @@
 import type { Trajectory } from "@/lib/types";
 import { getAllTrajectories, getTrajectoryById } from "@/lib/server/data";
 import { SetupCompare } from "@/components/compare/setup-compare";
+import { requireActiveProject } from "@/lib/server/project-context";
 
 /** Strip a trajectory to only the fields SetupCompare needs */
 function slimTrajectory(trace: Trajectory): Trajectory {
@@ -27,12 +28,15 @@ function slimTrajectory(trace: Trajectory): Trajectory {
 }
 
 export default async function SetupsPage() {
-  const allTraces = await getAllTrajectories();
+  const project = await requireActiveProject();
+  const allTraces = await getAllTrajectories({ project });
   const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
 
   // Load full trajectories in parallel (each is individually cached)
   const fullTraces = (
-    await Promise.all(activeTraces.map((trace) => getTrajectoryById(trace.id)))
+    await Promise.all(
+      activeTraces.map((trace) => getTrajectoryById(trace.id, { project })),
+    )
   ).filter((trace) => trace !== undefined);
 
   return <SetupCompare allTraces={fullTraces.map(slimTrajectory)} />;

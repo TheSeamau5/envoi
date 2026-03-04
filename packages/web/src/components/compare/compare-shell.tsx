@@ -41,18 +41,30 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useCompare } from "./compare-context";
 
-const TABS = [
-  { href: "/compare/curves", label: "Progress Curves", icon: TrendingUp },
-  { href: "/compare/milestones", label: "Milestone Divergence", icon: Target },
-  { href: "/compare/suites", label: "Suite Breakdown", icon: LayoutGrid },
-] as const;
-
 type CompareShellProps = {
   children: ReactNode;
+  project: string;
 };
 
-export function CompareShell({ children }: CompareShellProps) {
+export function CompareShell({ children, project }: CompareShellProps) {
   const pathname = usePathname();
+  const tabs = [
+    {
+      href: `/project/${encodeURIComponent(project)}/compare/curves`,
+      label: "Progress Curves",
+      icon: TrendingUp,
+    },
+    {
+      href: `/project/${encodeURIComponent(project)}/compare/milestones`,
+      label: "Milestone Divergence",
+      icon: Target,
+    },
+    {
+      href: `/project/${encodeURIComponent(project)}/compare/suites`,
+      label: "Suite Breakdown",
+      icon: LayoutGrid,
+    },
+  ] as const;
   const {
     allTraces,
     selectedTraces,
@@ -76,11 +88,17 @@ export function CompareShell({ children }: CompareShellProps) {
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const focusedRowRef = useRef<HTMLDivElement>(null);
-  const showYear = useMemo(() => needsYear(allTraces.map((trace) => trace.startedAt)), [allTraces]);
+  const showYear = useMemo(
+    () => needsYear(allTraces.map((trace) => trace.startedAt)),
+    [allTraces],
+  );
 
   /** Scroll focused row into view */
   useEffect(() => {
-    focusedRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    focusedRowRef.current?.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth",
+    });
   }, [focusedIndex]);
 
   /** Track flat index across environment groups */
@@ -91,7 +109,7 @@ export function CompareShell({ children }: CompareShellProps) {
       {/* Top bar: tab navigation */}
       <div className="flex h-10.25 shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         <div className="flex items-center gap-1">
-          {TABS.map((tab) => {
+          {tabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = pathname === tab.href;
             return (
@@ -231,6 +249,7 @@ export function CompareShell({ children }: CompareShellProps) {
                     <TraceRow
                       key={trace.id}
                       trace={trace}
+                      project={project}
                       flatIndex={currentFlatIndex}
                       focusedIndex={focusedIndex}
                       focusedRowRef={focusedRowRef}
@@ -276,6 +295,7 @@ export function CompareShell({ children }: CompareShellProps) {
 /** Individual trace row in the sidebar */
 function TraceRow({
   trace,
+  project,
   flatIndex,
   focusedIndex,
   focusedRowRef,
@@ -286,6 +306,7 @@ function TraceRow({
   showYear,
 }: {
   trace: Trajectory;
+  project: string;
   flatIndex: number;
   focusedIndex: number;
   focusedRowRef: React.RefObject<HTMLDivElement | null>;
@@ -308,9 +329,7 @@ function TraceRow({
       ref={isFocused ? focusedRowRef : undefined}
       className="flex w-full items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5 text-left transition-colors hover:bg-envoi-surface"
       style={{
-        borderLeft: color
-          ? `3px solid ${color.line}`
-          : "3px solid transparent",
+        borderLeft: color ? `3px solid ${color.line}` : "3px solid transparent",
         background: color?.fill,
         cursor: "pointer",
         outline: isFocused ? `2px solid ${T.accent}` : "none",
@@ -329,9 +348,7 @@ function TraceRow({
           background: color ? color.line : "transparent",
         }}
       >
-        {isSelected && (
-          <Check size={10} color={T.bg} strokeWidth={3} />
-        )}
+        {isSelected && <Check size={10} color={T.bg} strokeWidth={3} />}
       </span>
 
       {/* Trace info */}
@@ -350,7 +367,10 @@ function TraceRow({
           <div
             className="h-full rounded-full"
             style={{
-              width: traceTotal > 0 ? `${(trace.finalPassed / traceTotal) * 100}%` : "0%",
+              width:
+                traceTotal > 0
+                  ? `${(trace.finalPassed / traceTotal) * 100}%`
+                  : "0%",
               background: isSelected && color ? color.line : T.textDim,
             }}
           />
@@ -369,7 +389,7 @@ function TraceRow({
 
       {/* Drill-down link */}
       <Link
-        href={`/trajectory/${trace.id}`}
+        href={`/project/${encodeURIComponent(project)}/trajectory/${trace.id}`}
         onClick={(event) => event.stopPropagation()}
         className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
       >

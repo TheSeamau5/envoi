@@ -100,7 +100,7 @@ function MonoBox({
 }) {
   return (
     <div
-      className="overflow-auto rounded-[4px] border px-[10px] py-[8px] text-[12px] leading-[18px]"
+      className="overflow-auto rounded-sm border px-2.5 py-2 text-[12px] leading-4.5"
       style={{
         maxHeight: maxHeight ?? 240,
         fontFamily: T.mono,
@@ -119,21 +119,21 @@ function MonoBox({
 /** Expanded content for reasoning steps */
 function ReasoningExpanded({ step }: { step: Step }) {
   return (
-    <div className="mt-[8px] flex flex-col gap-[8px]">
+    <div className="mt-2 flex flex-col gap-2">
       {step.reasoningContent && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Thinking</SectionLabel>
           <MonoBox maxHeight={300}>{step.reasoningContent}</MonoBox>
         </div>
       )}
       {step.planContent && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Plan</SectionLabel>
           <MonoBox maxHeight={200}>{step.planContent}</MonoBox>
         </div>
       )}
       {!step.reasoningContent && !step.planContent && step.detail && (
-        <div className="text-[12px] leading-[18px] text-envoi-text-muted">
+        <div className="text-[12px] leading-4.5 text-envoi-text-muted">
           {step.detail}
         </div>
       )}
@@ -144,21 +144,21 @@ function ReasoningExpanded({ step }: { step: Step }) {
 /** Expanded content for tool_call / mcp_call steps */
 function ToolExpanded({ step }: { step: Step }) {
   return (
-    <div className="mt-[8px] flex flex-col gap-[8px]">
+    <div className="mt-2 flex flex-col gap-2">
       {step.toolInput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Input</SectionLabel>
           <MonoBox>{step.toolInput}</MonoBox>
         </div>
       )}
       {step.toolOutput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Output</SectionLabel>
           <MonoBox isError={step.isError}>{step.toolOutput}</MonoBox>
         </div>
       )}
       {step.isError && step.errorMessage && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Error</SectionLabel>
           <MonoBox isError>{step.errorMessage}</MonoBox>
         </div>
@@ -170,15 +170,15 @@ function ToolExpanded({ step }: { step: Step }) {
 /** Expanded content for file_read / file_write steps */
 function FileExpanded({ step }: { step: Step }) {
   return (
-    <div className="mt-[8px] flex flex-col gap-[8px]">
+    <div className="mt-2 flex flex-col gap-2">
       {step.toolInput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Input</SectionLabel>
           <MonoBox>{step.toolInput}</MonoBox>
         </div>
       )}
       {step.toolOutput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Output</SectionLabel>
           <MonoBox>{step.toolOutput}</MonoBox>
         </div>
@@ -190,15 +190,15 @@ function FileExpanded({ step }: { step: Step }) {
 /** Expanded content for test_run steps */
 function TestExpanded({ step }: { step: Step }) {
   return (
-    <div className="mt-[8px] flex flex-col gap-[8px]">
+    <div className="mt-2 flex flex-col gap-2">
       {step.toolInput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Command</SectionLabel>
           <MonoBox>{step.toolInput}</MonoBox>
         </div>
       )}
       {step.toolOutput && (
-        <div className="flex flex-col gap-[4px]">
+        <div className="flex flex-col gap-1">
           <SectionLabel>Results</SectionLabel>
           <MonoBox isError={step.isError}>{step.toolOutput}</MonoBox>
         </div>
@@ -210,8 +210,8 @@ function TestExpanded({ step }: { step: Step }) {
 /** Expanded content for text / spawn / message steps */
 function TextExpanded({ step }: { step: Step }) {
   return (
-    <div className="mt-[8px] flex flex-col gap-[8px]">
-      <div className="flex flex-col gap-[4px]">
+    <div className="mt-2 flex flex-col gap-2">
+      <div className="flex flex-col gap-1">
         <SectionLabel>Full Text</SectionLabel>
         <MonoBox maxHeight={400}>{step.detail}</MonoBox>
       </div>
@@ -270,7 +270,7 @@ function StepRow({
 
   return (
     <div
-      className="border-b border-envoi-border-light px-[14px] py-[10px]"
+      className="border-b border-envoi-border-light px-3.5 py-2.5"
       style={{
         animation: `stepFadeIn 0.3s ease both`,
         animationDelay: `${stepIndex * 40}ms`,
@@ -278,15 +278,15 @@ function StepRow({
     >
       {/* Clickable header */}
       <div
-        className={`flex items-start gap-[10px] ${expandable ? "cursor-pointer" : ""}`}
+        className={`flex items-start gap-2.5 ${expandable ? "cursor-pointer" : ""}`}
         onClick={expandable ? () => setExpanded((prev) => !prev) : undefined}
       >
         {/* Expand chevron */}
-        <div className="flex w-[14px] shrink-0 items-center pt-[6px]">
+        <div className="flex w-3.5 shrink-0 items-center pt-1.5">
           {expandable ? (
             <ChevronIcon size={12} className="text-envoi-text-dim" />
           ) : (
-            <div className="w-[12px]" />
+            <div className="w-3" />
           )}
         </div>
 
@@ -305,7 +305,7 @@ function StepRow({
         {/* Content */}
         <div className="min-w-0 flex-1">
           {/* Type label + step counter + error dot */}
-          <div className="flex items-center gap-[6px]">
+          <div className="flex items-center gap-1.5">
             <span
               className="font-semibold tracking-[0.06em]"
               style={{ fontSize: 13, color: config.color }}
@@ -321,7 +321,7 @@ function StepRow({
           </div>
 
           {/* Summary */}
-          <div className="mt-[2px] break-all text-[13px] leading-[18px] text-envoi-text">
+          <div className="mt-0.5 break-all text-[13px] leading-4.5 text-envoi-text">
             {step.summary || (step.type === "reasoning" ? (
               <span className="italic text-envoi-text-muted">Reasoning not shown</span>
             ) : step.summary)}
@@ -329,7 +329,7 @@ function StepRow({
 
           {/* Metadata line */}
           {(step.durationMs !== undefined || step.tokensUsed !== undefined) && (
-            <div className="mt-[2px] flex items-center gap-[8px] text-[13px] text-envoi-text-dim">
+            <div className="mt-0.5 flex items-center gap-2 text-[13px] text-envoi-text-dim">
               {step.durationMs !== undefined && (
                 <span>{formatDuration(step.durationMs)}</span>
               )}
@@ -343,7 +343,7 @@ function StepRow({
 
       {/* Expanded content */}
       {expanded && (
-        <div className="ml-[50px]">
+        <div className="ml-12.5">
           <ExpandedContent step={step} />
         </div>
       )}
@@ -377,11 +377,11 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
 
   return (
     <div
-      className="sticky top-0 z-10 flex items-center gap-[8px] border-b border-envoi-border px-[14px] py-[8px]"
+      className="sticky top-0 z-10 flex items-center gap-2 border-b border-envoi-border px-3.5 py-2"
       style={{ background: bgColor }}
     >
       <BannerIcon size={13} style={{ color: textColor }} />
-      <div className="flex items-center gap-[10px]">
+      <div className="flex items-center gap-2.5">
         {hasProgress && (
           <span className="text-[12px] font-semibold" style={{ color: T.greenDark }}>
             +{feedback.newlyFixed} fixed

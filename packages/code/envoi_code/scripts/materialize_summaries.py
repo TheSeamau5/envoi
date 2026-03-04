@@ -89,6 +89,45 @@ CODE_SNAPSHOTS_SCHEMA = pa.schema([
 
 
 # ---------------------------------------------------------------------------
+# Project path helpers
+# ---------------------------------------------------------------------------
+
+def resolve_project_name(project: str | None) -> str | None:
+    raw = (project or os.environ.get("ENVOI_PROJECT") or "").strip()
+    if raw:
+        return raw
+    return None
+
+
+def resolve_source_path_for_project(source: str, project: str) -> Path:
+    source_path = Path(source)
+    if source_path.name == "trajectories":
+        return source_path
+    if len(source_path.parts) >= 3:
+        if source_path.parts[-3:] == ("project", project, "trajectories"):
+            return source_path
+    return source_path / "project" / project / "trajectories"
+
+
+def resolve_dest_path_for_project(dest: str, project: str) -> Path:
+    dest_path = Path(dest)
+    if (
+        dest_path.name == "summaries"
+        and dest_path.parent.name == "trajectories"
+    ):
+        return dest_path
+    if len(dest_path.parts) >= 4:
+        if dest_path.parts[-4:] == (
+            "project",
+            project,
+            "trajectories",
+            "summaries",
+        ):
+            return dest_path
+    return dest_path / "project" / project / "trajectories" / "summaries"
+
+
+# ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 
@@ -546,14 +585,18 @@ def extract_code_snapshots(
 
 def materialize_command(args: argparse.Namespace) -> None:
     """Run the materialization pipeline."""
+    project = resolve_project_name(getattr(args, "project", None))
     source = args.source
     dest = args.dest
+    if project is not None:
+        source = str(resolve_source_path_for_project(args.source, project))
+        dest = str(resolve_dest_path_for_project(args.dest, project))
     extract_code = getattr(args, "extract_code", False)
     incremental = getattr(args, "incremental", False)
 
     start_time = time.monotonic()
 
-    print(f"[materialize] source={source} dest={dest}")
+    print(f"[materialize] project={project or 'none'} source={source} dest={dest}")
     print(f"[materialize] extract_code={extract_code} incremental={incremental}")
 
     # Ensure destination directory exists

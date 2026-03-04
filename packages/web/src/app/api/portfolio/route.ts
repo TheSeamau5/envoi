@@ -9,14 +9,23 @@ import {
   getPortfolioEnvironmentData,
   getParetoData,
 } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
 /** GET handler for full portfolio dashboard payload */
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
     const [rows, environmentRows, paretoPoints] = await Promise.all([
-      getPortfolioData(),
-      getPortfolioEnvironmentData(),
-      getParetoData(),
+      getPortfolioData(project),
+      getPortfolioEnvironmentData(project),
+      getParetoData(undefined, project),
     ]);
 
     return NextResponse.json({ rows, environmentRows, paretoPoints });

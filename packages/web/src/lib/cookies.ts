@@ -13,11 +13,13 @@ import { cookies } from "next/headers";
 const COOKIE_RIGHT_PANEL = "envoi:detail-right-panel-open";
 const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
+const COOKIE_PROJECT = "envoi:project";
 
 export type LayoutCookies = {
   rightPanelOpen: boolean;
   dividerPct: number;
   sidebarCollapsed: boolean;
+  project?: string;
 };
 
 /** Read layout preferences from cookies (server-side only). */
@@ -58,5 +60,16 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
-  return { rightPanelOpen, dividerPct, sidebarCollapsed };
+  let project: string | undefined;
+  try {
+    const projectCookie = jar.get(COOKIE_PROJECT);
+    const value = projectCookie?.value.trim() ?? "";
+    if (value.length > 0) {
+      project = value;
+    }
+  } catch {
+    // cookie unavailable — use default
+  }
+
+  return { rightPanelOpen, dividerPct, sidebarCollapsed, project };
 }

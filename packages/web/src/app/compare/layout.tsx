@@ -11,14 +11,20 @@ import type { ReactNode } from "react";
 import { getAllTrajectories } from "@/lib/server/data";
 import { CompareProvider } from "@/components/compare/compare-context";
 import { CompareShell } from "@/components/compare/compare-shell";
+import { requireActiveProject } from "@/lib/server/project-context";
 
-export default async function CompareLayout({ children }: { children: ReactNode }) {
-  const allTraces = await getAllTrajectories();
+export default async function CompareLayout({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const project = await requireActiveProject();
+  const allTraces = await getAllTrajectories({ project });
   const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
 
   return (
-    <CompareProvider allTraces={activeTraces}>
-      <CompareShell>{children}</CompareShell>
+    <CompareProvider allTraces={activeTraces} project={project}>
+      <CompareShell project={project}>{children}</CompareShell>
     </CompareProvider>
   );
 }

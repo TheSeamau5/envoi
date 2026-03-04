@@ -115,11 +115,13 @@ from envoi_code.utils.parsing import (
 from envoi_code.utils.solve import SolveTracker
 from envoi_code.utils.storage import (
     artifact_uri,
-    get_bucket,
+    get_prefix,
+    get_project,
     get_s3_client,
     load_trace_snapshot,
     save_logs_parquet,
     save_trace_parquet,
+    trajectory_artifact_key,
     upload_file,
 )
 from envoi_code.utils.stream import make_stream_part_callback
@@ -629,10 +631,15 @@ async def restore_workspace_from_bundle(
     sandbox: Sandbox,
     trajectory_id: str,
     commit: str,
+    project: str,
 ) -> bool:
     s3 = get_s3_client()
-    bucket = get_bucket()
-    key = f"trajectories/{trajectory_id}/repo.bundle"
+    bucket = get_prefix()
+    key = trajectory_artifact_key(
+        trajectory_id,
+        "repo.bundle",
+        project=project,
+    )
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
     except Exception as error:  # noqa: BLE001
@@ -706,6 +713,7 @@ async def end_session(
     task_params: dict[str, Any] | None = None,
     logs_parquet_uri: str | None = None,
     final_commit_hint: str | None = None,
+    project: str = "default",
 ) -> None:
     print(f"[end] reason={reason} parts={part_count}")
 
@@ -742,7 +750,11 @@ async def end_session(
         total_turns=turn_count,
         final_git_commit=final_commit,
     )
-    trace_parquet_uri = artifact_uri(agent_trace.trajectory_id, "trace.parquet")
+    trace_parquet_uri = artifact_uri(
+        agent_trace.trajectory_id,
+        "trace.parquet",
+        project=project,
+    )
     agent_trace.artifacts = {
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": None,
@@ -753,6 +765,7 @@ async def end_session(
         save_trace_parquet(
             agent_trace.trajectory_id, agent_trace,
             environment=environment, task_params=task_params,
+            project=project,
         )
 
     # Upload git bundle
@@ -790,7 +803,12 @@ async def end_session(
         if bundle_size > 0:
             _, b64, _ = (await sandbox.run("base64 /tmp/repo.bundle", quiet=True)).unpack()
             data = base64.b64decode(b64.strip())
-            bundle_s3_uri = upload_file(agent_trace.trajectory_id, "repo.bundle", data)
+            bundle_s3_uri = upload_file(
+                agent_trace.trajectory_id,
+                "repo.bundle",
+                data,
+                project=project,
+            )
             print(f"[bundle] uploaded ({len(data)} bytes)")
     except Exception as e:
         print(f"[bundle] failed: {e}")
@@ -804,6 +822,7 @@ async def end_session(
         save_trace_parquet(
             agent_trace.trajectory_id, agent_trace,
             environment=environment, task_params=task_params,
+            project=project,
         )
 
     print(
@@ -825,6 +844,7 @@ class EvaluationScheduler:
         sandbox: Sandbox,
         agent_trace: AgentTrace,
         trajectory_id: str,
+        project: str,
         environment: str,
         task_params: dict[str, Any] | None,
         test_paths: list[str] | None = None,
@@ -838,6 +858,7 @@ class EvaluationScheduler:
         self.sandbox = sandbox
         self.agent_trace = agent_trace
         self.trajectory_id = trajectory_id
+        self.project = project
         self.environment = environment
         self.task_params = task_params
         self.test_paths = normalize_test_paths(test_paths)
@@ -864,6 +885,7 @@ class EvaluationScheduler:
             self.trajectory_id, self.agent_trace,
             environment=self.environment,
             task_params=self.task_params,
+            project=self.project,
         )
 
     @staticmethod
@@ -2001,6 +2023,7 @@ def start_logs_runtime(
 async def prepare_trajectory_context(
     *,
     trajectory_id: str,
+    project: str | None,
     agent: str,
     model: str | None,
     max_parts: int | None,
@@ -2025,6 +2048,7 @@ async def prepare_trajectory_context(
     if test_timeout_seconds is not None and test_timeout_seconds <= 0:
         raise ValueError("--test-timeout-seconds must be > 0")
     selected_test_paths = normalize_test_paths(test)
+    project_name = (project or get_project()).strip() or "default"
     agent_name = (agent or DEFAULT_AGENT).strip().lower()
     raw_params_map: dict[str, Any] = dict(raw_params or {})
 
@@ -2126,6 +2150,7 @@ async def prepare_trajectory_context(
     )
 
     run_metadata: dict[str, Any] = {
+        "project": project_name,
         "raw_params": raw_params_map,
         "resolved_task": {
             "metadata": resolved_task.metadata,
@@ -2143,7 +2168,11 @@ async def prepare_trajectory_context(
     }
     env_files = load_environment_files(env_path)
 
-    existing_trace = load_trace_snapshot(trajectory_id) if resume else None
+    existing_trace = (
+        load_trace_snapshot(trajectory_id, project=project_name)
+        if resume
+        else None
+    )
     if existing_trace is not None and existing_trace.agent != agent_name:
         print(
             f"[resume] existing trajectory agent={existing_trace.agent} "
@@ -2153,6 +2182,7 @@ async def prepare_trajectory_context(
         existing_trace = None
 
     return TrajectoryPreparedContext(
+        project=project_name,
         max_parts=normalized_max_parts,
         max_turns=normalized_max_turns,
         selected_test_paths=selected_test_paths,
@@ -2181,9 +2211,21 @@ async def prepare_trajectory_context(
         run_metadata=run_metadata,
         env_files=env_files,
         existing_trace=existing_trace,
-        trace_s3_uri=artifact_uri(trajectory_id, "trace.parquet"),
-        bundle_s3_uri=artifact_uri(trajectory_id, "repo.bundle"),
-        logs_s3_uri=artifact_uri(trajectory_id, "logs.parquet"),
+        trace_s3_uri=artifact_uri(
+            trajectory_id,
+            "trace.parquet",
+            project=project_name,
+        ),
+        bundle_s3_uri=artifact_uri(
+            trajectory_id,
+            "repo.bundle",
+            project=project_name,
+        ),
+        logs_s3_uri=artifact_uri(
+            trajectory_id,
+            "logs.parquet",
+            project=project_name,
+        ),
     )
 
 
@@ -2533,6 +2575,7 @@ async def run_turn_loop(
     agent_backend: Agent,
     agent_trace: AgentTrace,
     trajectory_id: str,
+    project: str,
     session_id: str,
     agent_name: str,
     resolved_model: str,
@@ -2626,6 +2669,7 @@ async def run_turn_loop(
         sandbox=sandbox,
         agent_trace=agent_trace,
         trajectory_id=trajectory_id,
+        project=project,
         environment=environment,
         task_params=task_params_loaded,
         test_paths=selected_test_paths,
@@ -2671,6 +2715,7 @@ async def run_turn_loop(
             agent_trace,
             environment=environment,
             task_params=task_params_loaded,
+            project=project,
         )
         await checkout_workspace_commit(
             sandbox,
@@ -2860,6 +2905,7 @@ async def run_turn_loop(
                         agent_trace,
                         environment=environment,
                         task_params=task_params_loaded,
+                        project=project,
                     )
                     prompt_text = build_followup_prompt(
                         tracker,
@@ -2958,6 +3004,7 @@ async def run_turn_loop(
             agent_trace,
             environment=environment,
             task_params=task_params_loaded,
+            project=project,
         )
         if await stop_for_winner(
             detection_point="after turn",
@@ -3005,6 +3052,7 @@ async def run_turn_loop(
                 agent_trace,
                 environment=environment,
                 task_params=task_params_loaded,
+                project=project,
             )
 
         print_turn_end_summary(
@@ -3077,6 +3125,7 @@ async def run_turn_loop(
 async def execute_trajectory_main(
     *,
     trajectory_id: str,
+    project: str,
     sandbox_provider: str,
     timeout_seconds: int,
     agent_cls: type,
@@ -3190,6 +3239,7 @@ async def execute_trajectory_main(
             sandbox=sandbox,
             trajectory_id=trajectory_id,
             commit=resume_commit,
+            project=project,
         )
         latest_git_commit = resume_commit
 
@@ -3237,6 +3287,7 @@ async def execute_trajectory_main(
         agent_trace,
         environment=environment,
         task_params=task_params_loaded,
+        project=project,
     )
 
     required_test_paths = await discover_required_test_paths(
@@ -3248,6 +3299,7 @@ async def execute_trajectory_main(
         agent_backend=agent_backend,
         agent_trace=agent_trace,
         trajectory_id=trajectory_id,
+        project=project,
         session_id=session_id,
         agent_name=agent_name,
         resolved_model=resolved_model,
@@ -3303,6 +3355,7 @@ async def handle_trajectory_exception(
     prompt_text: str,
     environment: str,
     task_params_loaded: dict[str, Any],
+    project: str,
 ) -> RunStopReason:
     print(f"[error] {type(error).__name__}: {error}")
     print(traceback.format_exc())
@@ -3357,6 +3410,7 @@ async def handle_trajectory_exception(
                     agent_trace,
                     environment=environment,
                     task_params=task_params_loaded,
+                    project=project,
                 )
                 print(
                     f"[error] saved {len(crash_messages)} "
@@ -3370,6 +3424,7 @@ async def handle_trajectory_exception(
 async def finalize_trajectory_run(
     *,
     trajectory_id: str,
+    project: str,
     sandbox: Sandbox | None,
     agent_trace: AgentTrace | None,
     evaluator: EvaluationScheduler | None,
@@ -3445,7 +3500,11 @@ async def finalize_trajectory_run(
             except Exception:
                 pass
 
-    logs_parquet_uri = artifact_uri(trajectory_id, "logs.parquet")
+    logs_parquet_uri = artifact_uri(
+        trajectory_id,
+        "logs.parquet",
+        project=project,
+    )
     if sandbox is not None and agent_trace is not None:
         try:
             winner = first_winning_commit(agent_trace.evaluations)
@@ -3465,6 +3524,7 @@ async def finalize_trajectory_run(
                     agent_trace,
                     environment=environment,
                     task_params=task_params_loaded,
+                    project=project,
                 )
                 checked_out = await checkout_workspace_commit(
                     sandbox,
@@ -3507,6 +3567,7 @@ async def finalize_trajectory_run(
                 task_params=task_params_loaded,
                 logs_parquet_uri=logs_parquet_uri,
                 final_commit_hint=latest_git_commit,
+                project=project,
             )
         except Exception as end_err:
             print(
@@ -3558,11 +3619,15 @@ async def run_trajectory(
     raw_params: dict[str, Any] | None = None,
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
+    project: str | None = None,
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
+    project_name = (project or get_project()).strip() or "default"
+    os.environ["ENVOI_PROJECT"] = project_name
     prepared = await prepare_trajectory_context(
         trajectory_id=trajectory_id,
+        project=project_name,
         agent=agent,
         model=model,
         max_parts=max_parts,
@@ -3609,6 +3674,7 @@ async def run_trajectory(
     print(
         "[run] start "
         f"trajectory_id={trajectory_id} "
+        f"project={prepared.project} "
         f"sandbox={sandbox_provider} "
         f"agent={prepared.agent_name} "
         f"model={prepared.resolved_model}"
@@ -3665,6 +3731,7 @@ async def run_trajectory(
     try:
         execution_result = await execute_trajectory_main(
             trajectory_id=trajectory_id,
+            project=prepared.project,
             sandbox_provider=sandbox_provider,
             timeout_seconds=timeout_seconds,
             agent_cls=prepared.agent_cls,
@@ -3740,6 +3807,7 @@ async def run_trajectory(
             prompt_text=prompt_text,
             environment=environment,
             task_params_loaded=task_params_loaded,
+            project=prepared.project,
         )
 
     finally:
@@ -3750,6 +3818,7 @@ async def run_trajectory(
             latest_git_commit,
         ) = await finalize_trajectory_run(
             trajectory_id=trajectory_id,
+            project=prepared.project,
             sandbox=sandbox,
             agent_trace=agent_trace,
             evaluator=evaluator,
@@ -3828,6 +3897,10 @@ if __name__ == "__main__":
     parser.add_argument("--raw-params-json", default=None)
     parser.add_argument("--sandbox-cpu", type=float, default=None)
     parser.add_argument("--sandbox-memory-mb", type=int, default=None)
+    parser.add_argument(
+        "--project",
+        default=os.environ.get("ENVOI_PROJECT"),
+    )
     args = parser.parse_args()
 
     codex_auth_b64: str | None = None
@@ -3868,6 +3941,7 @@ if __name__ == "__main__":
                 raw_params=raw_params,
                 sandbox_cpu=args.sandbox_cpu,
                 sandbox_memory_mb=args.sandbox_memory_mb,
+                project=args.project,
             )
         )
     except KeyboardInterrupt:

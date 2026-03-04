@@ -7,9 +7,18 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAllTrajectories } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
 export async function GET(request: NextRequest) {
   try {
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
     const { searchParams } = request.nextUrl;
     const environment = searchParams.get("environment") ?? undefined;
     const model = searchParams.get("model") ?? undefined;
@@ -27,6 +36,7 @@ export async function GET(request: NextRequest) {
       limit,
       offset,
       fresh,
+      project,
     });
 
     return NextResponse.json(trajectories);

@@ -25,7 +25,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">
       {/* Overall summary */}
-      <div className="border-b border-envoi-border px-[14px] py-[12px]">
+      <div className="border-b border-envoi-border px-3.5 py-3">
         <div className="flex items-baseline gap-2">
           <span className="text-[18px] font-bold text-envoi-text">
             {commit.totalPassed}
@@ -34,7 +34,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
             / {effectiveTotal} passed ({overallPercent})
           </span>
         </div>
-        <div className="mt-[6px] flex items-center gap-2">
+        <div className="mt-1.5 flex items-center gap-2">
           <span
             className="text-[13px] font-semibold"
             style={{
@@ -55,11 +55,11 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
       </div>
 
       {/* Per-suite breakdown */}
-      <div className="border-b border-envoi-border px-[14px] py-[10px]">
+      <div className="border-b border-envoi-border px-3.5 py-2.5">
         <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           Suites
         </span>
-        <div className="mt-[8px] space-y-[10px]">
+        <div className="mt-2 space-y-2.5">
           {effectiveSuites.map((suite) => {
             const passed = commit.suiteState[suite.name] ?? 0;
             const ratio = passed / suite.total;
@@ -75,7 +75,7 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
                   </span>
                 </div>
                 <div
-                  className="mt-[3px] h-[6px] rounded-full"
+                  className="mt-0.75 h-1.5 rounded-full"
                   style={{ background: suiteColor?.bg ?? T.borderLight }}
                 >
                   <div
@@ -94,21 +94,21 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
 
       {/* Broken tests */}
       {commit.feedback.newlyBroken > 0 && (
-        <div className="px-[14px] py-[10px]">
+        <div className="px-3.5 py-2.5">
           <span className="text-[13px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
             Regressions ({commit.feedback.newlyBroken})
           </span>
           {commit.feedback.brokenTests.length > 0 ? (
-            <div className="mt-[8px] space-y-[6px]">
+            <div className="mt-2 space-y-1.5">
               {commit.feedback.brokenTests.map((brokenTest, testIndex) => (
                 <div
                   key={`${brokenTest.suite}-${brokenTest.testId}-${testIndex}`}
-                  className="rounded border border-envoi-border-light px-[10px] py-[8px]"
+                  className="rounded border border-envoi-border-light px-2.5 py-2"
                   style={{ background: T.redBg }}
                 >
                   <div className="flex items-center gap-2">
                     <span
-                      className="rounded-[2px] px-[5px] py-[1px] text-[13px] font-medium"
+                      className="rounded-xs px-1.25 py-px text-[13px] font-medium"
                       style={{
                         color: SUITE_COLORS[brokenTest.suite]?.color ?? T.textMuted,
                         background: SUITE_COLORS[brokenTest.suite]?.bg ?? T.borderLight,
@@ -120,14 +120,14 @@ export function TestsPanel({ commit, suites, totalTests }: TestsPanelProps) {
                       {brokenTest.testId}
                     </span>
                   </div>
-                  <div className="mt-[4px] text-[13px]" style={{ color: T.redDark }}>
+                  <div className="mt-1 text-[13px]" style={{ color: T.redDark }}>
                     {brokenTest.error}
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="mt-[8px] text-[12px] text-envoi-text-dim">
+            <div className="mt-2 text-[12px] text-envoi-text-dim">
               {commit.feedback.newlyBroken} test{commit.feedback.newlyBroken > 1 ? "s" : ""} regressed in this commit.
             </div>
           )}

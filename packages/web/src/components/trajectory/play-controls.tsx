@@ -45,7 +45,9 @@ export function PlayControls({
   speed,
   onSpeedChange,
 }: PlayControlsProps) {
-  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(
+    undefined,
+  );
 
   const advanceCommit = useCallback(() => {
     onSelect(selectedIndex + 1);
@@ -75,15 +77,15 @@ export function PlayControls({
   const canGoForward = selectedIndex < totalCommits - 1;
 
   return (
-    <div className="flex items-center gap-3 border-b border-envoi-border px-[14px] py-[8px]">
+    <div className="flex items-center gap-3 border-b border-envoi-border px-3.5 py-2">
       {/* Transport buttons */}
-      <div className="flex items-center gap-[2px]">
+      <div className="flex items-center gap-0.5">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               onClick={() => onSelect(0)}
               disabled={!canGoBack}
-              className="flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
+              className="flex h-6 w-6 items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
             >
               <SkipBack size={12} />
             </button>
@@ -95,7 +97,7 @@ export function PlayControls({
             <button
               onClick={() => onSelect(Math.max(0, selectedIndex - 1))}
               disabled={!canGoBack}
-              className="flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
+              className="flex h-6 w-6 items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
             >
               <ChevronLeft size={14} />
             </button>
@@ -106,7 +108,7 @@ export function PlayControls({
           <TooltipTrigger asChild>
             <button
               onClick={onTogglePlay}
-              className="flex h-[26px] w-[26px] items-center justify-center rounded bg-envoi-accent-bg text-envoi-accent transition-colors hover:bg-envoi-accent hover:text-white"
+              className="flex h-6.5 w-6.5 items-center justify-center rounded bg-envoi-accent-bg text-envoi-accent transition-colors hover:bg-envoi-accent hover:text-white"
             >
               {isPlaying ? <Pause size={12} /> : <Play size={12} />}
             </button>
@@ -116,9 +118,11 @@ export function PlayControls({
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={() => onSelect(Math.min(totalCommits - 1, selectedIndex + 1))}
+              onClick={() =>
+                onSelect(Math.min(totalCommits - 1, selectedIndex + 1))
+              }
               disabled={!canGoForward}
-              className="flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
+              className="flex h-6 w-6 items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
             >
               <ChevronRight size={14} />
             </button>
@@ -130,7 +134,7 @@ export function PlayControls({
             <button
               onClick={() => onSelect(totalCommits - 1)}
               disabled={!canGoForward}
-              className="flex h-[24px] w-[24px] items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
+              className="flex h-6 w-6 items-center justify-center rounded text-envoi-text-muted transition-colors hover:bg-envoi-surface disabled:opacity-30"
             >
               <SkipForward size={12} />
             </button>
@@ -140,12 +144,12 @@ export function PlayControls({
       </div>
 
       {/* Speed selectors */}
-      <div className="flex items-center gap-[2px]">
+      <div className="flex items-center gap-0.5">
         {SPEED_OPTIONS.map((speedOption) => (
           <button
             key={speedOption}
             onClick={() => onSpeedChange(speedOption)}
-            className={`rounded px-[6px] py-[2px] text-[13px] font-semibold transition-colors ${
+            className={`rounded px-1.5 py-0.5 text-[13px] font-semibold transition-colors ${
               speed === speedOption
                 ? "bg-envoi-text text-white"
                 : "text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"

@@ -5,10 +5,19 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getDifficultyData } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const data = await getDifficultyData();
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
+    const data = await getDifficultyData(project);
     return NextResponse.json(data);
   } catch (error) {
     console.error("GET /api/difficulty error:", error);

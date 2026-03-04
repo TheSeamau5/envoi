@@ -36,10 +36,54 @@ import pyarrow.parquet as pq
 from envoi_code.scripts.graph_trace import async_main as graph_async_main
 
 RETRYABLE_SESSION_END_REASONS = {"agent_error", "timeout", "envoi_error"}
+did_warn_bucket_deprecation = False
 
 
-def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
-    return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
+def normalize_prefix(raw_value: str) -> str:
+    value = raw_value.strip()
+    if value.startswith("s3://"):
+        value = value[len("s3://") :]
+    value = value.strip("/")
+    if not value:
+        return ""
+    if "/" in value:
+        raise SystemExit(
+            "AWS_S3_PREFIX must be a bucket name or s3://<bucket> (without path)"
+        )
+    return value
+
+
+def artifact_uri(
+    prefix: str,
+    project: str,
+    trajectory_id: str,
+    filename: str,
+) -> str:
+    return f"s3://{prefix}/project/{project}/trajectories/{trajectory_id}/{filename}"
+
+
+def get_prefix() -> str:
+    global did_warn_bucket_deprecation
+    prefix = normalize_prefix(os.environ.get("AWS_S3_PREFIX") or "")
+    if prefix:
+        return prefix
+    legacy = normalize_prefix(os.environ.get("AWS_S3_BUCKET") or "")
+    if legacy:
+        if not did_warn_bucket_deprecation:
+            print(
+                "[launcher] AWS_S3_BUCKET is deprecated; use AWS_S3_PREFIX",
+                flush=True,
+            )
+            did_warn_bucket_deprecation = True
+        return legacy
+    raise SystemExit("AWS_S3_PREFIX environment variable is required")
+
+
+def get_project() -> str:
+    project = (os.environ.get("ENVOI_PROJECT") or "").strip()
+    if project:
+        return project
+    return "default"
 
 
 def resolve_positive_int_env(name: str, default: int) -> int:
@@ -174,6 +218,8 @@ def common_runner_args(
         parts.extend(["--max-parts", str(args.max_parts)])
     if args.max_turns is not None:
         parts.extend(["--max-turns", str(args.max_turns)])
+    if args.project:
+        parts.extend(["--project", str(args.project)])
     if modal_mode:
         if args.test:
             parts.extend(
@@ -277,9 +323,11 @@ def run_child_with_interrupt_handling(command: list[str]) -> int:
 
 
 def load_trace_session_end(
-    bucket: str, trajectory_id: str,
+    prefix: str,
+    project: str,
+    trajectory_id: str,
 ) -> tuple[str | None, int | None]:
-    key = f"trajectories/{trajectory_id}/trace.parquet"
+    key = f"project/{project}/trajectories/{trajectory_id}/trace.parquet"
     client = boto3.client(
         "s3",
         aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
@@ -287,7 +335,7 @@ def load_trace_session_end(
         region_name=os.environ.get("AWS_REGION", "us-east-1"),
     )
     try:
-        response = client.get_object(Bucket=bucket, Key=key)
+        response = client.get_object(Bucket=prefix, Key=key)
     except Exception:  # noqa: BLE001
         return None, None
     body = response.get("Body")
@@ -395,6 +443,11 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Sandbox provider to use (default: modal).",
     )
     parser.add_argument("--trajectory-id", default=None)
+    parser.add_argument(
+        "--project",
+        default=os.environ.get("ENVOI_PROJECT"),
+        help="Project namespace used for artifact paths.",
+    )
     parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
     parser.add_argument(
         "--auto-resume",
@@ -428,12 +481,13 @@ def run_command(args: argparse.Namespace) -> None:
     resolve_timeout(args)
     normalize_e2b_timeout_for_plan(args)
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
-    bucket = os.environ.get("AWS_S3_BUCKET")
-    if not bucket:
-        raise SystemExit("AWS_S3_BUCKET environment variable is required")
-    trace_uri = artifact_uri(bucket, trajectory_id, "trace.parquet")
-    bundle_uri = artifact_uri(bucket, trajectory_id, "repo.bundle")
-    logs_uri = artifact_uri(bucket, trajectory_id, "logs.parquet")
+    prefix = get_prefix()
+    project = (args.project or get_project()).strip() or "default"
+    os.environ["ENVOI_PROJECT"] = project
+    args.project = project
+    trace_uri = artifact_uri(prefix, project, trajectory_id, "trace.parquet")
+    bundle_uri = artifact_uri(prefix, project, trajectory_id, "repo.bundle")
+    logs_uri = artifact_uri(prefix, project, trajectory_id, "logs.parquet")
 
     part_limit_label = (
         str(args.max_parts)
@@ -453,6 +507,7 @@ def run_command(args: argparse.Namespace) -> None:
     print(
         "[launcher] start "
         f"trajectory_id={trajectory_id} "
+        f"project={project} "
         f"sandbox={args.sandbox} "
         f"agent={args.agent} "
         f"part_limit={part_limit_label} "
@@ -507,7 +562,11 @@ def run_command(args: argparse.Namespace) -> None:
             should_retry = args.auto_resume and not args.detach
             retry_reason = f"modal_exit={return_code}"
         elif args.auto_resume and not args.detach:
-            reason, total_parts = load_trace_session_end(bucket, trajectory_id)
+            reason, total_parts = load_trace_session_end(
+                prefix,
+                project,
+                trajectory_id,
+            )
             under_part_cap = (
                 args.max_parts is None
                 or total_parts is None
@@ -542,8 +601,10 @@ def graph_command(args: argparse.Namespace) -> None:
     """Execute graph generation (delegates to graph_trace)."""
     argv_backup = sys.argv
     sys.argv = ["envoi-trace graph", args.trajectory_id]
-    if args.bucket:
-        sys.argv.extend(["--bucket", args.bucket])
+    if args.prefix:
+        sys.argv.extend(["--prefix", args.prefix])
+    if args.project:
+        sys.argv.extend(["--project", args.project])
     if args.output:
         sys.argv.extend(["--output", args.output])
     if args.part is not None:
@@ -574,8 +635,18 @@ def main() -> None:
     )
     graph_parser.add_argument("trajectory_id", help="Trajectory ID in S3.")
     graph_parser.add_argument(
+        "--prefix",
+        default=os.environ.get("AWS_S3_PREFIX") or os.environ.get("AWS_S3_BUCKET"),
+    )
+    graph_parser.add_argument(
         "--bucket",
-        default=os.environ.get("AWS_S3_BUCKET"),
+        dest="prefix",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    graph_parser.add_argument(
+        "--project",
+        default=os.environ.get("ENVOI_PROJECT"),
     )
     graph_parser.add_argument("--output", default=None)
     graph_parser.add_argument("--part", type=int, default=None)

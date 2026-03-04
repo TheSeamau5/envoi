@@ -66,6 +66,7 @@ class TrajectoryExecutionResult(BaseModel):
 
 
 class TrajectoryPreparedContext(BaseModel):
+    project: str
     max_parts: int | None
     max_turns: int | None
     selected_test_paths: list[str]

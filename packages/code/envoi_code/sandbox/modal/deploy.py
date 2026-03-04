@@ -91,6 +91,7 @@ async def modal_run_trajectory(
     raw_params_json: str | None = None,
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
+    project: str | None = None,
 ) -> str:
     # Share the function's ephemeral app so sandboxes are cleaned up with it.
     ModalSandbox.app = app
@@ -113,6 +114,7 @@ async def modal_run_trajectory(
         raw_params=raw_params,
         sandbox_cpu=sandbox_cpu,
         sandbox_memory_mb=sandbox_memory_mb,
+        project=project,
     )
 
 
@@ -141,6 +143,7 @@ async def modal_run_trajectory_non_preemptible(
     raw_params_json: str | None = None,
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
+    project: str | None = None,
 ) -> str:
     ModalSandbox.app = app
     raw_params = parse_raw_params_json(raw_params_json)
@@ -162,6 +165,7 @@ async def modal_run_trajectory_non_preemptible(
         raw_params=raw_params,
         sandbox_cpu=sandbox_cpu,
         sandbox_memory_mb=sandbox_memory_mb,
+        project=project,
     )
 
 
@@ -190,6 +194,7 @@ async def main(
     raw_params_json: str | None = None,
     sandbox_cpu: float | None = None,
     sandbox_memory_mb: int | None = None,
+    project: str | None = None,
 ) -> None:
     selected_tests: list[str] | None = None
     if test_json and test_json.strip():
@@ -257,6 +262,7 @@ async def main(
                 raw_params_json=raw_params_json,
                 sandbox_cpu=sandbox_cpu,
                 sandbox_memory_mb=sandbox_memory_mb,
+                project=project,
             )
             result = await call.get.aio()
         print(f"Completed trajectory: {result}")

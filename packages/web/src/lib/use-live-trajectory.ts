@@ -30,10 +30,13 @@ export function isPossiblyLive(trajectory: Trajectory): boolean {
  * Check sandbox status via the server endpoint (queries the actual provider).
  * Returns true if the sandbox is still running, false otherwise.
  */
-async function checkSandboxStatus(trajectoryId: string): Promise<boolean> {
+async function checkSandboxStatus(
+  trajectoryId: string,
+  project: string,
+): Promise<boolean> {
   try {
     const response = await fetch(
-      `/api/trajectories/${encodeURIComponent(trajectoryId)}/sandbox-status`,
+      `/api/trajectories/${encodeURIComponent(trajectoryId)}/sandbox-status?project=${encodeURIComponent(project)}`,
     );
     if (!response.ok) {
       return false;
@@ -49,7 +52,10 @@ async function checkSandboxStatus(trajectoryId: string): Promise<boolean> {
  * Returns the latest trajectory data, polling every 30 seconds while live.
  * Liveness is determined by querying the sandbox provider.
  */
-export function useLiveTrajectory(initial: Trajectory): {
+export function useLiveTrajectory(
+  initial: Trajectory,
+  project: string,
+): {
   trajectory: Trajectory;
   isLive: boolean;
   lastRefreshed: Date;
@@ -57,13 +63,15 @@ export function useLiveTrajectory(initial: Trajectory): {
   const [trajectory, setTrajectory] = useState(initial);
   const [lastRefreshed, setLastRefreshed] = useState(() => new Date());
   const [live, setLive] = useState(() => isPossiblyLive(initial));
-  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(
+    undefined,
+  );
 
   const refresh = useCallback(async () => {
     try {
       /** Fetch latest trajectory data */
       const response = await fetch(
-        `/api/trajectories/${encodeURIComponent(initial.id)}?bust=${Date.now()}`,
+        `/api/trajectories/${encodeURIComponent(initial.id)}?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
       );
       if (!response.ok) {
         return;
@@ -79,19 +87,25 @@ export function useLiveTrajectory(initial: Trajectory): {
       }
 
       /** Ask the sandbox provider if it's still running */
-      const running = await checkSandboxStatus(initial.id);
+      const running = await checkSandboxStatus(initial.id, project);
       setLive(running);
     } catch {
       /** Network errors are transient — silently retry on next interval */
     }
-  }, [initial.id]);
+  }, [initial.id, project]);
 
   /** Immediate fresh fetch on mount — but only if possibly live.
    *  Finished trajectories already have their final data from the server. */
   useEffect(() => {
     if (isPossiblyLive(initial)) {
-      refresh();
+      const timer = setTimeout(() => {
+        void refresh();
+      }, 0);
+      return () => {
+        clearTimeout(timer);
+      };
     }
+    return undefined;
   }, [initial, refresh]);
 
   /** Poll every 30s while live */

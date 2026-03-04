@@ -7,14 +7,16 @@ import { notFound } from "next/navigation";
 import { getTrajectoryById } from "@/lib/server/data";
 import { readLayoutCookies } from "@/lib/cookies";
 import { TrajectoryDetail } from "@/components/trajectory/trajectory-detail";
+import { requireActiveProject } from "@/lib/server/project-context";
 
 type TrajectoryPageProps = {
   params: Promise<{ id: string }>;
 };
 
 export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
+  const project = await requireActiveProject();
   const { id } = await params;
-  const trajectory = await getTrajectoryById(id);
+  const trajectory = await getTrajectoryById(id, { project });
 
   if (!trajectory) {
     notFound();
@@ -25,6 +27,7 @@ export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
   return (
     <TrajectoryDetail
       trajectory={trajectory}
+      project={project}
       initialRightPanelOpen={rightPanelOpen}
       initialDividerPct={dividerPct}
     />

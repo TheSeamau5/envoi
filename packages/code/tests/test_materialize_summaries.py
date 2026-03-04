@@ -88,7 +88,9 @@ def make_trace(
         "environment": environment,
         "task_params": task_params,
         "suites": suites,
-        "bundle_uri": f"s3://bucket/trajectories/{trajectory_id}/repo.bundle",
+        "bundle_uri": (
+            f"s3://bucket/project/default/trajectories/{trajectory_id}/repo.bundle"
+        ),
     }
     return trace, meta
 

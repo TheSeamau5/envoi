@@ -7,6 +7,7 @@
 const COOKIE_RIGHT_PANEL = "envoi:detail-right-panel-open";
 const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
+const COOKIE_PROJECT = "envoi:project";
 
 /** Write a layout cookie. Max-age: 1 year, SameSite=Lax, path=/. */
 export function setLayoutCookie(
@@ -24,4 +25,14 @@ export function setLayoutCookie(
   }
   const encoded = encodeURIComponent(String(value));
   document.cookie = `${name}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
+}
+
+/** Write the active project cookie. Max-age: 1 year, SameSite=Lax, path=/. */
+export function setProjectCookie(name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return;
+  }
+  const encoded = encodeURIComponent(trimmed);
+  document.cookie = `${COOKIE_PROJECT}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
 }

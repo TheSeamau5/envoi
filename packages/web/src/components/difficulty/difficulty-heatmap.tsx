@@ -26,6 +26,7 @@ import {
 
 type DifficultyHeatmapProps = {
   cells: DifficultyCell[];
+  project: string;
 };
 
 const CELL_W = 160;
@@ -76,8 +77,19 @@ type EnvironmentGroup = {
   categories: string[];
 };
 
+type CategoryLayout = {
+  category: string;
+  cellY: number;
+};
+
+type EnvironmentLayout = {
+  environment: string;
+  sectionY: number;
+  categories: CategoryLayout[];
+};
+
 /** Difficulty heatmap with click-through navigation and frontier band highlighting */
-export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
+export function DifficultyHeatmap({ cells, project }: DifficultyHeatmapProps) {
   const router = useRouter();
 
   const { envGroups, models, cellMap } = useMemo(() => {
@@ -103,15 +115,25 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
     for (const [environment, catSet] of envCategoryMap.entries()) {
       const categoryList = Array.from(catSet);
       categoryList.sort((catA, catB) => {
-        const cellsA = cells.filter((cell) => cell.environment === environment && cell.category === catA);
-        const cellsB = cells.filter((cell) => cell.environment === environment && cell.category === catB);
-        const avgA = cellsA.reduce((sum, cell) => sum + cell.passRate, 0) / (cellsA.length || 1);
-        const avgB = cellsB.reduce((sum, cell) => sum + cell.passRate, 0) / (cellsB.length || 1);
+        const cellsA = cells.filter(
+          (cell) => cell.environment === environment && cell.category === catA,
+        );
+        const cellsB = cells.filter(
+          (cell) => cell.environment === environment && cell.category === catB,
+        );
+        const avgA =
+          cellsA.reduce((sum, cell) => sum + cell.passRate, 0) /
+          (cellsA.length || 1);
+        const avgB =
+          cellsB.reduce((sum, cell) => sum + cell.passRate, 0) /
+          (cellsB.length || 1);
         return avgA - avgB;
       });
       groups.push({ environment, categories: categoryList });
     }
-    groups.sort((groupA, groupB) => groupA.environment.localeCompare(groupB.environment));
+    groups.sort((groupA, groupB) =>
+      groupA.environment.localeCompare(groupB.environment),
+    );
 
     return {
       envGroups: groups,
@@ -120,9 +142,46 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
     };
   }, [cells]);
 
+  /** Pre-compute stable SVG layout positions without render-time mutation */
+  const svgWidth = LABEL_W + models.length * (CELL_W + GAP);
+  const totalCategoryRows = envGroups.reduce(
+    (sum, group) => sum + group.categories.length,
+    0,
+  );
+  const svgHeight =
+    LABEL_H +
+    totalCategoryRows * (CELL_H + GAP) +
+    envGroups.length * ENV_HEADER_H +
+    Math.max(0, envGroups.length - 1) * ENV_GAP;
+
+  const envLayouts = useMemo<EnvironmentLayout[]>(
+    () =>
+      envGroups.map((group, groupIndex) => {
+        const sectionY = envGroups
+          .slice(0, groupIndex)
+          .reduce(
+            (sum, prior) =>
+              sum +
+              ENV_HEADER_H +
+              prior.categories.length * (CELL_H + GAP) +
+              ENV_GAP,
+            LABEL_H,
+          );
+        return {
+          environment: group.environment,
+          sectionY,
+          categories: group.categories.map((category, categoryIndex) => ({
+            category,
+            cellY: sectionY + ENV_HEADER_H + categoryIndex * (CELL_H + GAP),
+          })),
+        };
+      }),
+    [envGroups],
+  );
+
   if (cells.length === 0) {
     return (
-      <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
+      <div className="flex items-center justify-center py-10 text-[13px] text-envoi-text-dim">
         No difficulty data available
       </div>
     );
@@ -133,18 +192,10 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
     const params = new URLSearchParams();
     params.set("environment", environment);
     params.set("model", model);
-    router.push(`/trajectory?${params.toString()}`);
+    router.push(
+      `/project/${encodeURIComponent(project)}/trajectory?${params.toString()}`,
+    );
   }
-
-  /** Calculate total rows across all environments for SVG height */
-  const totalCategoryRows = envGroups.reduce((sum, group) => sum + group.categories.length, 0);
-  const svgWidth = LABEL_W + models.length * (CELL_W + GAP);
-  const svgHeight = LABEL_H
-    + totalCategoryRows * (CELL_H + GAP)
-    + envGroups.length * ENV_HEADER_H
-    + (envGroups.length - 1) * ENV_GAP;
-
-  let currentY = LABEL_H;
 
   return (
     <TooltipProvider>
@@ -167,100 +218,99 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
         ))}
 
         {/* Environment sections */}
-        {envGroups.map((group, groupIndex) => {
-          /** Add gap between environment sections */
-          if (groupIndex > 0) {
-            currentY += ENV_GAP;
-          }
+        {envLayouts.map((group) => {
+          const categoryElements = group.categories.map(
+            ({ category, cellY }) => {
+              return (
+                <g key={`row-${group.environment}-${category}`}>
+                  {/* Category label */}
+                  <text
+                    x={LABEL_W - 10}
+                    y={cellY + CELL_H / 2 + 4}
+                    textAnchor="end"
+                    style={{ fontSize: "12px", fill: T.textMuted }}
+                  >
+                    {category}
+                  </text>
 
-          const sectionY = currentY;
-          currentY += ENV_HEADER_H;
+                  {/* Cells for this category */}
+                  {models.map((model, modelIndex) => {
+                    const cell = cellMap.get(
+                      `${group.environment}:${category}:${model}`,
+                    );
+                    const rate = cell?.passRate ?? 0;
+                    const cellX = LABEL_W + modelIndex * (CELL_W + GAP);
+                    const frontier = isFrontier(rate);
 
-          const categoryElements = group.categories.map((category) => {
-            const cellY = currentY;
-            currentY += CELL_H + GAP;
-
-            return (
-              <g key={`row-${group.environment}-${category}`}>
-                {/* Category label */}
-                <text
-                  x={LABEL_W - 10}
-                  y={cellY + CELL_H / 2 + 4}
-                  textAnchor="end"
-                  style={{ fontSize: "12px", fill: T.textMuted }}
-                >
-                  {category}
-                </text>
-
-                {/* Cells for this category */}
-                {models.map((model, modelIndex) => {
-                  const cell = cellMap.get(`${group.environment}:${category}:${model}`);
-                  const rate = cell?.passRate ?? 0;
-                  const cellX = LABEL_W + modelIndex * (CELL_W + GAP);
-                  const frontier = isFrontier(rate);
-
-                  return (
-                    <Tooltip key={`${group.environment}:${category}:${model}`}>
-                      <TooltipTrigger asChild>
-                        <g
-                          className="cursor-pointer"
-                          onClick={() => handleCellClick(group.environment, model)}
-                        >
-                          <rect
-                            x={cellX}
-                            y={cellY}
-                            width={CELL_W}
-                            height={CELL_H}
-                            rx={3}
-                            fill={passRateColor(rate)}
-                          />
-                          {/* Frontier band indicator — dashed border */}
-                          {frontier && (
-                            <rect
-                              x={cellX + 1}
-                              y={cellY + 1}
-                              width={CELL_W - 2}
-                              height={CELL_H - 2}
-                              rx={2}
-                              fill="none"
-                              stroke="#ffffff"
-                              strokeWidth={1.5}
-                              strokeDasharray="4 2"
-                              opacity={0.8}
-                            />
-                          )}
-                          <text
-                            x={cellX + CELL_W / 2}
-                            y={cellY + CELL_H / 2 + 4}
-                            textAnchor="middle"
-                            style={{
-                              fontSize: "13px",
-                              fill: textColor(rate),
-                              fontWeight: 600,
-                            }}
+                    return (
+                      <Tooltip
+                        key={`${group.environment}:${category}:${model}`}
+                      >
+                        <TooltipTrigger asChild>
+                          <g
+                            className="cursor-pointer"
+                            onClick={() =>
+                              handleCellClick(group.environment, model)
+                            }
                           >
-                            {(rate * 100).toFixed(0)}%
-                          </text>
-                        </g>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <span className="font-semibold">{model}</span> on {group.environment}/{category}: {(rate * 100).toFixed(1)}%
-                        {cell ? ` (${cell.attempts} trajectories)` : ""}
-                        {frontier ? " — frontier range" : ""}
-                      </TooltipContent>
-                    </Tooltip>
-                  );
-                })}
-              </g>
-            );
-          });
+                            <rect
+                              x={cellX}
+                              y={cellY}
+                              width={CELL_W}
+                              height={CELL_H}
+                              rx={3}
+                              fill={passRateColor(rate)}
+                            />
+                            {/* Frontier band indicator — dashed border */}
+                            {frontier && (
+                              <rect
+                                x={cellX + 1}
+                                y={cellY + 1}
+                                width={CELL_W - 2}
+                                height={CELL_H - 2}
+                                rx={2}
+                                fill="none"
+                                stroke="#ffffff"
+                                strokeWidth={1.5}
+                                strokeDasharray="4 2"
+                                opacity={0.8}
+                              />
+                            )}
+                            <text
+                              x={cellX + CELL_W / 2}
+                              y={cellY + CELL_H / 2 + 4}
+                              textAnchor="middle"
+                              style={{
+                                fontSize: "13px",
+                                fill: textColor(rate),
+                                fontWeight: 600,
+                              }}
+                            >
+                              {(rate * 100).toFixed(0)}%
+                            </text>
+                          </g>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <span className="font-semibold">{model}</span> on{" "}
+                          {group.environment}/{category}:{" "}
+                          {(rate * 100).toFixed(1)}%
+                          {cell ? ` (${cell.attempts} trajectories)` : ""}
+                          {frontier ? " — frontier range" : ""}
+                        </TooltipContent>
+                      </Tooltip>
+                    );
+                  })}
+                </g>
+              );
+            },
+          );
 
           return (
             <g key={`env-${group.environment}`}>
               {/* Environment section header */}
               <text
                 x={0}
-                y={sectionY + ENV_HEADER_H / 2 + 5}
+                y={group.sectionY + ENV_HEADER_H / 2 + 5}
                 style={{
                   fontSize: "13px",
                   fill: T.text,
@@ -274,9 +324,9 @@ export function DifficultyHeatmap({ cells }: DifficultyHeatmapProps) {
               {/* Divider line under header */}
               <line
                 x1={0}
-                y1={sectionY + ENV_HEADER_H - 2}
+                y1={group.sectionY + ENV_HEADER_H - 2}
                 x2={svgWidth}
-                y2={sectionY + ENV_HEADER_H - 2}
+                y2={group.sectionY + ENV_HEADER_H - 2}
                 stroke={T.borderLight}
                 strokeWidth={1}
               />

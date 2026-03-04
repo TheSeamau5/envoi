@@ -1,49 +1,117 @@
 /**
  * DuckDB server-side singleton module.
- *
- * On startup, syncs parquet files from S3 to a local cache directory so that
- * DuckDB queries run against local disk instead of over the network.
- * Uses a persistent DuckDB database for parquet metadata caching and
- * summary table storage across server restarts.
- *
- * Must only be imported from server-side code (API routes, server components).
+ * Project-scoped: reads/writes under s3://<prefix>/project/<name>/trajectories/.
  */
 
 import { DuckDBInstance } from "@duckdb/node-api";
-import { execSync } from "child_process";
-import { statSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { stat, mkdir, readdir } from "node:fs/promises";
-import path from "path";
+import { execFileSync, execSync } from "node:child_process";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { cookies } from "next/headers";
 
-// Store instance on globalThis so it survives Next.js hot reloads in dev.
-// Without this, Turbopack re-evaluates the module (resetting local vars)
-// while the old DuckDB instance still holds the file lock in the same process.
-const globalForDb = globalThis as unknown as {
-  __duckdb?: DuckDBInstance;
-  __duckdbInit?: Promise<DuckDBInstance>;
-  __duckdbRefreshInterval?: ReturnType<typeof setInterval>;
+let instance: DuckDBInstance | undefined;
+let initPromise: Promise<DuckDBInstance> | undefined;
+let loadedProject: string | undefined;
+let refreshInterval: ReturnType<typeof setInterval> | undefined;
+let warnedLegacyBucket = false;
+const syncedProjects = new Set<string>();
+
+const DB_PATH = path.resolve(process.cwd(), ".cache", "envoi.duckdb");
+const SYNC_COOLDOWN_MS = 5 * 60_000;
+const BACKGROUND_REFRESH_MS = 5 * 60_000;
+const PROJECT_COOKIE = "envoi:project";
+
+export type ProjectMeta = {
+  name: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
 };
-let instance: DuckDBInstance | undefined = globalForDb.__duckdb;
-let initPromise: Promise<DuckDBInstance> | undefined = globalForDb.__duckdbInit;
 
-function getBucket(): string {
-  return process.env.AWS_S3_BUCKET ?? "";
+function validateProjectName(project: string): string {
+  const value = project.trim();
+  if (!/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(value)) {
+    throw new Error(`Invalid project name: ${project}`);
+  }
+  return value;
+}
+
+function syncStampPath(project: string): string {
+  return path.resolve(process.cwd(), ".cache", `last-s3-sync-${project}`);
+}
+
+function cacheDir(project: string): string {
+  return path.resolve(
+    process.cwd(),
+    ".cache",
+    "parquet",
+    project,
+    "trajectories",
+  );
+}
+
+export function getPrefix(): string {
+  const configured = (process.env.AWS_S3_PREFIX ?? "").trim();
+  if (configured.length > 0) {
+    return normalizePrefix(configured);
+  }
+
+  const legacy = (process.env.AWS_S3_BUCKET ?? "").trim();
+  if (legacy.length > 0) {
+    if (!warnedLegacyBucket) {
+      console.warn("[db] AWS_S3_BUCKET is deprecated; use AWS_S3_PREFIX");
+      warnedLegacyBucket = true;
+    }
+    return normalizePrefix(legacy);
+  }
+
+  return "";
+}
+
+function normalizePrefix(rawValue: string): string {
+  let value = rawValue.trim();
+  if (value.startsWith("s3://")) {
+    value = value.slice("s3://".length);
+  }
+
+  value = value.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!value) {
+    return "";
+  }
+
+  if (value.includes("/")) {
+    throw new Error(
+      "AWS_S3_PREFIX must be a bucket name or s3://<bucket> (without path)",
+    );
+  }
+
+  return value;
 }
 
 /** Whether S3 credentials are configured */
 export function isS3Configured(): boolean {
-  return !!(
-    process.env.AWS_S3_BUCKET &&
-    process.env.AWS_ACCESS_KEY_ID &&
-    process.env.AWS_SECRET_ACCESS_KEY
-  );
+  return getPrefix().length > 0;
 }
 
-// ---------------------------------------------------------------------------
-// Async filesystem helpers
-// ---------------------------------------------------------------------------
+export async function getActiveProject(project?: string): Promise<string> {
+  if (project && project.trim().length > 0) {
+    return validateProjectName(project);
+  }
 
-/** Check if a path exists (async replacement for fs.existsSync) */
+  try {
+    const jar = await cookies();
+    const fromCookie = jar.get(PROJECT_COOKIE)?.value ?? "";
+    if (fromCookie.trim().length > 0) {
+      return validateProjectName(fromCookie);
+    }
+  } catch {
+    // no request context
+  }
+
+  const fromEnv = (process.env.ENVOI_PROJECT ?? "default").trim() || "default";
+  return validateProjectName(fromEnv);
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await stat(filePath);
@@ -53,91 +121,87 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Local parquet cache
-// ---------------------------------------------------------------------------
-
-const CACHE_DIR = path.resolve(process.cwd(), ".cache", "parquet", "trajectories");
-const DB_PATH = path.resolve(process.cwd(), ".cache", "envoi.duckdb");
-
-/** Ensure the local cache directory exists */
-async function ensureCacheDir(): Promise<void> {
-  await mkdir(CACHE_DIR, { recursive: true });
+async function ensureCacheDir(project: string): Promise<void> {
+  await mkdir(cacheDir(project), { recursive: true });
 }
 
-/** Ensure the directory for the persistent DuckDB file exists */
 async function ensureDbDir(): Promise<void> {
   await mkdir(path.dirname(DB_PATH), { recursive: true });
 }
 
-/** Sync parquet files from S3 to local cache (blocking, runs once at startup) */
-function syncFromS3(): void {
+function awsEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const accessKey = process.env.AWS_ACCESS_KEY_ID?.trim();
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY?.trim();
+
+  if (accessKey && secretKey) {
+    env.AWS_ACCESS_KEY_ID = accessKey;
+    env.AWS_SECRET_ACCESS_KEY = secretKey;
+  }
+
+  env.AWS_REGION = process.env.AWS_REGION ?? "us-east-1";
+  return env;
+}
+
+function syncFromS3(project: string): void {
   if (!isS3Configured()) {
     return;
   }
 
-  const bucket = getBucket();
-  const s3Path = `s3://${bucket}/trajectories/`;
-  const s3Env = {
-    ...process.env,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-    AWS_REGION: process.env.AWS_REGION ?? "us-east-1",
-  };
+  const prefix = getPrefix();
+  const source = `s3://${prefix}/project/${project}/trajectories/`;
+  const dest = cacheDir(project);
 
-  // Sync trace files
   try {
-    console.log("[db] Syncing parquet files from S3...");
+    console.log(`[db] Syncing traces from ${source}`);
     execSync(
-      `aws s3 sync "${s3Path}" "${CACHE_DIR}" --exclude "*" --include "*/trace.parquet"`,
+      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "*/trace.parquet"`,
       {
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 60_000,
-        env: s3Env,
+        env: awsEnv(),
       },
     );
-    console.log("[db] S3 trace sync complete.");
-  } catch (err) {
-    console.warn("[db] S3 trace sync failed, will query S3 directly:", err);
+  } catch (error) {
+    console.warn(
+      "[db] S3 trace sync failed, will fallback to remote parquet reads:",
+      error,
+    );
   }
 
-  // Sync summary files (may not exist if materialization hasn't run)
   try {
     execSync(
-      `aws s3 sync "${s3Path}" "${CACHE_DIR}" --exclude "*" --include "summaries/*.parquet"`,
+      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "summaries/*.parquet"`,
       {
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 60_000,
-        env: s3Env,
+        env: awsEnv(),
       },
     );
-    console.log("[db] S3 summary sync complete.");
   } catch {
-    console.log("[db] No summary files on S3 (or sync failed), skipping.");
+    // summary files optional
   }
 
-  // Sync code snapshot files (may not exist if --extract-code wasn't used)
   try {
     execSync(
-      `aws s3 sync "${s3Path}" "${CACHE_DIR}" --exclude "*" --include "*/code_snapshots.parquet"`,
+      `aws s3 sync "${source}" "${dest}" --exclude "*" --include "*/code_snapshots.parquet"`,
       {
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 60_000,
-        env: s3Env,
+        env: awsEnv(),
       },
     );
-    console.log("[db] S3 code snapshots sync complete.");
   } catch {
-    console.log("[db] No code snapshot files on S3 (or sync failed), skipping.");
+    // code snapshots optional
   }
 }
 
-/** Whether local cache has parquet files */
-async function hasLocalCache(): Promise<boolean> {
+async function hasLocalCache(project: string): Promise<boolean> {
+  const root = cacheDir(project);
   try {
-    const dirs = await readdir(CACHE_DIR);
+    const dirs = await readdir(root);
     for (const dirName of dirs) {
-      if (await pathExists(path.join(CACHE_DIR, dirName, "trace.parquet"))) {
+      if (await pathExists(path.join(root, dirName, "trace.parquet"))) {
         return true;
       }
     }
@@ -147,63 +211,46 @@ async function hasLocalCache(): Promise<boolean> {
   }
 }
 
-/**
- * Sync cooldown: only re-sync from S3 if >5 minutes since last sync.
- * Uses a timestamp file so the cooldown survives across Next.js module reloads.
- */
-const SYNC_COOLDOWN_MS = 5 * 60_000; // 5 minutes
-const SYNC_STAMP_PATH = path.resolve(process.cwd(), ".cache", "last-s3-sync");
-let synced = false;
-
-function isSyncFresh(): boolean {
+async function isSyncFresh(project: string): Promise<boolean> {
   try {
-    const st = statSync(SYNC_STAMP_PATH);
+    const st = await stat(syncStampPath(project));
     return Date.now() - st.mtimeMs < SYNC_COOLDOWN_MS;
   } catch {
     return false;
   }
 }
 
-function touchSyncStamp(): void {
-  try {
-    mkdirSync(path.dirname(SYNC_STAMP_PATH), { recursive: true });
-    writeFileSync(SYNC_STAMP_PATH, String(Date.now()));
-  } catch {
-    // non-critical
-  }
+async function touchSyncStamp(project: string): Promise<void> {
+  const stamp = syncStampPath(project);
+  await mkdir(path.dirname(stamp), { recursive: true });
+  await writeFile(stamp, String(Date.now()));
 }
 
-function ensureSynced(): void {
-  if (synced) {
+async function ensureSynced(project: string): Promise<void> {
+  if (syncedProjects.has(project)) {
     return;
   }
-  synced = true;
-  // Skip S3 sync if we synced recently (survives module reloads)
-  if (isSyncFresh()) {
-    return;
-  }
-  syncFromS3();
-  touchSyncStamp();
-}
 
-// ---------------------------------------------------------------------------
-// URI helpers — point to local cache when available, S3 as fallback
-// ---------------------------------------------------------------------------
+  syncedProjects.add(project);
+  if (await isSyncFresh(project)) {
+    return;
+  }
+
+  syncFromS3(project);
+  await touchSyncStamp(project);
+}
 
 /** Glob for all trace parquet files */
-export async function allTracesGlob(): Promise<string> {
-  ensureSynced();
-  if (await hasLocalCache()) {
-    return path.join(CACHE_DIR, "*", "trace.parquet");
+export async function allTracesGlob(project?: string): Promise<string> {
+  const activeProject = await getActiveProject(project);
+  await ensureSynced(activeProject);
+  if (await hasLocalCache(activeProject)) {
+    return path.join(cacheDir(activeProject), "*", "trace.parquet");
   }
-  return `s3://${getBucket()}/trajectories/*/trace.parquet`;
+  return `s3://${getPrefix()}/project/${activeProject}/trajectories/*/trace.parquet`;
 }
 
-/**
- * Validate a trajectory ID to prevent path injection.
- * DuckDB table functions (read_parquet) take string literals, not bind
- * parameters, so we validate the ID format before interpolating it into paths.
- */
+/** Validate a trajectory ID to prevent path injection. */
 export function validateTrajectoryId(id: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
     throw new Error(`Invalid trajectory ID: ${id}`);
@@ -212,74 +259,62 @@ export function validateTrajectoryId(id: string): string {
 }
 
 /** URI for a single trajectory's parquet file */
-export async function traceUri(trajectoryId: string): Promise<string> {
-  ensureSynced();
+export async function traceUri(
+  trajectoryId: string,
+  project?: string,
+): Promise<string> {
+  const activeProject = await getActiveProject(project);
+  await ensureSynced(activeProject);
   const validId = validateTrajectoryId(trajectoryId);
-  const localPath = path.join(CACHE_DIR, validId, "trace.parquet");
+  const localPath = path.join(
+    cacheDir(activeProject),
+    validId,
+    "trace.parquet",
+  );
   if (await pathExists(localPath)) {
     return localPath;
   }
-  return `s3://${getBucket()}/trajectories/${validId}/trace.parquet`;
+  return `s3://${getPrefix()}/project/${activeProject}/trajectories/${validId}/trace.parquet`;
 }
 
-/** Always return the S3 URI, bypassing local cache (for live trajectories) */
-export function freshTraceUri(trajectoryId: string): string {
+/** Always return S3 URI, bypassing local cache */
+export async function freshTraceUri(
+  trajectoryId: string,
+  project?: string,
+): Promise<string> {
+  const activeProject = await getActiveProject(project);
   const validId = validateTrajectoryId(trajectoryId);
-  return `s3://${getBucket()}/trajectories/${validId}/trace.parquet`;
+  return `s3://${getPrefix()}/project/${activeProject}/trajectories/${validId}/trace.parquet`;
 }
 
-/** URI for a trajectory's code_snapshots.parquet file (may not exist) */
-export async function codeSnapshotsUri(trajectoryId: string): Promise<string | undefined> {
-  ensureSynced();
+/** URI for code_snapshots.parquet (may not exist) */
+export async function codeSnapshotsUri(
+  trajectoryId: string,
+  project?: string,
+): Promise<string | undefined> {
+  const activeProject = await getActiveProject(project);
+  await ensureSynced(activeProject);
   const validId = validateTrajectoryId(trajectoryId);
-  const localPath = path.join(CACHE_DIR, validId, "code_snapshots.parquet");
+  const localPath = path.join(
+    cacheDir(activeProject),
+    validId,
+    "code_snapshots.parquet",
+  );
   if (await pathExists(localPath)) {
     return localPath;
   }
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Summary table loading
-// ---------------------------------------------------------------------------
-
-/** Load materialized summary parquet files into DuckDB tables */
-async function loadSummaryTables(inst: DuckDBInstance): Promise<void> {
-  const summaryDir = path.join(CACHE_DIR, "summaries");
-  const trajSummaryPath = path.join(summaryDir, "trajectory_summary.parquet");
-  const evalSummaryPath = path.join(summaryDir, "evaluation_summary.parquet");
-
-  const conn = await inst.connect();
+async function listTraceFiles(project: string): Promise<string[]> {
+  const root = cacheDir(project);
   try {
-    if (await pathExists(trajSummaryPath)) {
-      await conn.run(`
-        CREATE OR REPLACE TABLE trajectory_summary AS
-        SELECT * FROM read_parquet('${trajSummaryPath}')
-      `);
-      console.log("[db] Loaded trajectory_summary table");
-    }
-
-    if (await pathExists(evalSummaryPath)) {
-      await conn.run(`
-        CREATE OR REPLACE TABLE evaluation_summary AS
-        SELECT * FROM read_parquet('${evalSummaryPath}')
-      `);
-      console.log("[db] Loaded evaluation_summary table");
-    }
-  } finally {
-    conn.disconnectSync();
-  }
-}
-
-/** List all local trace parquet file paths */
-async function listTraceFiles(): Promise<string[]> {
-  try {
-    const dirs = await readdir(CACHE_DIR);
+    const dirs = await readdir(root);
     const files: string[] = [];
     for (const dirName of dirs) {
-      const filePath = path.join(CACHE_DIR, dirName, "trace.parquet");
-      if (await pathExists(filePath)) {
-        files.push(filePath);
+      const traceFile = path.join(root, dirName, "trace.parquet");
+      if (await pathExists(traceFile)) {
+        files.push(traceFile);
       }
     }
     return files;
@@ -288,43 +323,115 @@ async function listTraceFiles(): Promise<string[]> {
   }
 }
 
-/**
- * Materialize analytics tables from parquet files.
- *
- * Processes files one at a time to stay within 1GB memory.
- * Evaluations use JS-side JSON parsing (DuckDB's from_json_strict OOMs on
- * large parquet files), trajectories use DuckDB GROUP BY per file.
- */
-async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
-  const files = await listTraceFiles();
-  if (files.length === 0) {
-    console.log("[db] No local parquet files, skipping analytics materialization.");
-    return;
-  }
+async function loadSummaryTables(
+  inst: DuckDBInstance,
+  project: string,
+): Promise<void> {
+  const summaryDir = path.join(cacheDir(project), "summaries");
+  const trajSummaryPath = path.join(summaryDir, "trajectory_summary.parquet");
+  const evalSummaryPath = path.join(summaryDir, "evaluation_summary.parquet");
 
-  const glob = await allTracesGlob();
   const conn = await inst.connect();
   try {
-    // Drop stale objects (TABLE or VIEW) so fresh CREATE works.
-    // Must drop TABLE before VIEW — DuckDB errors if you DROP VIEW on a TABLE.
-    await conn.run(`DROP TABLE IF EXISTS evaluations`);
-    await conn.run(`DROP TABLE IF EXISTS trajectories`);
-    await conn.run(`DROP VIEW IF EXISTS evaluations`);
-    await conn.run(`DROP VIEW IF EXISTS trajectories`);
+    await conn.run("DROP TABLE IF EXISTS trajectory_summary");
+    await conn.run("DROP TABLE IF EXISTS evaluation_summary");
 
-    // Use single thread during materialization to minimize memory
+    if (await pathExists(trajSummaryPath)) {
+      await conn.run(`
+        CREATE TABLE trajectory_summary AS
+        SELECT * FROM read_parquet('${trajSummaryPath}')
+      `);
+    }
+
+    if (await pathExists(evalSummaryPath)) {
+      await conn.run(`
+        CREATE TABLE evaluation_summary AS
+        SELECT * FROM read_parquet('${evalSummaryPath}')
+      `);
+    }
+  } finally {
+    conn.disconnectSync();
+  }
+}
+
+async function createEmptyTables(inst: DuckDBInstance): Promise<void> {
+  const conn = await inst.connect();
+  try {
+    await conn.run("DROP TABLE IF EXISTS trajectories");
+    await conn.run("DROP TABLE IF EXISTS evaluations");
+    await conn.run(`
+      CREATE TABLE trajectories (
+        trajectory_id VARCHAR,
+        environment VARCHAR,
+        agent_model VARCHAR,
+        agent VARCHAR,
+        started_at VARCHAR,
+        ended_at VARCHAR,
+        total_parts BIGINT,
+        total_turns BIGINT,
+        total_tokens BIGINT,
+        session_end_reason VARCHAR,
+        task_params VARCHAR,
+        suites VARCHAR
+      )
+    `);
+    await conn.run(`
+      CREATE TABLE evaluations (
+        trajectory_id VARCHAR,
+        environment VARCHAR,
+        agent_model VARCHAR,
+        part INTEGER,
+        turn INTEGER,
+        git_commit VARCHAR,
+        eval_id VARCHAR,
+        status VARCHAR,
+        passed INTEGER,
+        failed INTEGER,
+        total INTEGER,
+        target_commit VARCHAR,
+        suite_results VARCHAR,
+        finished_at VARCHAR
+      )
+    `);
+  } finally {
+    conn.disconnectSync();
+  }
+}
+
+async function createAnalyticsViews(
+  inst: DuckDBInstance,
+  project: string,
+): Promise<void> {
+  const files = await listTraceFiles(project);
+  const conn = await inst.connect();
+  try {
+    await conn.run("DROP TABLE IF EXISTS evaluations");
+    await conn.run("DROP TABLE IF EXISTS trajectories");
+    await conn.run("DROP VIEW IF EXISTS evaluations");
+    await conn.run("DROP VIEW IF EXISTS trajectories");
+    await conn.run("DROP VIEW IF EXISTS turn_summaries");
+    await conn.run("DROP VIEW IF EXISTS file_access");
+
+    if (files.length === 0) {
+      await createEmptyTables(inst);
+      return;
+    }
+
     await conn.run("SET threads=1");
 
-    // --- Trajectories: GROUP BY per file, INSERT INTO ---
     let firstTraj = true;
     for (const file of files) {
       const sql = `
         SELECT trajectory_id, environment, agent_model,
-          MIN(agent) AS agent, MIN(started_at) AS started_at,
-          MAX(timestamp) AS ended_at, MAX(part) + 1 AS total_parts,
-          MAX(turn) AS total_turns, SUM(content_token_estimate) AS total_tokens,
+          MIN(agent) AS agent,
+          MIN(started_at) AS started_at,
+          MAX(timestamp) AS ended_at,
+          MAX(part) + 1 AS total_parts,
+          MAX(turn) AS total_turns,
+          SUM(content_token_estimate) AS total_tokens,
           MAX(session_end_reason) AS session_end_reason,
-          MIN(task_params) AS task_params, arg_max(suites, part) AS suites
+          MIN(task_params) AS task_params,
+          arg_max(suites, part) AS suites
         FROM read_parquet('${file}')
         GROUP BY trajectory_id, environment, agent_model
       `;
@@ -335,23 +442,29 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
         await conn.run(`INSERT INTO trajectories ${sql}`);
       }
     }
-    console.log("[db] Materialized trajectories table");
 
-    // --- Evaluations: read raw JSON strings per file, parse in JS, INSERT ---
     await conn.run(`
       CREATE TABLE evaluations (
-        trajectory_id VARCHAR, environment VARCHAR, agent_model VARCHAR,
-        part INTEGER, turn INTEGER, git_commit VARCHAR,
-        eval_id VARCHAR, status VARCHAR, passed INTEGER, failed INTEGER,
-        total INTEGER, target_commit VARCHAR, suite_results VARCHAR,
+        trajectory_id VARCHAR,
+        environment VARCHAR,
+        agent_model VARCHAR,
+        part INTEGER,
+        turn INTEGER,
+        git_commit VARCHAR,
+        eval_id VARCHAR,
+        status VARCHAR,
+        passed INTEGER,
+        failed INTEGER,
+        total INTEGER,
+        target_commit VARCHAR,
+        suite_results VARCHAR,
         finished_at VARCHAR
       )
     `);
 
     for (const file of files) {
       const rawResult = await conn.run(`
-        SELECT trajectory_id, environment, agent_model, part, turn,
-          git_commit, eval_events_delta
+        SELECT trajectory_id, environment, agent_model, part, turn, git_commit, eval_events_delta
         FROM read_parquet('${file}')
         WHERE eval_events_delta IS NOT NULL
           AND json_array_length(eval_events_delta) > 0
@@ -366,28 +479,26 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
           continue;
         }
         for (const evt of events) {
-          const esc = (value: unknown) => String(value ?? "").replace(/'/g, "''");
+          const esc = (value: unknown): string =>
+            String(value ?? "").replace(/'/g, "''");
           await conn.run(`
             INSERT INTO evaluations VALUES (
-              '${esc(row.trajectory_id)}', '${esc(row.environment)}',
-              '${esc(row.agent_model)}', ${Number(row.part ?? 0)},
+              '${esc(row.trajectory_id)}', '${esc(row.environment)}', '${esc(row.agent_model)}',
+              ${Number(row.part ?? 0)},
               ${row.turn !== undefined && row.turn !== null ? Number(row.turn) : "NULL"},
               '${esc(row.git_commit)}', '${esc(evt.eval_id)}', '${esc(evt.status)}',
-              ${Number(evt.passed ?? 0)}, ${Number(evt.failed ?? 0)},
-              ${Number(evt.total ?? 0)}, '${esc(evt.target_commit)}',
-              '${esc(JSON.stringify(evt.suite_results ?? {}))}',
+              ${Number(evt.passed ?? 0)}, ${Number(evt.failed ?? 0)}, ${Number(evt.total ?? 0)},
+              '${esc(evt.target_commit)}', '${esc(JSON.stringify(evt.suite_results ?? {}))}',
               '${esc(evt.finished_at)}'
             )
           `);
         }
       }
     }
-    console.log("[db] Materialized evaluations table");
 
-    // Restore threads for normal query workloads
     await conn.run("SET threads=4");
 
-    // Lightweight views — only evaluated when explicitly queried
+    const glob = await allTracesGlob(project);
     await conn.run(`
       CREATE OR REPLACE VIEW turn_summaries AS
       SELECT
@@ -402,7 +513,6 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
       WHERE turn IS NOT NULL
       GROUP BY trajectory_id, environment, agent_model, turn
     `);
-    console.log("[db] Created turn_summaries view");
 
     await conn.run(`
       CREATE OR REPLACE VIEW file_access AS
@@ -414,41 +524,39 @@ async function createAnalyticsViews(inst: DuckDBInstance): Promise<void> {
       WHERE tool_name IN ('Read', 'Write', 'Edit', 'file_read', 'file_write')
         AND tool_input IS NOT NULL
     `);
-    console.log("[db] Created file_access view");
-  } catch (err) {
-    console.warn("[db] Failed to create analytics views:", err);
+  } catch (error) {
+    console.warn("[db] Failed to create analytics views:", error);
   } finally {
     conn.disconnectSync();
   }
 }
 
-// ---------------------------------------------------------------------------
-// DuckDB instance
-// ---------------------------------------------------------------------------
-
-async function createInstance(): Promise<DuckDBInstance> {
+async function createInstance(project: string): Promise<DuckDBInstance> {
   await ensureDbDir();
-  await ensureCacheDir();
-  const inst = await DuckDBInstance.create(DB_PATH);
+  await ensureCacheDir(project);
+  await ensureSynced(project);
 
-  // Cap memory and threads so DuckDB doesn't consume all system RAM
+  const inst = await DuckDBInstance.create(DB_PATH);
   const cfgConn = await inst.connect();
   try {
     await cfgConn.run("SET memory_limit='1GB'");
     await cfgConn.run("SET threads=4");
     await cfgConn.run("SET preserve_insertion_order=false");
-    await cfgConn.run(`SET temp_directory='${path.resolve(process.cwd(), ".cache", "duckdb_tmp")}'`);
+    await cfgConn.run(
+      `SET temp_directory='${path.resolve(process.cwd(), ".cache", "duckdb_tmp")}'`,
+    );
   } finally {
     cfgConn.disconnectSync();
   }
 
-  // Only configure httpfs if we'll need S3 access (no local cache)
-  if (isS3Configured() && !(await hasLocalCache())) {
+  if (isS3Configured() && !(await hasLocalCache(project))) {
     const conn = await inst.connect();
     try {
       await conn.run("INSTALL httpfs");
       await conn.run("LOAD httpfs");
-      await conn.run(`SET s3_region='${process.env.AWS_REGION ?? "us-east-1"}'`);
+      await conn.run(
+        `SET s3_region='${process.env.AWS_REGION ?? "us-east-1"}'`,
+      );
       await conn.run(
         `SET s3_access_key_id='${process.env.AWS_ACCESS_KEY_ID ?? ""}'`,
       );
@@ -460,40 +568,62 @@ async function createInstance(): Promise<DuckDBInstance> {
     }
   }
 
-  // Load summary tables and create analytics views
-  await loadSummaryTables(inst);
-  await createAnalyticsViews(inst);
-
+  await loadSummaryTables(inst, project);
+  await createAnalyticsViews(inst, project);
+  loadedProject = project;
   return inst;
 }
 
-/** Get the shared DuckDB instance (creates on first call, survives hot reloads) */
-export async function getDb(): Promise<DuckDBInstance> {
-  if (instance) {
+async function switchProject(project: string): Promise<void> {
+  if (!instance) {
+    return;
+  }
+  await ensureCacheDir(project);
+  await ensureSynced(project);
+  await loadSummaryTables(instance, project);
+  await createAnalyticsViews(instance, project);
+  loadedProject = project;
+}
+
+/** Get the shared DuckDB instance. Re-materializes tables on project switches. */
+export async function getDb(project?: string): Promise<DuckDBInstance> {
+  const activeProject = await getActiveProject(project);
+
+  if (instance && loadedProject === activeProject) {
     return instance;
   }
-  if (!initPromise) {
-    initPromise = createInstance().then((inst) => {
+
+  if (!instance && !initPromise) {
+    initPromise = createInstance(activeProject).then((inst) => {
       instance = inst;
-      globalForDb.__duckdb = inst;
-      globalForDb.__duckdbInit = undefined;
+      initPromise = undefined;
       startBackgroundRefresh();
       return inst;
     });
-    globalForDb.__duckdbInit = initPromise;
+    return initPromise;
   }
-  return initPromise;
+
+  if (initPromise) {
+    const inst = await initPromise;
+    if (loadedProject !== activeProject) {
+      await switchProject(activeProject);
+    }
+    return inst;
+  }
+
+  await switchProject(activeProject);
+  if (!instance) {
+    throw new Error("DuckDB instance unavailable");
+  }
+  return instance;
 }
 
-/**
- * Run a SQL query and return results as an array of plain objects.
- * Uses getRowObjectsJson() for clean JSON-compatible output.
- * Returns Record<string, unknown>[] — callers should validate/narrow the shape.
- */
+/** Run a SQL query and return rows as plain objects. */
 export async function query(
   sql: string,
+  project?: string,
 ): Promise<Record<string, unknown>[]> {
-  const db = await getDb();
+  const db = await getDb(project);
   const conn = await db.connect();
   try {
     const result = await conn.run(sql);
@@ -503,22 +633,17 @@ export async function query(
   }
 }
 
-/**
- * Run a parameterized SQL query. Binds are positional ($1, $2, ...).
- * Each bind value is {type, value} so we can call the right bind method.
- *
- * Use this for every query that includes user-supplied filter values
- * (environment name, model name, trajectory ID, limit, offset).
- */
 export type BindValue =
   | { type: "varchar"; value: string }
   | { type: "integer"; value: number };
 
+/** Run a parameterized SQL query. */
 export async function queryParams(
   sql: string,
   binds: BindValue[],
+  project?: string,
 ): Promise<Record<string, unknown>[]> {
-  const db = await getDb();
+  const db = await getDb(project);
   const conn = await db.connect();
   try {
     const prepared = await conn.prepare(sql);
@@ -527,13 +652,10 @@ export async function queryParams(
       if (!bind) {
         continue;
       }
-      switch (bind.type) {
-        case "varchar":
-          prepared.bindVarchar(index + 1, bind.value);
-          break;
-        case "integer":
-          prepared.bindInteger(index + 1, bind.value);
-          break;
+      if (bind.type === "varchar") {
+        prepared.bindVarchar(index + 1, bind.value);
+      } else {
+        prepared.bindInteger(index + 1, bind.value);
       }
     }
     const result = await prepared.run();
@@ -543,15 +665,12 @@ export async function queryParams(
   }
 }
 
-/**
- * Check whether the materialized summary tables exist in DuckDB.
- * The data layer uses this to decide between the fast path (summary tables)
- * and the slow path (glob scan of raw parquet files).
- */
-export async function hasSummaryTables(): Promise<boolean> {
+/** Whether trajectory_summary exists and has rows. */
+export async function hasSummaryTables(project?: string): Promise<boolean> {
   try {
     const rows = await query(
       "SELECT COUNT(*) AS n FROM trajectory_summary LIMIT 1",
+      project,
     );
     return rows.length > 0 && Number(rows[0]?.n) > 0;
   } catch {
@@ -559,42 +678,142 @@ export async function hasSummaryTables(): Promise<boolean> {
   }
 }
 
-/**
- * Re-run S3 sync and reload summary tables + materialized analytics tables.
- * Call from POST /api/refresh to pick up new data.
- */
-export async function refreshData(): Promise<void> {
-  synced = false;
-  // Delete sync stamp so ensureSynced actually runs
+/** Re-sync from S3 and reload summary/materialized tables. */
+export async function refreshData(project?: string): Promise<void> {
+  const activeProject = await getActiveProject(project);
+  syncedProjects.delete(activeProject);
   try {
-    unlinkSync(SYNC_STAMP_PATH);
+    await rm(syncStampPath(activeProject));
   } catch {
-    // file may not exist
+    // ignore
   }
-  ensureSynced();
-  const db = await getDb();
-  await loadSummaryTables(db);
-  await createAnalyticsViews(db);
+
+  await ensureSynced(activeProject);
+  const db = await getDb(activeProject);
+  await loadSummaryTables(db, activeProject);
+  await createAnalyticsViews(db, activeProject);
 }
 
-// ---------------------------------------------------------------------------
-// Background refresh — keeps materialized tables fresh without blocking UI
-// ---------------------------------------------------------------------------
-
-const BACKGROUND_REFRESH_MS = 5 * 60_000; // every 5 minutes
-
-/** Start periodic background refresh (idempotent, survives hot reloads) */
 function startBackgroundRefresh(): void {
-  if (globalForDb.__duckdbRefreshInterval) {
+  if (refreshInterval) {
     return;
   }
-  globalForDb.__duckdbRefreshInterval = setInterval(() => {
-    refreshData().catch((err) => {
-      console.warn("[db] Background refresh failed:", err);
+
+  refreshInterval = setInterval(() => {
+    if (!loadedProject) {
+      return;
+    }
+    refreshData(loadedProject).catch((error) => {
+      console.warn("[db] Background refresh failed:", error);
     });
   }, BACKGROUND_REFRESH_MS);
-  // Don't prevent process exit
-  if (globalForDb.__duckdbRefreshInterval.unref) {
-    globalForDb.__duckdbRefreshInterval.unref();
+
+  if (refreshInterval.unref) {
+    refreshInterval.unref();
   }
+}
+
+function runAwsCommand(args: string[], input?: string): string {
+  const output = execFileSync("aws", args, {
+    encoding: "utf8",
+    env: awsEnv(),
+    input,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  return output;
+}
+
+/** List all project prefixes and hydrate project.json metadata. */
+export async function listProjects(): Promise<ProjectMeta[]> {
+  if (!isS3Configured()) {
+    return [];
+  }
+
+  const prefix = getPrefix();
+  let raw = "";
+  try {
+    raw = runAwsCommand([
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      prefix,
+      "--prefix",
+      "project/",
+      "--delimiter",
+      "/",
+      "--output",
+      "json",
+    ]);
+  } catch {
+    return [];
+  }
+
+  let payload: { CommonPrefixes?: Array<{ Prefix?: string }> };
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+
+  const names = (payload.CommonPrefixes ?? [])
+    .map((entry) => entry.Prefix ?? "")
+    .map((entry) => entry.replace(/^project\//, "").replace(/\/$/, ""))
+    .filter((entry) => entry.length > 0);
+
+  const metas = await Promise.all(names.map((name) => getProjectMeta(name)));
+  return metas
+    .filter((meta): meta is ProjectMeta => meta !== undefined)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Load project.json metadata for a project. */
+export async function getProjectMeta(
+  project: string,
+): Promise<ProjectMeta | undefined> {
+  if (!isS3Configured()) {
+    return undefined;
+  }
+
+  const name = validateProjectName(project);
+  const prefix = getPrefix();
+  const uri = `s3://${prefix}/project/${name}/project.json`;
+  try {
+    const raw = runAwsCommand(["s3", "cp", uri, "-"]);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    const created = String(Reflect.get(parsed, "created_at") ?? "");
+    const updated = String(Reflect.get(parsed, "updated_at") ?? "");
+    const rawDescription = Reflect.get(parsed, "description");
+    return {
+      name,
+      description:
+        typeof rawDescription === "string" ? rawDescription : undefined,
+      created_at: created,
+      updated_at: updated,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Write project.json metadata for a project. */
+export async function createProjectMeta(
+  project: string,
+  meta: { description?: string },
+): Promise<ProjectMeta> {
+  const name = validateProjectName(project);
+  const now = new Date().toISOString();
+  const payload: ProjectMeta = {
+    name,
+    description: meta.description,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const prefix = getPrefix();
+  const uri = `s3://${prefix}/project/${name}/project.json`;
+  runAwsCommand(["s3", "cp", "-", uri], JSON.stringify(payload, null, 2));
+  return payload;
 }

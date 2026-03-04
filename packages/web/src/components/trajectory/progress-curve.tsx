@@ -204,7 +204,7 @@ export function ProgressCurve({
   const xTimeTicks = getXTimeTicks(totalMinutes);
 
   return (
-    <div className="w-full px-[6px] pt-[6px] pb-[2px]">
+    <div className="w-full px-1.5 pt-1.5 pb-0.5">
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         className="w-full"

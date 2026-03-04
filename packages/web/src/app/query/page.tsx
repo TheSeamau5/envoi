@@ -6,9 +6,11 @@
 import { getSchemaInfo } from "@/lib/server/data";
 import { QUERY_TEMPLATES } from "@/lib/query-templates";
 import { QueryClient } from "@/components/query/query-client";
+import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function QueryPage() {
-  const schema = await getSchemaInfo();
+  const project = await requireActiveProject();
+  const schema = await getSchemaInfo(project);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -17,7 +19,11 @@ export default async function QueryPage() {
           SQL Console
         </span>
       </div>
-      <QueryClient schema={schema} builtinTemplates={QUERY_TEMPLATES} />
+      <QueryClient
+        schema={schema}
+        builtinTemplates={QUERY_TEMPLATES}
+        project={project}
+      />
     </div>
   );
 }

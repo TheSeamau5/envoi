@@ -34,6 +34,7 @@ import { CodePanel } from "./code-panel";
 
 type TrajectoryDetailProps = {
   trajectory: Trajectory;
+  project: string;
   /** Server-read initial values — eliminates FOUC on panel layout */
   initialRightPanelOpen: boolean;
   initialDividerPct: number;
@@ -45,10 +46,11 @@ type RightTab = "steps" | "code" | "tests";
 /** Main trajectory detail view with resizable split layout */
 export function TrajectoryDetail({
   trajectory: initialTrajectory,
+  project,
   initialRightPanelOpen,
   initialDividerPct,
 }: TrajectoryDetailProps) {
-  const { trajectory, isLive } = useLiveTrajectory(initialTrajectory);
+  const { trajectory, isLive } = useLiveTrajectory(initialTrajectory, project);
   const { commits } = trajectory;
   const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
   const totalTests = computeTotalTests(suites);
@@ -70,13 +72,16 @@ export function TrajectoryDetail({
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
 
   /** Code history — fetched lazily from code_snapshots.parquet */
-  const [codeHistory, setCodeHistory] = useState<Record<number, CodeSnapshot>>();
+  const [codeHistory, setCodeHistory] =
+    useState<Record<number, CodeSnapshot>>();
 
   useEffect(() => {
     let cancelled = false;
     async function fetchCodeHistory() {
       try {
-        const response = await fetch(`/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history`);
+        const response = await fetch(
+          `/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history?project=${encodeURIComponent(project)}`,
+        );
         if (!response.ok) {
           return;
         }
@@ -97,14 +102,16 @@ export function TrajectoryDetail({
     return () => {
       cancelled = true;
     };
-  }, [trajectory.id]);
+  }, [trajectory.id, project]);
 
   /**
    * Right panel open/close + divider position.
    * Initial values come from server-read cookies so SSR matches hydration.
    * On change we write back to cookies for the next SSR pass.
    */
-  const [rightPanelOpen, setRightPanelOpenRaw] = useState(initialRightPanelOpen);
+  const [rightPanelOpen, setRightPanelOpenRaw] = useState(
+    initialRightPanelOpen,
+  );
   const [dividerPct, setDividerPctRaw] = useState(initialDividerPct);
   const [dragging, setDragging] = useState(false);
 
@@ -120,7 +127,8 @@ export function TrajectoryDetail({
     dividerWidth: rightPanelOpen ? 9 : 0,
     rightOpacity: rightPanelOpen ? 1 : 0,
     config: { tension: 300, friction: 30 },
-    immediate: (key: string) => dragging && (key === "leftWidth" || key === "rightWidth"),
+    immediate: (key: string) =>
+      dragging && (key === "leftWidth" || key === "rightWidth"),
   });
 
   /** Refs for drag + keyboard */
@@ -308,13 +316,13 @@ export function TrajectoryDetail({
           />
 
           {/* Suite filter pills + critical filter toggle */}
-          <div className="flex flex-nowrap items-center gap-[4px] overflow-x-auto border-b border-envoi-border px-[14px] py-[6px]">
+          <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-envoi-border px-3.5 py-1.5">
             {isLive && <LiveBadge />}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   onClick={() => setActiveSuite("all")}
-                  className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
                     activeSuite === "all"
                       ? "bg-envoi-text text-white"
                       : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -330,7 +338,7 @@ export function TrajectoryDetail({
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => setActiveSuite(suite.name)}
-                    className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
                       activeSuite === suite.name
                         ? "bg-envoi-text text-white"
                         : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -339,19 +347,21 @@ export function TrajectoryDetail({
                     {suite.name}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>{suite.name}: {suite.total} tests</TooltipContent>
+                <TooltipContent>
+                  {suite.name}: {suite.total} tests
+                </TooltipContent>
               </Tooltip>
             ))}
 
             {/* Separator + critical filter */}
             {criticalityMap.size > 0 && (
               <>
-                <div className="mx-1 h-[14px] w-px bg-envoi-border-light" />
+                <div className="mx-1 h-3.5 w-px bg-envoi-border-light" />
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
                       onClick={() => setShowCriticalOnly((prev) => !prev)}
-                      className={`shrink-0 rounded-full px-[8px] py-[2px] text-[13px] font-semibold transition-colors ${
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
                         showCriticalOnly
                           ? "bg-envoi-accent text-white"
                           : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
@@ -360,7 +370,10 @@ export function TrajectoryDetail({
                       critical ({criticalityMap.size})
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent>Show only critical commits (large deltas, suite transitions, regression recoveries)</TooltipContent>
+                  <TooltipContent>
+                    Show only critical commits (large deltas, suite transitions,
+                    regression recoveries)
+                  </TooltipContent>
                 </Tooltip>
               </>
             )}
@@ -418,10 +431,8 @@ export function TrajectoryDetail({
         <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-envoi-border-light" />
         {/* Capsule handle — turns orange on hover/drag */}
         <div
-          className={`relative z-10 h-[36px] w-[4px] rounded-full transition-colors ${
-            dragging
-              ? ""
-              : "bg-envoi-border group-hover:bg-envoi-accent"
+          className={`relative z-10 h-9 w-1 rounded-full transition-colors ${
+            dragging ? "" : "bg-envoi-border group-hover:bg-envoi-accent"
           }`}
           style={dragging ? { background: T.accent } : undefined}
         />
@@ -436,7 +447,7 @@ export function TrajectoryDetail({
         }}
       >
         {/* Tab bar */}
-        <div className="flex h-[41px] shrink-0 items-stretch border-b border-envoi-border">
+        <div className="flex h-10.25 shrink-0 items-stretch border-b border-envoi-border">
           <TabButton
             label="Steps"
             isActive={rightTab === "steps"}
@@ -472,7 +483,11 @@ export function TrajectoryDetail({
         ) : rightTab === "code" ? (
           <CodePanel commit={enrichedCommit ?? selectedCommit} />
         ) : (
-          <TestsPanel commit={selectedCommit} suites={suites} totalTests={totalTests} />
+          <TestsPanel
+            commit={selectedCommit}
+            suites={suites}
+            totalTests={totalTests}
+          />
         )}
       </animated.div>
     </div>
@@ -496,10 +511,10 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center px-[14px] text-[12px] font-semibold uppercase tracking-[0.06em] transition-colors ${
+      className={`flex items-center px-3.5 text-[12px] font-semibold uppercase tracking-[0.06em] transition-colors ${
         isActive
-          ? "border-b-[2px] border-envoi-accent text-envoi-accent"
-          : "border-b-[2px] border-transparent text-envoi-text-dim hover:text-envoi-text"
+          ? "border-b-2 border-envoi-accent text-envoi-accent"
+          : "border-b-2 border-transparent text-envoi-text-dim hover:text-envoi-text"
       }`}
     >
       {label}
@@ -510,10 +525,10 @@ function TabButton({
 /** Pulsing green dot + LIVE label shown when the trajectory is still running */
 function LiveBadge() {
   return (
-    <span className="mr-[4px] flex shrink-0 items-center gap-[5px] rounded-full bg-emerald-50 px-[8px] py-[2px] text-[11px] font-bold uppercase tracking-[0.08em] text-emerald-700">
-      <span className="relative flex h-[7px] w-[7px]">
+    <span className="mr-1 flex shrink-0 items-center gap-1.25 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold uppercase tracking-[0.08em] text-emerald-700">
+      <span className="relative flex h-1.75 w-1.75">
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
-        <span className="relative inline-flex h-[7px] w-[7px] rounded-full bg-emerald-500" />
+        <span className="relative inline-flex h-1.75 w-1.75 rounded-full bg-emerald-500" />
       </span>
       live
     </span>

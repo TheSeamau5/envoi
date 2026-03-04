@@ -10,14 +10,17 @@ import {
   getParetoData,
 } from "@/lib/server/data";
 import { PortfolioClient } from "@/components/portfolio/portfolio-client";
+import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function PortfolioPage() {
-  const [portfolioRows, environments, environmentRows, paretoPoints] = await Promise.all([
-    getPortfolioData(),
-    getEnvironments(),
-    getPortfolioEnvironmentData(),
-    getParetoData(),
-  ]);
+  const project = await requireActiveProject();
+  const [portfolioRows, environments, environmentRows, paretoPoints] =
+    await Promise.all([
+      getPortfolioData(project),
+      getEnvironments(project),
+      getPortfolioEnvironmentData(project),
+      getParetoData(undefined, project),
+    ]);
 
   const environmentNames = environments.map((env) => env.environment);
 

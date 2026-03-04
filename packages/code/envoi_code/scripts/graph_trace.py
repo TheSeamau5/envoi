@@ -840,12 +840,23 @@ async def async_main() -> None:
     )
     parser.add_argument(
         "trajectory_id",
-        help="Trajectory ID under trajectories/<id>/ in S3.",
+        help="Trajectory ID under project/<name>/trajectories/<id>/ in S3.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default=os.environ.get("AWS_S3_PREFIX") or os.environ.get("AWS_S3_BUCKET"),
+        help="S3 bucket/prefix.",
     )
     parser.add_argument(
         "--bucket",
-        default=os.environ.get("AWS_S3_BUCKET"),
-        help="S3 bucket (default: AWS_S3_BUCKET env var).",
+        dest="prefix",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--project",
+        default=os.environ.get("ENVOI_PROJECT") or "default",
+        help="Project namespace used for artifact paths.",
     )
     parser.add_argument(
         "--part",
@@ -866,11 +877,24 @@ async def async_main() -> None:
         help="Checkout destination when --part is set.",
     )
     args = parser.parse_args()
+    if not args.prefix:
+        parser.error("AWS_S3_PREFIX environment variable is required or pass --prefix")
 
-    trace_source = artifact_uri(args.bucket, args.trajectory_id, "trace.parquet")
+    project = (args.project or "default").strip() or "default"
+    trace_source = artifact_uri(
+        args.prefix,
+        project,
+        args.trajectory_id,
+        "trace.parquet",
+    )
 
     if args.part is not None:
-        bundle_source = artifact_uri(args.bucket, args.trajectory_id, "repo.bundle")
+        bundle_source = artifact_uri(
+            args.prefix,
+            project,
+            args.trajectory_id,
+            "repo.bundle",
+        )
         scratch = Path(tempfile.mkdtemp(prefix="graph-trace-artifacts-")).resolve()
         try:
             trace_path = download_if_needed(trace_source, scratch)

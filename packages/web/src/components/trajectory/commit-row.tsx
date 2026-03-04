@@ -158,14 +158,14 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
     <div
       ref={rowRef}
       onClick={() => onSelect(commit.index)}
-      className="flex cursor-pointer items-center gap-3 border-b border-envoi-border-light px-[14px] py-[10px] transition-colors hover:bg-envoi-surface"
+      className="flex cursor-pointer items-center gap-3 border-b border-envoi-border-light px-3.5 py-2.5 transition-colors hover:bg-envoi-surface"
       style={{
         borderLeft: `3px solid ${leftBorderColor}`,
         background: bgColor,
       }}
     >
       {/* Hash + turn */}
-      <div className="flex min-w-[90px] flex-col gap-[2px]">
+      <div className="flex min-w-22.5 flex-col gap-0.5">
         <span className="text-[13px] font-semibold text-envoi-text">
           {commit.hash.slice(0, 8)}
         </span>
@@ -175,8 +175,8 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       </div>
 
       {/* Test delta: +passed / -broken */}
-      <div className="flex min-w-[70px] flex-col items-end gap-[2px]">
-        <div className="flex items-center gap-[6px]">
+      <div className="flex min-w-17.5 flex-col items-end gap-0.5">
+        <div className="flex items-center gap-1.5">
           {newlyFixed > 0 && (
             <span className="text-[13px] font-semibold" style={{ color: T.greenDark }}>
               +{newlyFixed}
@@ -199,8 +199,8 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       </div>
 
       {/* LOC delta: +added / -removed */}
-      <div className="flex min-w-[70px] flex-col items-end gap-[2px]">
-        <div className="flex items-center gap-[6px]">
+      <div className="flex min-w-17.5 flex-col items-end gap-0.5">
+        <div className="flex items-center gap-1.5">
           {totalAdded > 0 && (
             <span className="text-[13px] font-medium" style={{ color: T.greenDark }}>
               +{totalAdded}
@@ -223,7 +223,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       </div>
 
       {/* Mini suite bars */}
-      <div className="flex flex-1 items-center gap-[6px]">
+      <div className="flex flex-1 items-center gap-1.5">
           {suitesToShow.map((suite) => {
             const passed = commit.suiteState[suite.name] ?? 0;
             const ratio = passed / suite.total;
@@ -233,7 +233,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
                 <TooltipTrigger asChild>
                   <div className="flex-1">
                     <div
-                      className="h-[4px] rounded-full"
+                      className="h-1 rounded-full"
                       style={{ background: suiteColor?.bg ?? T.borderLight }}
                     >
                       <div
@@ -255,12 +255,12 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       </div>
 
       {/* Milestone + criticality badges */}
-      <div className="flex items-center gap-[6px]">
+      <div className="flex items-center gap-1.5">
         {isCritical && (
           <Tooltip>
             <TooltipTrigger asChild>
               <span
-                className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
+                className="flex items-center gap-0.75 rounded-[3px] px-1.25 py-px text-[13px] font-medium"
                 style={{ color: T.accent, background: T.accentBg }}
               >
                 <Diamond size={9} />
@@ -271,7 +271,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         )}
         {commit.isMilestone && (
           <span
-            className="flex items-center gap-[3px] rounded-[3px] px-[5px] py-[1px] text-[13px] font-medium"
+            className="flex items-center gap-0.75 rounded-[3px] px-1.25 py-px text-[13px] font-medium"
             style={{ color: T.gold, background: T.goldBg }}
           >
             <Star size={9} />

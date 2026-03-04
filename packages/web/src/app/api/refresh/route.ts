@@ -6,13 +6,22 @@
  * see fresh data.
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { refreshData } from "@/lib/server/db";
 import { clearCache } from "@/lib/server/cache";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
-export async function POST() {
+export async function POST(request: NextRequest) {
   try {
-    await refreshData();
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
+    await refreshData(project);
     clearCache();
     return NextResponse.json({ ok: true });
   } catch (error) {

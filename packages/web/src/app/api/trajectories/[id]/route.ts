@@ -8,14 +8,23 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getTrajectoryById } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
+    const project = await getProjectFromRequest(request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
     const { id } = await params;
     const fresh = request.nextUrl.searchParams.has("bust");
-    const trajectory = await getTrajectoryById(id, { fresh });
+    const trajectory = await getTrajectoryById(id, { fresh, project });
 
     if (!trajectory) {
       return NextResponse.json(

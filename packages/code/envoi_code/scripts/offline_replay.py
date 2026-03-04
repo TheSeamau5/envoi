@@ -99,8 +99,31 @@ def load_trace(path: Path) -> dict[str, Any]:
     return data
 
 
-def artifact_uri(bucket: str, trajectory_id: str, filename: str) -> str:
-    return f"s3://{bucket}/trajectories/{trajectory_id}/{filename}"
+def normalize_prefix(raw_value: str) -> str:
+    value = raw_value.strip()
+    if value.startswith("s3://"):
+        value = value[len("s3://") :]
+    value = value.strip("/")
+    if not value:
+        return ""
+    if "/" in value:
+        raise ValueError(
+            "AWS_S3_PREFIX must be a bucket name or s3://<bucket> (without path)"
+        )
+    return value
+
+
+def artifact_uri(
+    prefix: str,
+    project: str,
+    trajectory_id: str,
+    filename: str,
+) -> str:
+    normalized_prefix = normalize_prefix(prefix)
+    return (
+        f"s3://{normalized_prefix}/project/"
+        f"{project}/trajectories/{trajectory_id}/{filename}"
+    )
 
 
 def find_free_port() -> int:
@@ -934,13 +957,25 @@ async def async_main() -> None:
         "--trajectory-id",
         help=(
             "If provided, trace and bundle are resolved as "
-            "s3://<bucket>/trajectories/<trajectory-id>/trace.parquet and repo.bundle"
+            "s3://<prefix>/project/<project>/trajectories/<trajectory-id>/trace.parquet "
+            "and repo.bundle"
         ),
     )
     parser.add_argument(
+        "--prefix",
+        default=os.environ.get("AWS_S3_PREFIX") or os.environ.get("AWS_S3_BUCKET"),
+        help="S3 bucket/prefix used with --trajectory-id.",
+    )
+    parser.add_argument(
         "--bucket",
-        default=os.environ.get("AWS_S3_BUCKET"),
-        help="S3 bucket used with --trajectory-id (default: AWS_S3_BUCKET env var).",
+        dest="prefix",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--project",
+        default=os.environ.get("ENVOI_PROJECT") or "default",
+        help="Project namespace used for artifact paths.",
     )
     parser.add_argument(
         "--output",
@@ -983,8 +1018,23 @@ async def async_main() -> None:
     args = parser.parse_args()
 
     if args.trajectory_id:
-        trace_source = artifact_uri(args.bucket, args.trajectory_id, "trace.parquet")
-        bundle_source = artifact_uri(args.bucket, args.trajectory_id, "repo.bundle")
+        if not args.prefix:
+            parser.error(
+                "AWS_S3_PREFIX environment variable is required or pass --prefix",
+            )
+        project = (args.project or "default").strip() or "default"
+        trace_source = artifact_uri(
+            args.prefix,
+            project,
+            args.trajectory_id,
+            "trace.parquet",
+        )
+        bundle_source = artifact_uri(
+            args.prefix,
+            project,
+            args.trajectory_id,
+            "repo.bundle",
+        )
     else:
         trace_source = args.trace
         bundle_source = args.bundle

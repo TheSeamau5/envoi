@@ -154,7 +154,7 @@ export function ParetoScatter({ points, environments }: ParetoScatterProps) {
 
   if (filteredPoints.length === 0) {
     return (
-      <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
+      <div className="flex items-center justify-center py-10 text-[13px] text-envoi-text-dim">
         No trajectory data for Pareto analysis
       </div>
     );
@@ -163,13 +163,13 @@ export function ParetoScatter({ points, environments }: ParetoScatterProps) {
   return (
     <div>
       {/* Environment filter */}
-      <div className="mb-3 flex items-center gap-[6px]">
+      <div className="mb-3 flex items-center gap-1.5">
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
           Environment:
         </span>
         <button
           onClick={() => setSelectedEnv("all")}
-          className={`rounded-full px-[8px] py-[2px] text-[12px] font-semibold transition-colors ${
+          className={`rounded-full px-2 py-0.5 text-[12px] font-semibold transition-colors ${
             selectedEnv === "all"
               ? "bg-envoi-text text-white"
               : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light"
@@ -181,7 +181,7 @@ export function ParetoScatter({ points, environments }: ParetoScatterProps) {
           <button
             key={env}
             onClick={() => setSelectedEnv(env)}
-            className={`rounded-full px-[8px] py-[2px] text-[12px] font-semibold transition-colors ${
+            className={`rounded-full px-2 py-0.5 text-[12px] font-semibold transition-colors ${
               selectedEnv === env
                 ? "bg-envoi-text text-white"
                 : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light"
@@ -320,18 +320,18 @@ export function ParetoScatter({ points, environments }: ParetoScatterProps) {
       {/* Model legend */}
       <div className="mt-3 flex flex-wrap items-center gap-3">
         {Array.from(modelColorMap.entries()).map(([model, color]) => (
-          <div key={model} className="flex items-center gap-[6px]">
+          <div key={model} className="flex items-center gap-1.5">
             <div
-              className="h-[8px] w-[8px] rounded-full"
+              className="h-2 w-2 rounded-full"
               style={{ background: color }}
             />
             <span className="text-[11px] text-envoi-text-muted">{model}</span>
           </div>
         ))}
         {frontier.length >= 2 && (
-          <div className="flex items-center gap-[6px]">
+          <div className="flex items-center gap-1.5">
             <div
-              className="h-px w-[16px]"
+              className="h-px w-4"
               style={{ borderTop: `1.5px dashed ${T.accent}` }}
             />
             <span className="text-[11px] text-envoi-text-muted">Pareto frontier</span>

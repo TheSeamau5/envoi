@@ -126,10 +126,10 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
   return (
     <div className="flex-1 overflow-auto">
       {/* View tabs */}
-      <div className="flex items-center gap-[2px] border-b border-envoi-border bg-envoi-bg px-4 py-[6px]">
+      <div className="flex items-center gap-0.5 border-b border-envoi-border bg-envoi-bg px-4 py-1.5">
         <button
           onClick={() => setActiveTab("environments")}
-          className={`rounded-md px-[10px] py-[4px] text-[12px] font-semibold transition-colors ${
+          className={`rounded-md px-2.5 py-1 text-[12px] font-semibold transition-colors ${
             activeTab === "environments"
               ? "bg-envoi-text text-white"
               : "text-envoi-text-dim hover:bg-envoi-surface"
@@ -139,7 +139,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
         </button>
         <button
           onClick={() => setActiveTab("rankings")}
-          className={`rounded-md px-[10px] py-[4px] text-[12px] font-semibold transition-colors ${
+          className={`rounded-md px-2.5 py-1 text-[12px] font-semibold transition-colors ${
             activeTab === "rankings"
               ? "bg-envoi-text text-white"
               : "text-envoi-text-dim hover:bg-envoi-surface"
@@ -149,7 +149,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
         </button>
         <button
           onClick={() => setActiveTab("pareto")}
-          className={`rounded-md px-[10px] py-[4px] text-[12px] font-semibold transition-colors ${
+          className={`rounded-md px-2.5 py-1 text-[12px] font-semibold transition-colors ${
             activeTab === "pareto"
               ? "bg-envoi-text text-white"
               : "text-envoi-text-dim hover:bg-envoi-surface"
@@ -167,31 +167,31 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
               <thead>
                 <tr>
                   <th
-                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted hover:text-envoi-text"
+                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-left font-semibold text-envoi-text-muted hover:text-envoi-text"
                     onClick={() => handleEnvSort("name")}
                   >
                     Environment{sortArrow("name")}
                   </th>
                   <th
-                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
+                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
                     onClick={() => handleEnvSort("bestScore")}
                   >
                     Best Score{sortArrow("bestScore")}
                   </th>
-                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted">
+                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-left font-semibold text-envoi-text-muted">
                     Best Model
                   </th>
-                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-right font-semibold text-envoi-text-muted">
+                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-right font-semibold text-envoi-text-muted">
                     Median Pass Rate
                   </th>
                   <th
-                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
+                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
                     onClick={() => handleEnvSort("runCount")}
                   >
                     Runs{sortArrow("runCount")}
                   </th>
                   <th
-                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
+                    className="sticky top-0 cursor-pointer border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-right font-semibold text-envoi-text-muted hover:text-envoi-text"
                     onClick={() => handleEnvSort("cost")}
                   >
                     Total Tokens{sortArrow("cost")}
@@ -206,13 +206,13 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
                       key={envRow.environment}
                       className={rowIndex % 2 === 0 ? "bg-envoi-bg" : "bg-envoi-surface"}
                     >
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] font-semibold text-envoi-text">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 font-semibold text-envoi-text">
                         {envRow.environment}
                       </td>
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] text-right">
-                        <div className="flex items-center justify-end gap-[8px]">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
                           <div
-                            className="h-[6px] rounded-full"
+                            className="h-1.5 rounded-full"
                             style={{
                               width: `${Math.max(4, bestRate * 100)}%`,
                               maxWidth: 80,
@@ -224,16 +224,16 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
                           </span>
                         </div>
                       </td>
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] text-envoi-text-muted">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 text-envoi-text-muted">
                         {envRow.bestModel}
                       </td>
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] text-right text-envoi-text-muted">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 text-right text-envoi-text-muted">
                         {(envRow.medianPassRate * 100).toFixed(1)}%
                       </td>
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] text-right text-envoi-text-muted">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 text-right text-envoi-text-muted">
                         {envRow.runCount}
                       </td>
-                      <td className="border-b border-envoi-border-light px-[14px] py-[8px] text-right text-envoi-text-muted">
+                      <td className="border-b border-envoi-border-light px-3.5 py-2 text-right text-envoi-text-muted">
                         {formatTokens(envRow.totalTokens)}
                       </td>
                     </tr>
@@ -243,7 +243,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
             </table>
 
             {sortedEnvRows.length === 0 && (
-              <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
+              <div className="flex items-center justify-center py-10 text-[13px] text-envoi-text-dim">
                 No environment data available
               </div>
             )}
@@ -256,19 +256,19 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
             <table className="w-full border-collapse text-[12px]">
               <thead>
                 <tr>
-                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted">
+                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-left font-semibold text-envoi-text-muted">
                     Rank
                   </th>
-                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted">
+                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-left font-semibold text-envoi-text-muted">
                     Model
                   </th>
-                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-right font-semibold text-envoi-text-muted">
+                  <th className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-right font-semibold text-envoi-text-muted">
                     Avg Rank
                   </th>
                   {environments.map((env) => (
                     <th
                       key={env}
-                      className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-[14px] py-[6px] text-left font-semibold text-envoi-text-muted"
+                      className="sticky top-0 border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5 text-left font-semibold text-envoi-text-muted"
                     >
                       {env}
                     </th>
@@ -281,7 +281,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
                     key={row.model}
                     className={rowIndex % 2 === 0 ? "bg-envoi-bg" : "bg-envoi-surface"}
                   >
-                    <td className="border-b border-envoi-border-light px-[14px] py-[6px]">
+                    <td className="border-b border-envoi-border-light px-3.5 py-1.5">
                       <span
                         className="font-semibold"
                         style={{ color: rankColor(rowIndex + 1) }}
@@ -289,10 +289,10 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
                         #{rowIndex + 1}
                       </span>
                     </td>
-                    <td className="border-b border-envoi-border-light px-[14px] py-[6px] font-semibold text-envoi-text">
+                    <td className="border-b border-envoi-border-light px-3.5 py-1.5 font-semibold text-envoi-text">
                       {row.model}
                     </td>
-                    <td className="border-b border-envoi-border-light px-[14px] py-[6px] text-right text-envoi-text-muted">
+                    <td className="border-b border-envoi-border-light px-3.5 py-1.5 text-right text-envoi-text-muted">
                       {row.avgRank.toFixed(1)}
                     </td>
                     {environments.map((env) => {
@@ -301,11 +301,11 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
                       return (
                         <td
                           key={env}
-                          className="border-b border-envoi-border-light px-[14px] py-[6px]"
+                          className="border-b border-envoi-border-light px-3.5 py-1.5"
                         >
-                          <div className="flex items-center gap-[8px]">
+                          <div className="flex items-center gap-2">
                             <div
-                              className="h-[6px] rounded-full"
+                              className="h-1.5 rounded-full"
                               style={{
                                 width: `${Math.max(2, passRate * 100)}%`,
                                 maxWidth: 100,
@@ -325,7 +325,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
             </table>
 
             {rows.length === 0 && (
-              <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
+              <div className="flex items-center justify-center py-10 text-[13px] text-envoi-text-dim">
                 No model ranking data available
               </div>
             )}
@@ -338,7 +338,7 @@ export function PortfolioClient({ rows, environments, environmentRows, paretoPoi
             {paretoPoints.length > 0 ? (
               <ParetoScatter points={paretoPoints} environments={paretoEnvironments} />
             ) : (
-              <div className="flex items-center justify-center py-[40px] text-[13px] text-envoi-text-dim">
+              <div className="flex items-center justify-center py-10 text-[13px] text-envoi-text-dim">
                 No Pareto data available
               </div>
             )}

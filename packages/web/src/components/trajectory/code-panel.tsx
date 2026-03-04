@@ -27,14 +27,17 @@ export function CodePanel({ commit }: CodePanelProps) {
     }
     const firstChanged = commit.changedFiles[0];
     if (firstChanged) {
-      setSelectedFile(firstChanged.path);
+      queueMicrotask(() => {
+        setSelectedFile(firstChanged.path);
+      });
     } else {
       /** Fallback to first file in snapshot */
       const allFiles = Object.keys(commit.codeSnapshot);
-      setSelectedFile(allFiles[0]);
+      queueMicrotask(() => {
+        setSelectedFile(allFiles[0]);
+      });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commit.index, commit.changedFiles, commit.codeSnapshot]);
+  }, [commit.index, commit.changedFiles, commit.codeSnapshot, selectedFile]);
 
   const fileSnapshot = selectedFile
     ? commit.codeSnapshot[selectedFile]

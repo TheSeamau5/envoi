@@ -8,13 +8,22 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCodeHistory } from "@/lib/server/data";
+import { getProjectFromRequest } from "@/lib/server/project-context";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function GET(_request: NextRequest, { params }: RouteParams) {
   try {
+    const project = await getProjectFromRequest(_request);
+    if (!project) {
+      return NextResponse.json(
+        { error: "Project not selected" },
+        { status: 400 },
+      );
+    }
+
     const { id } = await params;
-    const codeHistory = await getCodeHistory(id);
+    const codeHistory = await getCodeHistory(id, project);
 
     if (codeHistory === undefined) {
       return NextResponse.json(

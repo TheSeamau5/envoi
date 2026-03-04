@@ -13,9 +13,10 @@ import { SetupCompare } from "@/components/compare/setup-compare";
 type SetupsClientProps = {
   /** Summary-level trajectories from the server (fallback while loading) */
   allTraces: Trajectory[];
+  project: string;
 };
 
-export function SetupsClient({ allTraces }: SetupsClientProps) {
+export function SetupsClient({ allTraces, project }: SetupsClientProps) {
   const [fullTraces, setFullTraces] = useState<Trajectory[]>([]);
   const [loading, setLoading] = useState(false);
   const fetched = useRef(false);
@@ -25,8 +26,10 @@ export function SetupsClient({ allTraces }: SetupsClientProps) {
       return;
     }
 
-    setLoading(true);
-    fetch("/api/compare")
+    queueMicrotask(() => {
+      setLoading(true);
+    });
+    fetch(`/api/compare?project=${encodeURIComponent(project)}`)
       .then((res) => res.json())
       .then((data: Trajectory[]) => {
         const active = data.filter((trace) => trace.finalPassed > 0);
@@ -35,8 +38,7 @@ export function SetupsClient({ allTraces }: SetupsClientProps) {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loading, project]);
 
   if (loading) {
     return (
@@ -49,8 +51,6 @@ export function SetupsClient({ allTraces }: SetupsClientProps) {
   }
 
   return (
-    <SetupCompare
-      allTraces={fullTraces.length > 0 ? fullTraces : allTraces}
-    />
+    <SetupCompare allTraces={fullTraces.length > 0 ? fullTraces : allTraces} />
   );
 }

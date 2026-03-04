@@ -23,6 +23,17 @@ export type BrokenTest = {
   error: string;
 };
 
+/** Top-level project metadata for project-scoped dashboards */
+export type Project = {
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+  trajectoryCount: number;
+  environmentCount: number;
+  modelCount: number;
+};
+
 /** Turn-end evaluation results produced by the envoi server */
 export type Evaluation = {
   passedDelta: number;

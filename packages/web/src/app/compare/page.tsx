@@ -3,7 +3,9 @@
  */
 
 import { redirect } from "next/navigation";
+import { requireActiveProject } from "@/lib/server/project-context";
 
-export default function ComparePage() {
-  redirect("/compare/curves");
+export default async function ComparePage() {
+  const project = await requireActiveProject();
+  redirect(`/project/${encodeURIComponent(project)}/compare/curves`);
 }

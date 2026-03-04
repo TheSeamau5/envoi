@@ -6,8 +6,10 @@
 
 import { getAllTrajectories } from "@/lib/server/data";
 import { TrajectoryList } from "@/components/trajectory/trajectory-list";
+import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function TrajectoryListPage() {
-  const allTraces = await getAllTrajectories();
-  return <TrajectoryList trajectories={allTraces} />;
+  const project = await requireActiveProject();
+  const allTraces = await getAllTrajectories({ project });
+  return <TrajectoryList trajectories={allTraces} project={project} />;
 }

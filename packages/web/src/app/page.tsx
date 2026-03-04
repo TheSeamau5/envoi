@@ -1,9 +1,13 @@
-/**
- * Root page — redirects to /compare.
- */
+import { ProjectList } from "@/components/project/project-list";
+import { readLayoutCookies } from "@/lib/cookies";
+import { getProjects } from "@/lib/server/projects";
 
-import { redirect } from "next/navigation";
+/** Root page — project list and project switcher. */
+export default async function RootPage() {
+  const [{ project }, projects] = await Promise.all([
+    readLayoutCookies(),
+    getProjects(),
+  ]);
 
-export default function RootPage() {
-  redirect("/compare");
+  return <ProjectList projects={projects} activeProject={project} />;
 }

@@ -77,20 +77,29 @@ type CompareContextValue = {
   computeTraceTotal: (trace: Trajectory) => number;
 };
 
-const CompareContext = createContext<CompareContextValue | undefined>(undefined);
+const CompareContext = createContext<CompareContextValue | undefined>(
+  undefined,
+);
 
 type CompareProviderProps = {
   allTraces: Trajectory[];
   children: ReactNode;
+  project: string;
 };
 
-export function CompareProvider({ allTraces, children }: CompareProviderProps) {
+export function CompareProvider({
+  allTraces,
+  children,
+  project,
+}: CompareProviderProps) {
   /**
    * Full trajectory data keyed by trace ID, fetched on demand when selected.
    * Summary data from allTraces is sufficient for the sidebar; full data
    * (with commit histories) is needed for progress curves and other tabs.
    */
-  const [fullTrajectories, setFullTrajectories] = useState<Record<string, Trajectory>>({});
+  const [fullTrajectories, setFullTrajectories] = useState<
+    Record<string, Trajectory>
+  >({});
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
 
   /**
@@ -119,13 +128,14 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
         }
       }
       if (Object.keys(cleaned).length > 0) {
-        setColorMap(cleaned);
+        queueMicrotask(() => {
+          setColorMap(cleaned);
+        });
       }
     } catch {
       // Bad data — keep default
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [allTraces]);
 
   /** Persist colorMap to localStorage on every change */
   useEffect(() => {
@@ -152,15 +162,19 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
       return;
     }
 
-    setLoadingIds((prev) => {
-      const next = new Set(prev);
-      for (const id of idsToFetch) {
-        next.add(id);
-      }
-      return next;
+    queueMicrotask(() => {
+      setLoadingIds((prev) => {
+        const next = new Set(prev);
+        for (const id of idsToFetch) {
+          next.add(id);
+        }
+        return next;
+      });
     });
 
-    fetch(`/api/compare?ids=${idsToFetch.join(",")}`)
+    fetch(
+      `/api/compare?project=${encodeURIComponent(project)}&ids=${idsToFetch.join(",")}`,
+    )
       .then((res) => res.json())
       .then((data: Trajectory[]) => {
         setFullTrajectories((prev) => {
@@ -183,8 +197,7 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
           return next;
         });
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds]);
+  }, [fullTrajectories, loadingIds, project, selectedIds]);
 
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
@@ -202,7 +215,8 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
     } else {
       sorted.sort(
         (traceA, traceB) =>
-          new Date(traceB.startedAt).getTime() - new Date(traceA.startedAt).getTime(),
+          new Date(traceB.startedAt).getTime() -
+          new Date(traceA.startedAt).getTime(),
       );
     }
 
@@ -216,7 +230,9 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
         envMap.set(env, [trace]);
       }
     }
-    return new Map([...envMap.entries()].sort(([envA], [envB]) => envA.localeCompare(envB)));
+    return new Map(
+      [...envMap.entries()].sort(([envA], [envB]) => envA.localeCompare(envB)),
+    );
   }, [filteredTraces, sortBy]);
 
   /** Flat sorted list for keyboard navigation */
@@ -232,7 +248,11 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
   const selectedTraces = useMemo(
     () =>
       selectedIds
-        .map((traceId) => fullTrajectories[traceId] ?? allTraces.find((trace) => trace.id === traceId))
+        .map(
+          (traceId) =>
+            fullTrajectories[traceId] ??
+            allTraces.find((trace) => trace.id === traceId),
+        )
         .filter((trace): trace is Trajectory => trace !== undefined),
     [selectedIds, allTraces, fullTrajectories],
   );
@@ -247,7 +267,10 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
   );
 
   /** Collect all unique suites from selected traces */
-  const selectedSuites = useMemo(() => collectSuites(selectedTraces), [selectedTraces]);
+  const selectedSuites = useMemo(
+    () => collectSuites(selectedTraces),
+    [selectedTraces],
+  );
 
   /** Toggle trace selection — assigns min available color on select */
   const toggleTrace = useCallback((traceId: string) => {
@@ -285,7 +308,9 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
   /** Clamp focused index when filtered list changes */
   useEffect(() => {
     if (focusedIndex >= flatSortedTraces.length) {
-      setFocusedIndex(Math.max(0, flatSortedTraces.length - 1));
+      queueMicrotask(() => {
+        setFocusedIndex(Math.max(0, flatSortedTraces.length - 1));
+      });
     }
   }, [flatSortedTraces.length, focusedIndex]);
 
@@ -306,7 +331,9 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
         case "ArrowDown":
         case "j":
           event.preventDefault();
-          setFocusedIndex((prev) => Math.min(flatSortedTraces.length - 1, prev + 1));
+          setFocusedIndex((prev) =>
+            Math.min(flatSortedTraces.length - 1, prev + 1),
+          );
           break;
         case " ":
         case "Enter": {
@@ -384,9 +411,7 @@ export function CompareProvider({ allTraces, children }: CompareProviderProps) {
   );
 
   return (
-    <CompareContext.Provider value={value}>
-      {children}
-    </CompareContext.Provider>
+    <CompareContext.Provider value={value}>{children}</CompareContext.Provider>
   );
 }
 
