@@ -13,8 +13,8 @@ manages the turn loop, resume logic, and artifact persistence.
 It has zero knowledge of specific sandbox providers.
 
 Usage (via CLI):
-    envoi code --task examples/c_compiler/task --env examples/c_compiler/environment
-    envoi code --example examples/c_compiler --max-parts 1000
+    envoi code --project legacy --example examples/c_compiler
+    envoi code --project c-compiler --example examples/c_compiler --max-parts 1000
 """
 
 from __future__ import annotations
@@ -116,7 +116,6 @@ from envoi_code.utils.solve import SolveTracker
 from envoi_code.utils.storage import (
     artifact_uri,
     get_prefix,
-    get_project,
     get_s3_client,
     load_trace_snapshot,
     save_logs_parquet,
@@ -2048,7 +2047,9 @@ async def prepare_trajectory_context(
     if test_timeout_seconds is not None and test_timeout_seconds <= 0:
         raise ValueError("--test-timeout-seconds must be > 0")
     selected_test_paths = normalize_test_paths(test)
-    project_name = (project or get_project()).strip() or "default"
+    project_name = (project or "").strip()
+    if not project_name:
+        raise ValueError("project is required")
     agent_name = (agent or DEFAULT_AGENT).strip().lower()
     raw_params_map: dict[str, Any] = dict(raw_params or {})
 
@@ -3623,7 +3624,9 @@ async def run_trajectory(
 ) -> str:
     if trajectory_id is None:
         trajectory_id = str(uuid.uuid4())
-    project_name = (project or get_project()).strip() or "default"
+    project_name = (project or "").strip()
+    if not project_name:
+        raise ValueError("project is required")
     os.environ["ENVOI_PROJECT"] = project_name
     prepared = await prepare_trajectory_context(
         trajectory_id=trajectory_id,
@@ -3899,7 +3902,7 @@ if __name__ == "__main__":
     parser.add_argument("--sandbox-memory-mb", type=int, default=None)
     parser.add_argument(
         "--project",
-        default=os.environ.get("ENVOI_PROJECT"),
+        required=True,
     )
     args = parser.parse_args()
 

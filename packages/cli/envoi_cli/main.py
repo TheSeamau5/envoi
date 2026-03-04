@@ -194,6 +194,12 @@ def main() -> None:
                 example = Path(args.example)
                 args.task = str(example / "task")
                 args.env = str(example / "environment")
+            if not isinstance(args.project, str) or not args.project.strip():
+                print(
+                    "error: --project is required for `envoi code` runs",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             if not args.task or not args.env:
                 print(
                     "error: --task and --env are required (or use --example)",

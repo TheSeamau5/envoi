@@ -39,11 +39,9 @@ const NAV_ITEMS = [
 type SidebarProps = {
   /** Server-read initial value — eliminates FOUC on collapse state */
   initialCollapsed: boolean;
-  /** Active project name from server cookie */
-  projectName?: string;
 };
 
-export function Sidebar({ initialCollapsed, projectName }: SidebarProps) {
+export function Sidebar({ initialCollapsed }: SidebarProps) {
   const [collapsed, setCollapsedRaw] = useState(initialCollapsed);
   const pathname = usePathname();
   const [isFirstRender, setIsFirstRender] = useState(true);
@@ -62,9 +60,11 @@ export function Sidebar({ initialCollapsed, projectName }: SidebarProps) {
       setIsFirstRender(false);
     },
   });
-  const baseProjectHref = projectName
-    ? `/project/${encodeURIComponent(projectName)}`
-    : "/";
+  const pathParts = pathname.split("/").filter(Boolean);
+  const activeProject = pathParts[0] === "project" ? pathParts[1] : undefined;
+  const baseProjectHref = activeProject
+    ? `/project/${encodeURIComponent(activeProject)}`
+    : "/project";
 
   return (
     <animated.div
@@ -76,12 +76,19 @@ export function Sidebar({ initialCollapsed, projectName }: SidebarProps) {
         className={`flex h-10.25 shrink-0 items-center border-b border-envoi-border ${collapsed ? "justify-center" : "px-3"}`}
       >
         {!collapsed && (
-          <animated.span
-            className="min-w-0 flex-1 overflow-hidden text-sm font-bold whitespace-nowrap text-envoi-accent"
+          <animated.div
+            className="min-w-0 flex flex-1 items-center gap-2 overflow-hidden"
             style={{ opacity: spring.contentOpacity }}
           >
-            envoi
-          </animated.span>
+            <span className="flex h-5 w-5 items-center justify-center rounded-xs bg-envoi-accent">
+              <span className="block translate-y-px font-mono text-[12px] leading-none font-semibold text-white">
+                E
+              </span>
+            </span>
+            <span className="whitespace-nowrap text-sm font-bold text-envoi-accent">
+              envoi
+            </span>
+          </animated.div>
         )}
         <button
           onClick={() => setCollapsed(!collapsed)}
@@ -93,34 +100,6 @@ export function Sidebar({ initialCollapsed, projectName }: SidebarProps) {
             <PanelLeftClose size={14} />
           )}
         </button>
-      </div>
-
-      <div
-        className={`border-b border-envoi-border ${collapsed ? "px-0 py-2" : "px-3 py-2"}`}
-      >
-        {collapsed ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Link
-                href="/"
-                className="flex h-6 w-full items-center justify-center text-envoi-text-dim transition-colors hover:text-envoi-accent"
-              >
-                ◆
-              </Link>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {projectName ?? "No project selected"}
-            </TooltipContent>
-          </Tooltip>
-        ) : (
-          <Link
-            href="/"
-            className="flex items-center gap-2 rounded px-1 py-1 text-[12px] text-envoi-text-dim transition-colors hover:text-envoi-accent"
-          >
-            <span>◆</span>
-            <span className="truncate">{projectName ?? "No project"}</span>
-          </Link>
-        )}
       </div>
 
       {/* Navigation */}

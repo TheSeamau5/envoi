@@ -10,8 +10,8 @@ Graph mode (subcommand): downloads trace + bundle from S3 and generates
 suite-level analysis graphs.
 
 Usage:
-    envoi code --task examples/c_compiler/task --env examples/c_compiler/environment
-    envoi code --agent codex --max-parts 1000 --task <path> --env <path>
+    envoi code --project legacy --example examples/c_compiler
+    envoi code --project c-compiler --agent codex --max-parts 1000 --task <path> --env <path>
     envoi code graph <trajectory_id>
 """
 
@@ -22,6 +22,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -79,11 +80,24 @@ def get_prefix() -> str:
     raise SystemExit("AWS_S3_PREFIX environment variable is required")
 
 
-def get_project() -> str:
-    project = (os.environ.get("ENVOI_PROJECT") or "").strip()
-    if project:
-        return project
-    return "default"
+PROJECT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
+
+
+def require_project_name(raw_project: str | None) -> str:
+    project = (raw_project or "").strip()
+    if not project:
+        raise SystemExit(
+            "error: --project is required for `envoi code` runs",
+        )
+    if len(project) < 2 or len(project) > 64:
+        raise SystemExit(
+            "error: --project must be 2-64 characters",
+        )
+    if not PROJECT_NAME_RE.fullmatch(project):
+        raise SystemExit(
+            "error: --project must match [a-z0-9][a-z0-9-]*[a-z0-9]",
+        )
+    return project
 
 
 def resolve_positive_int_env(name: str, default: int) -> int:
@@ -445,8 +459,11 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trajectory-id", default=None)
     parser.add_argument(
         "--project",
-        default=os.environ.get("ENVOI_PROJECT"),
-        help="Project namespace used for artifact paths.",
+        default=None,
+        help=(
+            "Required project namespace used for artifact paths, "
+            "for example: c-compiler"
+        ),
     )
     parser.add_argument("--codex-auth-file", default="~/.codex/auth.json")
     parser.add_argument(
@@ -482,7 +499,7 @@ def run_command(args: argparse.Namespace) -> None:
     normalize_e2b_timeout_for_plan(args)
     trajectory_id = args.trajectory_id or str(uuid.uuid4())
     prefix = get_prefix()
-    project = (args.project or get_project()).strip() or "default"
+    project = require_project_name(args.project)
     os.environ["ENVOI_PROJECT"] = project
     args.project = project
     trace_uri = artifact_uri(prefix, project, trajectory_id, "trace.parquet")
