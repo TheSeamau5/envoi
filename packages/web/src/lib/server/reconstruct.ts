@@ -398,8 +398,10 @@ function extractChangedFiles(
         if (isRecord(entry)) {
           if (typeof entry.path === "string") {
             numstatMap.set(entry.path, {
-              additions: typeof entry.additions === "number" ? entry.additions : 0,
-              deletions: typeof entry.deletions === "number" ? entry.deletions : 0,
+              additions: typeof entry.added === "number" ? entry.added
+                : typeof entry.additions === "number" ? entry.additions : 0,
+              deletions: typeof entry.deleted === "number" ? entry.deleted
+                : typeof entry.deletions === "number" ? entry.deletions : 0,
             });
           }
         }
@@ -927,12 +929,15 @@ function populateCodeSnapshots(
     const touchedInCommit = new Set<string>();
     const newInCommit = new Set<string>();
 
-    /** Process rows belonging to this commit (one row per step) */
-    const rowCount = commit.steps.length;
-    const endCursor = rowCursor + rowCount;
+    /** Process rows belonging to this commit using partRange (not steps.length,
+     *  which is filtered and may be smaller than the actual row count). */
+    const [, partEnd] = commit.partRange ?? [0, -1];
 
-    while (rowCursor < endCursor && rowCursor < sortedRows.length) {
+    while (rowCursor < sortedRows.length) {
       const row = sortedRows[rowCursor];
+      if (!row || row.part > partEnd) {
+        break;
+      }
       if (row?.patch && row.patch.length > 0) {
         const fileDiffs = parseUnifiedDiff(row.patch);
         for (const diff of fileDiffs) {
@@ -1209,6 +1214,9 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // The snapshot tracks which lines were added per file per commit, so we can
   // compute accurate additions even without git numstat data.
   for (const commit of commits) {
+    const changedSet = new Set(commit.changedFiles.map((file) => file.path));
+
+    // Fill in zero-valued entries from snapshot data
     for (const file of commit.changedFiles) {
       if (file.additions === 0 && file.deletions === 0) {
         const snap = commit.codeSnapshot[file.path];
@@ -1216,6 +1224,19 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
           file.additions = snap.added.length;
           file.isNew = snap.isNew ?? false;
         }
+      }
+    }
+
+    // Add touched files from the code snapshot that are missing from changedFiles
+    // (happens when repo_checkpoint has no changed_files array at all)
+    for (const [filePath, snap] of Object.entries(commit.codeSnapshot)) {
+      if (snap.touched && !changedSet.has(filePath)) {
+        commit.changedFiles.push({
+          path: filePath,
+          additions: snap.added.length,
+          deletions: 0,
+          isNew: snap.isNew ?? false,
+        });
       }
     }
   }
