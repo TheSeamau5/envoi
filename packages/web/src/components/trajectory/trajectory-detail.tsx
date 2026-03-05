@@ -23,6 +23,7 @@ import type {
   Commit,
   Step,
   ChangedFile,
+  TrajectoryLogRow,
 } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { usePersistedState } from "@/lib/storage";
@@ -30,6 +31,7 @@ import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
 import { queryKeys } from "@/lib/query-keys";
 import { useLiveTrajectory } from "@/lib/use-live-trajectory";
+import { resolveTrajectoryLogs } from "@/lib/trajectory-log-mapping";
 import {
   Tooltip,
   TooltipContent,
@@ -43,6 +45,7 @@ import { TestsPanel } from "./tests-panel";
 import { StepsPanel } from "./steps-panel";
 import type { StepsPanelHandle } from "./steps-panel";
 import { CodePanel } from "./code-panel";
+import { LogsPanel } from "./logs-panel";
 
 type TrajectoryDetailProps = {
   trajectory: Trajectory;
@@ -54,7 +57,7 @@ type TrajectoryDetailProps = {
 };
 
 /** Right panel tab options */
-type RightTab = "steps" | "code" | "tests";
+type RightTab = "steps" | "code" | "tests" | "logs";
 
 /** Which panel owns keyboard navigation */
 type ActivePanel = "commits" | "steps";
@@ -128,9 +131,27 @@ export function TrajectoryDetail({
       }
       const allSteps: Step[] = [];
       const allChangedFiles: ChangedFile[] = [];
+      let mergedPartStart: number | undefined;
+      let mergedPartEnd: number | undefined;
       for (const commit of turnCommits) {
         allSteps.push(...commit.steps);
         allChangedFiles.push(...commit.changedFiles);
+        const range = commit.partRange;
+        if (!range) {
+          continue;
+        }
+        const [partStart, partEnd] = range;
+        if (typeof partStart !== "number" || typeof partEnd !== "number") {
+          continue;
+        }
+        mergedPartStart =
+          mergedPartStart === undefined
+            ? partStart
+            : Math.min(mergedPartStart, partStart);
+        mergedPartEnd =
+          mergedPartEnd === undefined
+            ? partEnd
+            : Math.max(mergedPartEnd, partEnd);
       }
       const reindexedSteps = allSteps.map((step, mergedIndex) => ({
         ...step,
@@ -140,6 +161,10 @@ export function TrajectoryDetail({
         ...lastCommit,
         steps: reindexedSteps,
         changedFiles: allChangedFiles,
+        partRange:
+          mergedPartStart !== undefined && mergedPartEnd !== undefined
+            ? [mergedPartStart, mergedPartEnd]
+            : lastCommit.partRange,
       });
     }
     /** Recompute deltas relative to previous turn */
@@ -182,6 +207,39 @@ export function TrajectoryDetail({
     },
   });
   const codeHistory = codeHistoryQuery.data ?? undefined;
+
+  /** Structured logs — fetched lazily from logs.parquet via TanStack Query */
+  const logsQueryLimit = 5000;
+  const logsQueryFromSeq = 0;
+  const logsQuery = useQuery({
+    queryKey: queryKeys.trajectories.logs(
+      project,
+      trajectory.id,
+      logsQueryFromSeq,
+      logsQueryLimit,
+    ),
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/trajectories/${encodeURIComponent(trajectory.id)}/logs?project=${encodeURIComponent(project)}&fromSeq=${logsQueryFromSeq}&limit=${logsQueryLimit}${isLive ? `&bust=${Date.now()}` : ""}`,
+      );
+      if (response.status === 404) {
+        return [] as TrajectoryLogRow[];
+      }
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectory logs");
+      }
+      const data: { rows?: TrajectoryLogRow[] } = await response.json();
+      return data.rows ?? [];
+    },
+    enabled: rightTab === "logs",
+    refetchInterval: rightTab === "logs" && isLive ? 30_000 : false,
+    staleTime: 0,
+  });
+  const logsRows = useMemo(() => logsQuery.data ?? [], [logsQuery.data]);
+  const resolvedLogs = useMemo(
+    () => resolveTrajectoryLogs(logsRows, effectiveCommits),
+    [logsRows, effectiveCommits],
+  );
 
   /**
    * Right panel open/close + divider position.
@@ -723,6 +781,11 @@ export function TrajectoryDetail({
               isActive={rightTab === "tests"}
               onClick={() => handleRightTabChange("tests")}
             />
+            <TabButton
+              label="Logs"
+              isActive={rightTab === "logs"}
+              onClick={() => handleRightTabChange("logs")}
+            />
             <div className="flex-1" />
             <Tooltip>
               <TooltipTrigger asChild>
@@ -748,11 +811,20 @@ export function TrajectoryDetail({
             />
           ) : rightTab === "code" ? (
             <CodePanel commit={enrichedCommit ?? selectedCommit} />
-          ) : (
+          ) : rightTab === "tests" ? (
             <TestsPanel
               commit={selectedCommit}
               suites={suites}
               totalTests={totalTests}
+            />
+          ) : (
+            <LogsPanel
+              logs={resolvedLogs}
+              commit={selectedCommit}
+              selectedCommitPosition={safeIndex}
+              groupByTurn={groupByTurn}
+              isLoading={logsQuery.isLoading}
+              isLive={isLive}
             />
           )}
         </animated.div>

@@ -208,6 +208,7 @@ async function syncFromS3(
     traces?: boolean;
     summaries?: boolean;
     codeSnapshots?: boolean;
+    logs?: boolean;
   },
 ): Promise<void> {
   if (!isS3Configured()) {
@@ -227,6 +228,9 @@ async function syncFromS3(
   }
   if (opts?.codeSnapshots !== false) {
     tasks.push(spawnS3Sync(source, dest, "*/code_snapshots.parquet"));
+  }
+  if (opts?.logs !== false) {
+    tasks.push(spawnS3Sync(source, dest, "*/logs.parquet"));
   }
   if (tasks.length === 0) {
     return;
@@ -296,6 +300,7 @@ async function ensureSynced(project: string): Promise<void> {
     traces: false,
     summaries: true,
     codeSnapshots: false,
+    logs: false,
   });
   const hasSummaries = await hasLocalSummaryCache(project);
   if (!hasSummaries) {
@@ -304,6 +309,7 @@ async function ensureSynced(project: string): Promise<void> {
       traces: true,
       summaries: false,
       codeSnapshots: false,
+      logs: false,
     });
   }
 
@@ -389,6 +395,30 @@ export async function codeSnapshotsUri(
     return localPath;
   }
   return undefined;
+}
+
+/** URI for logs.parquet — uses local cache if available, else S3. */
+export async function logsUri(
+  trajectoryId: string,
+  project?: string,
+): Promise<string> {
+  const activeProject = await getActiveProject(project);
+  const validId = validateTrajectoryId(trajectoryId);
+  const localPath = path.join(cacheDir(activeProject), validId, "logs.parquet");
+  if (await pathExists(localPath)) {
+    return localPath;
+  }
+  return `s3://${getPrefix()}/project/${activeProject}/trajectories/${validId}/logs.parquet`;
+}
+
+/** Always return S3 URI for logs.parquet, bypassing local cache. */
+export async function freshLogsUri(
+  trajectoryId: string,
+  project?: string,
+): Promise<string> {
+  const activeProject = await getActiveProject(project);
+  const validId = validateTrajectoryId(trajectoryId);
+  return `s3://${getPrefix()}/project/${activeProject}/trajectories/${validId}/logs.parquet`;
 }
 
 async function listTraceFiles(project: string): Promise<string[]> {

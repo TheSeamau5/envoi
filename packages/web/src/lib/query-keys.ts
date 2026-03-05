@@ -11,6 +11,8 @@ export const queryKeys = {
       ["trajectories", project, id] as const,
     codeHistory: (project: string, id: string) =>
       ["trajectories", project, id, "code-history"] as const,
+    logs: (project: string, id: string, fromSeq: number, limit: number) =>
+      ["trajectories", project, id, "logs", fromSeq, limit] as const,
     sandboxStatus: (project: string, id: string) =>
       ["trajectories", project, id, "sandbox-status"] as const,
   },

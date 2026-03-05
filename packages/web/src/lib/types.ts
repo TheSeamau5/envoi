@@ -121,6 +121,44 @@ export type Commit = {
   targetCommit?: string;
 };
 
+/** Raw structured log row from logs.parquet */
+export type TrajectoryLogRow = {
+  seq: number;
+  ts: string;
+  component: string;
+  event: string;
+  level: string;
+  message: string;
+  turn?: number;
+  part?: number;
+  gitCommit?: string;
+  sessionId?: string;
+  source?: string;
+  fields?: string;
+};
+
+/** How a log row was mapped to a commit/turn context */
+export type TrajectoryLogMatchKind =
+  | "part"
+  | "message_part"
+  | "message_commit"
+  | "git_commit"
+  | "timestamp"
+  | "turn"
+  | "synthetic_first_context"
+  | "unmapped";
+
+/** Raw log row plus resolved commit/turn mapping metadata */
+export type ResolvedTrajectoryLog = TrajectoryLogRow & {
+  prefix: string;
+  resolvedTurn?: number;
+  resolvedPart?: number;
+  resolvedCommitIndex?: number;
+  resolvedCommitHash?: string;
+  matchKind: TrajectoryLogMatchKind;
+  inferred: boolean;
+};
+
 /** Configuration parameters for a trajectory run (flexible for any environment) */
 export type TrajectoryParams = Record<string, string>;
 

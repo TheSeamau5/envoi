@@ -13,6 +13,8 @@ import {
   traceUri,
   freshTraceUri,
   codeSnapshotsUri,
+  logsUri,
+  freshLogsUri,
   query,
   hasSummaryTables,
 } from "./db";
@@ -38,6 +40,7 @@ import type {
   PortfolioEnvironmentRow,
   ParetoPoint,
   SchemaColumn,
+  TrajectoryLogRow,
 } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -880,6 +883,137 @@ export async function getCodeHistory(
       `[data] Failed to load code history for ${trajectoryId}:`,
       error,
     );
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Structured logs (logs.parquet)
+// ---------------------------------------------------------------------------
+
+/** Raw row from logs.parquet */
+type TrajectoryLogRowRaw = {
+  seq: number;
+  ts: string;
+  component: string;
+  event: string;
+  level: string;
+  message: string;
+  turn?: number;
+  part?: number;
+  git_commit?: string;
+  session_id?: string;
+  source?: string;
+  fields?: string;
+};
+
+/** Validate a raw query row into a TrajectoryLogRowRaw */
+function toTrajectoryLogRowRaw(
+  row: Record<string, unknown>,
+): TrajectoryLogRowRaw {
+  return {
+    seq: Number(row.seq ?? 0),
+    ts: String(row.ts ?? ""),
+    component: String(row.component ?? ""),
+    event: String(row.event ?? ""),
+    level: String(row.level ?? ""),
+    message: String(row.message ?? ""),
+    turn: row.turn != undefined ? Number(row.turn) : undefined,
+    part: row.part != undefined ? Number(row.part) : undefined,
+    git_commit:
+      row.git_commit != undefined ? String(row.git_commit) : undefined,
+    session_id:
+      row.session_id != undefined ? String(row.session_id) : undefined,
+    source: row.source != undefined ? String(row.source) : undefined,
+    fields: row.fields != undefined ? String(row.fields) : undefined,
+  };
+}
+
+function mapTrajectoryLogRow(raw: TrajectoryLogRowRaw): TrajectoryLogRow {
+  return {
+    seq: raw.seq,
+    ts: raw.ts,
+    component: raw.component,
+    event: raw.event,
+    level: raw.level,
+    message: raw.message,
+    turn: raw.turn,
+    part: raw.part,
+    gitCommit: raw.git_commit,
+    sessionId: raw.session_id,
+    source: raw.source,
+    fields: raw.fields,
+  };
+}
+
+/**
+ * Get structured logs for a trajectory from logs.parquet.
+ * Returns undefined when logs.parquet is unavailable.
+ */
+export async function getTrajectoryLogsById(
+  id: string,
+  opts?: {
+    fresh?: boolean;
+    project?: string;
+    limit?: number;
+    fromSeq?: number;
+  },
+): Promise<TrajectoryLogRow[] | undefined> {
+  if (!isS3Configured()) {
+    return undefined;
+  }
+
+  const project = await resolveProject(opts?.project);
+  const limitRaw = Number.isFinite(opts?.limit) ? Number(opts?.limit) : 2500;
+  const limit = Math.max(1, Math.min(10_000, Math.floor(limitRaw)));
+  const fromSeqRaw = Number.isFinite(opts?.fromSeq) ? Number(opts?.fromSeq) : 0;
+  const fromSeq = Math.max(0, Math.floor(fromSeqRaw));
+  const fresh = opts?.fresh === true;
+
+  const load = async () => {
+    const uri = fresh
+      ? await freshLogsUri(id, project)
+      : await logsUri(id, project);
+    const sql = `
+      SELECT
+        seq,
+        ts,
+        component,
+        event,
+        level,
+        message,
+        turn,
+        part,
+        git_commit,
+        session_id,
+        source,
+        fields
+      FROM read_parquet('${sqlLiteral(uri)}')
+      WHERE seq > ${fromSeq}
+      ORDER BY seq
+      LIMIT ${limit}
+    `;
+    const rawRows = await query(sql, project);
+    if (rawRows.length === 0) {
+      return [] as TrajectoryLogRow[];
+    }
+    return rawRows.map((row) =>
+      mapTrajectoryLogRow(toTrajectoryLogRowRaw(row)),
+    );
+  };
+
+  if (fresh) {
+    try {
+      return await load();
+    } catch {
+      return undefined;
+    }
+  }
+
+  const cacheKey = `trajectory-logs:${project}:${id}:${fromSeq}:${limit}`;
+  try {
+    return await cached(cacheKey, load);
+  } catch {
     return undefined;
   }
 }
