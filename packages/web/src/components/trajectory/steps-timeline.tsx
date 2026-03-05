@@ -5,11 +5,13 @@
  *
  * Click a bar to select/scroll to that step in the list below.
  * Hover shows a tooltip with step type, index, and duration.
+ *
+ * Time labels are rendered as HTML below the SVG to avoid distortion.
  */
 
 "use client";
 
-import { useMemo, useRef, useCallback } from "react";
+import { useMemo, useCallback } from "react";
 import type { Step } from "@/lib/types";
 import { T } from "@/lib/tokens";
 
@@ -42,16 +44,8 @@ const STEP_LABELS: Record<Step["type"], string> = {
 /** Minimum duration assigned to steps without timing data */
 const DEFAULT_DURATION_MS = 500;
 
-/** Minimum bar width in SVG units so tiny steps stay clickable */
-const MIN_BAR_WIDTH = 3;
-
-/** SVG layout constants */
-const SVG_WIDTH = 1000;
-const BAR_Y = 6;
-const BAR_HEIGHT = 36;
-const AXIS_Y = BAR_Y + BAR_HEIGHT + 14;
-const SVG_HEIGHT = AXIS_Y + 4;
-const BAR_GAP = 1;
+/** Minimum bar width as percentage so tiny steps stay clickable */
+const MIN_BAR_PCT = 0.3;
 
 type StepsTimelineProps = {
   steps: Step[];
@@ -80,15 +74,14 @@ function formatTimeLabel(ms: number): string {
 type BarLayout = {
   step: Step;
   filteredIndex: number;
-  x: number;
-  width: number;
+  xPct: number;
+  widthPct: number;
   color: string;
   label: string;
   durationMs: number;
-  cumulativeMs: number;
 };
 
-/** Compute bar positions from step durations */
+/** Compute bar positions as percentages of total width */
 function computeBarLayout(steps: Step[]): { bars: BarLayout[]; totalDuration: number } {
   const durations: number[] = [];
   for (const step of steps) {
@@ -100,10 +93,8 @@ function computeBarLayout(steps: Step[]): { bars: BarLayout[]; totalDuration: nu
     return { bars: [], totalDuration: 0 };
   }
 
-  const usableWidth = SVG_WIDTH - (steps.length - 1) * BAR_GAP;
   const bars: BarLayout[] = [];
-  let cumulativeMs = 0;
-  let cumulativeX = 0;
+  let cumulativePct = 0;
 
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
@@ -111,29 +102,27 @@ function computeBarLayout(steps: Step[]): { bars: BarLayout[]; totalDuration: nu
       continue;
     }
     const durationMs = durations[index] ?? DEFAULT_DURATION_MS;
-    const rawWidth = (durationMs / totalDuration) * usableWidth;
-    const barWidth = Math.max(rawWidth, MIN_BAR_WIDTH);
+    const rawPct = (durationMs / totalDuration) * 100;
+    const barPct = Math.max(rawPct, MIN_BAR_PCT);
 
     bars.push({
       step,
       filteredIndex: index,
-      x: cumulativeX,
-      width: barWidth,
+      xPct: cumulativePct,
+      widthPct: barPct,
       color: STEP_COLORS[step.type],
       label: STEP_LABELS[step.type],
       durationMs,
-      cumulativeMs,
     });
 
-    cumulativeMs += durationMs;
-    cumulativeX += barWidth + BAR_GAP;
+    cumulativePct += barPct;
   }
 
   return { bars, totalDuration };
 }
 
-/** Compute evenly-spaced time axis ticks */
-function computeTimeTicks(totalDuration: number): { ms: number; x: number }[] {
+/** Compute evenly-spaced time axis ticks as percentages */
+function computeTimeTicks(totalDuration: number): { ms: number; pct: number }[] {
   if (totalDuration === 0) {
     return [];
   }
@@ -150,14 +139,20 @@ function computeTimeTicks(totalDuration: number): { ms: number; x: number }[] {
     }
   }
 
-  const ticks: { ms: number; x: number }[] = [];
+  const ticks: { ms: number; pct: number }[] = [];
   let ms = 0;
   while (ms <= totalDuration) {
     ticks.push({
       ms,
-      x: (ms / totalDuration) * SVG_WIDTH,
+      pct: (ms / totalDuration) * 100,
     });
     ms += interval;
+  }
+
+  // Always include the total duration as the last tick
+  const lastTick = ticks[ticks.length - 1];
+  if (!lastTick || lastTick.ms < totalDuration) {
+    ticks.push({ ms: totalDuration, pct: 100 });
   }
 
   return ticks;
@@ -165,8 +160,6 @@ function computeTimeTicks(totalDuration: number): { ms: number; x: number }[] {
 
 /** Gantt-style timeline chart for agent steps */
 export function StepsTimeline({ steps, selectedStepIndex, onSelectStep }: StepsTimelineProps) {
-  const svgRef = useRef<SVGSVGElement>(null);
-
   const { bars, totalDuration } = useMemo(() => computeBarLayout(steps), [steps]);
   const ticks = useMemo(() => computeTimeTicks(totalDuration), [totalDuration]);
 
@@ -183,35 +176,19 @@ export function StepsTimeline({ steps, selectedStepIndex, onSelectStep }: StepsT
 
   return (
     <div className="shrink-0 border-b border-envoi-border px-3.5 py-2">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
-        preserveAspectRatio="none"
-        className="w-full"
-        style={{ height: 56, display: "block" }}
-      >
-        {/* Time axis ticks */}
+      {/* Bar chart — uses percentage-based positioning via HTML divs */}
+      <div className="relative" style={{ height: 20 }}>
+        {/* Grid lines at time ticks */}
         {ticks.map((tick) => (
-          <g key={tick.ms}>
-            <line
-              x1={tick.x}
-              y1={BAR_Y}
-              x2={tick.x}
-              y2={BAR_Y + BAR_HEIGHT}
-              stroke={T.borderLight}
-              strokeWidth={1}
-            />
-            <text
-              x={tick.x}
-              y={AXIS_Y}
-              fill={T.textDim}
-              fontSize={22}
-              fontFamily={T.mono}
-              textAnchor={tick.ms === 0 ? "start" : "middle"}
-            >
-              {formatTimeLabel(tick.ms)}
-            </text>
-          </g>
+          <div
+            key={tick.ms}
+            className="absolute top-0 h-full"
+            style={{
+              left: `${tick.pct}%`,
+              width: 1,
+              backgroundColor: T.borderLight,
+            }}
+          />
         ))}
 
         {/* Step bars */}
@@ -223,39 +200,43 @@ export function StepsTimeline({ steps, selectedStepIndex, onSelectStep }: StepsT
           const tooltipText = `${bar.label} #${bar.step.index + 1} — ${formatTimeLabel(bar.durationMs)}${truncatedSummary ? `\n${truncatedSummary}` : ""}`;
 
           return (
-            <g
+            <div
               key={`${bar.step.index}-${bar.filteredIndex}`}
+              className="absolute top-0 h-full"
+              style={{
+                left: `${bar.xPct}%`,
+                width: `${bar.widthPct}%`,
+                backgroundColor: bar.step.isError ? T.red : bar.color,
+                opacity: isSelected ? 0.7 : 0.35,
+                cursor: "pointer",
+                borderBottom: isSelected ? `2px solid ${T.accent}` : undefined,
+              }}
+              title={tooltipText}
               onClick={() => handleBarClick(bar.filteredIndex)}
-              style={{ cursor: "pointer" }}
-            >
-              <rect
-                x={bar.x}
-                y={BAR_Y}
-                width={bar.width}
-                height={BAR_HEIGHT}
-                rx={3}
-                ry={3}
-                fill={`${bar.color}${isSelected ? "40" : "25"}`}
-                stroke={isSelected ? T.accent : bar.step.isError ? T.red : "transparent"}
-                strokeWidth={isSelected ? 3 : bar.step.isError ? 2 : 0}
-              >
-                <title>{tooltipText}</title>
-              </rect>
-              {/* Colored top accent line */}
-              <rect
-                x={bar.x}
-                y={BAR_Y}
-                width={bar.width}
-                height={3}
-                rx={1.5}
-                ry={1.5}
-                fill={bar.color}
-                style={{ pointerEvents: "none" }}
-              />
-            </g>
+            />
           );
         })}
-      </svg>
+      </div>
+
+      {/* Time axis labels — rendered as HTML so they don't distort */}
+      <div className="relative" style={{ height: 16, marginTop: 2 }}>
+        {ticks.map((tick) => (
+          <span
+            key={tick.ms}
+            className="absolute"
+            style={{
+              left: `${tick.pct}%`,
+              transform: tick.ms === 0 ? "none" : "translateX(-50%)",
+              fontSize: 10,
+              color: T.textDim,
+              fontFamily: T.mono,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {formatTimeLabel(tick.ms)}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

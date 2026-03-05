@@ -13,7 +13,7 @@
 
 "use client";
 
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef } from "react";
 import type { Commit, Suite } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES } from "@/lib/constants";
 import { SUITE_COLORS, T } from "@/lib/tokens";
@@ -102,6 +102,22 @@ function criticalityLabel(tags: CriticalityTag[]): string {
   return labels.join(", ");
 }
 
+/** Format a duration in minutes into a compact label */
+function formatElapsed(minutes: number): string {
+  if (minutes < 1) {
+    return `${Math.round(minutes * 60)}s`;
+  }
+  if (minutes < 60) {
+    return `${Math.round(minutes)}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remaining = Math.round(minutes % 60);
+  if (remaining === 0) {
+    return `${hours}h`;
+  }
+  return `${hours}h${remaining}m`;
+}
+
 type CommitRowProps = {
   commit: Commit;
   isSelected: boolean;
@@ -110,10 +126,14 @@ type CommitRowProps = {
   suites?: Suite[];
   /** Pre-computed criticality tags for this commit */
   criticalityTags?: CriticalityTag[];
+  /** Minutes elapsed since previous commit/turn (undefined for first row) */
+  elapsedSincePrev?: number;
+  /** Previous commit — used to compute suite-scoped deltas */
+  prevCommit?: Commit;
 };
 
 /** Single commit row with optional criticality indicator */
-export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp, criticalityTags }: CommitRowProps) {
+export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp, criticalityTags, elapsedSincePrev, prevCommit }: CommitRowProps) {
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const rowRef = useRef<HTMLDivElement>(null);
 
@@ -142,17 +162,22 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
       ? effectiveSuites
       : effectiveSuites.filter((suite) => suite.name === activeSuite);
 
-  const { totalAdded, totalDeleted } = useMemo(() => {
-    let added = 0;
-    let deleted = 0;
-    for (const file of commit.changedFiles) {
-      added += file.additions;
-      deleted += file.deletions;
-    }
-    return { totalAdded: added, totalDeleted: deleted };
-  }, [commit.changedFiles]);
+  /** Suite-scoped passed count and total */
+  const scopedPassed = activeSuite === "all"
+    ? commit.totalPassed
+    : commit.suiteState[activeSuite] ?? 0;
+  const activeSuiteDef = effectiveSuites.find((suite) => suite.name === activeSuite);
+  const scopedTotal = activeSuite === "all"
+    ? effectiveSuites.reduce((sum, suite) => sum + suite.total, 0)
+    : activeSuiteDef?.total ?? 0;
 
-  const { newlyFixed, newlyBroken } = commit.feedback;
+  /** Suite-scoped delta */
+  const prevPassed = prevCommit
+    ? (activeSuite === "all" ? prevCommit.totalPassed : prevCommit.suiteState[activeSuite] ?? 0)
+    : 0;
+  const scopedDelta = prevCommit ? scopedPassed - prevPassed : scopedPassed;
+  const scopedFixed = Math.max(0, scopedDelta);
+  const scopedBroken = Math.max(0, -scopedDelta);
 
   return (
     <div
@@ -164,61 +189,42 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
         background: bgColor,
       }}
     >
-      {/* Hash + turn */}
+      {/* Hash + turn + elapsed */}
       <div className="flex min-w-22.5 flex-col gap-0.5">
         <span className="text-[13px] font-semibold text-envoi-text">
           {commit.hash.slice(0, 8)}
         </span>
         <span className="text-[13px] text-envoi-text-dim">
           turn {commit.turn}
+          {elapsedSincePrev !== undefined && (
+            <span className="ml-1.5 text-envoi-text-muted">
+              +{formatElapsed(elapsedSincePrev)}
+            </span>
+          )}
         </span>
       </div>
 
-      {/* Test delta: +passed / -broken */}
+      {/* Test delta: +passed / -broken (suite-scoped) */}
       <div className="flex min-w-17.5 flex-col items-end gap-0.5">
         <div className="flex items-center gap-1.5">
-          {newlyFixed > 0 && (
+          {scopedFixed > 0 && (
             <span className="text-[13px] font-semibold" style={{ color: T.greenDark }}>
-              +{newlyFixed}
+              +{scopedFixed}
             </span>
           )}
-          {newlyBroken > 0 && (
+          {scopedBroken > 0 && (
             <span className="text-[13px] font-semibold" style={{ color: T.redDark }}>
-              -{newlyBroken}
+              -{scopedBroken}
             </span>
           )}
-          {newlyFixed === 0 && newlyBroken === 0 && (
+          {scopedFixed === 0 && scopedBroken === 0 && (
             <span className="text-[13px] font-semibold text-envoi-text-muted">
               ±0
             </span>
           )}
         </div>
         <span className="text-[13px] text-envoi-text-dim">
-          {commit.totalPassed} total
-        </span>
-      </div>
-
-      {/* LOC delta: +added / -removed */}
-      <div className="flex min-w-17.5 flex-col items-end gap-0.5">
-        <div className="flex items-center gap-1.5">
-          {totalAdded > 0 && (
-            <span className="text-[13px] font-medium" style={{ color: T.greenDark }}>
-              +{totalAdded}
-            </span>
-          )}
-          {totalDeleted > 0 && (
-            <span className="text-[13px] font-medium" style={{ color: T.redDark }}>
-              -{totalDeleted}
-            </span>
-          )}
-          {totalAdded === 0 && totalDeleted === 0 && (
-            <span className="text-[13px] font-medium text-envoi-text-muted">
-              ±0
-            </span>
-          )}
-        </div>
-        <span className="text-[13px] text-envoi-text-dim">
-          loc
+          {scopedPassed} / {scopedTotal}
         </span>
       </div>
 

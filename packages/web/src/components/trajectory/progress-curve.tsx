@@ -55,14 +55,6 @@ function getYValue(commit: Commit, activeSuite: string): number {
   return commit.suiteState[activeSuite] ?? 0;
 }
 
-/** Map commit index to X pixel position */
-function toX(commitIndex: number, totalCommits: number): number {
-  if (totalCommits <= 1) {
-    return MARGIN.left + PLOT_WIDTH / 2;
-  }
-  return MARGIN.left + (commitIndex / (totalCommits - 1)) * PLOT_WIDTH;
-}
-
 /** Map value to Y pixel position */
 function toY(value: number, yMax: number): number {
   if (yMax === 0) {
@@ -85,13 +77,12 @@ function buildLinePath(
   commits: Commit[],
   activeSuite: string,
   yMax: number,
-  totalCommits?: number,
+  totalMinutes: number,
 ): string {
-  const total = totalCommits ?? commits.length;
   return commits
     .map((commit, pointIndex) => {
       const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = toX(pointIndex, total);
+      const xPos = timeToX(commit.minutesElapsed, totalMinutes);
       const yPos = toY(getYValue(commit, activeSuite), yMax);
       return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
     })
@@ -104,6 +95,7 @@ function buildAreaPath(
   endIndex: number,
   activeSuite: string,
   yMax: number,
+  totalMinutes: number,
 ): string {
   const subset = commits.slice(0, endIndex + 1);
   if (subset.length === 0) {
@@ -113,15 +105,17 @@ function buildAreaPath(
   const lineSegments = subset
     .map((commit, pointIndex) => {
       const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = toX(pointIndex, commits.length);
+      const xPos = timeToX(commit.minutesElapsed, totalMinutes);
       const yPos = toY(getYValue(commit, activeSuite), yMax);
       return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
     })
     .join(" ");
 
   const bottomY = toY(0, yMax);
-  const lastX = toX(endIndex, commits.length);
-  const firstX = toX(0, commits.length);
+  const lastSubset = subset[subset.length - 1];
+  const firstSubset = subset[0];
+  const lastX = timeToX(lastSubset?.minutesElapsed ?? 0, totalMinutes);
+  const firstX = timeToX(firstSubset?.minutesElapsed ?? 0, totalMinutes);
 
   return `${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} L${firstX.toFixed(1)},${bottomY.toFixed(1)} Z`;
 }
@@ -283,14 +277,14 @@ export function ProgressCurve({
 
         {/* Filled area up to selection */}
         <path
-          d={buildAreaPath(commits, selectedIndex, activeSuite, yMax)}
+          d={buildAreaPath(commits, selectedIndex, activeSuite, yMax, totalMinutes)}
           fill={T.accentBg}
         />
 
         {/* Faded area after selection */}
         {selectedIndex < commits.length - 1 && (
           <path
-            d={buildAreaPath(commits, commits.length - 1, activeSuite, yMax)}
+            d={buildAreaPath(commits, commits.length - 1, activeSuite, yMax, totalMinutes)}
             fill={T.borderLight}
             opacity={0.4}
           />
@@ -298,45 +292,79 @@ export function ProgressCurve({
 
         {/* Full line (faded portion after selection) */}
         <path
-          d={buildLinePath(commits, activeSuite, yMax)}
+          d={buildLinePath(commits, activeSuite, yMax, totalMinutes)}
           fill="none"
           stroke={T.border}
-          strokeWidth={1.2}
+          strokeWidth={commits.length > 100 ? 0.5 : commits.length > 50 ? 0.8 : 1.2}
           opacity={0.4}
         />
 
         {/* Active line up to selection */}
         <path
-          d={buildLinePath(commits.slice(0, selectedIndex + 1), activeSuite, yMax, commits.length)}
+          d={buildLinePath(commits.slice(0, selectedIndex + 1), activeSuite, yMax, totalMinutes)}
           fill="none"
           stroke={T.accent}
-          strokeWidth={1.2}
+          strokeWidth={commits.length > 100 ? 0.5 : commits.length > 50 ? 0.8 : 1.2}
         />
 
-        {/* Percentage label above selected commit */}
+        {/* Crosshair dotted lines + axis labels for selected commit */}
         {(() => {
           const commit = commits[selectedIndex];
           if (!commit) {
             return undefined;
           }
-          const xPos = toX(selectedIndex, commits.length);
+          const xPos = timeToX(commit.minutesElapsed, totalMinutes);
           const yPos = toY(getYValue(commit, activeSuite), yMax);
           const pct = Math.round((getYValue(commit, activeSuite) / yMax) * 100);
           return (
-            <text
-              x={xPos}
-              y={yPos - 12}
-              textAnchor="middle"
-              style={{ fontSize: "10px", fill: T.accent, fontWeight: 700 }}
-            >
-              {pct}%
-            </text>
+            <g>
+              {/* Horizontal dotted line → to Y axis */}
+              <line
+                x1={MARGIN.left}
+                y1={yPos}
+                x2={xPos}
+                y2={yPos}
+                stroke={T.accent}
+                strokeWidth={0.6}
+                strokeDasharray="3,3"
+                opacity={0.5}
+              />
+              {/* Vertical dotted line → to X axis */}
+              <line
+                x1={xPos}
+                y1={yPos}
+                x2={xPos}
+                y2={MARGIN.top + PLOT_HEIGHT}
+                stroke={T.accent}
+                strokeWidth={0.6}
+                strokeDasharray="3,3"
+                opacity={0.5}
+              />
+              {/* Percentage label — inside plot, near left edge of dotted line */}
+              <text
+                x={MARGIN.left + 4}
+                y={yPos - 4}
+                textAnchor="start"
+                style={{ fontSize: "9px", fill: T.accent, fontWeight: 700 }}
+              >
+                {pct}%
+              </text>
+              {/* Time label — inside plot, just above bottom of dotted line */}
+              <text
+                x={xPos + 4}
+                y={MARGIN.top + PLOT_HEIGHT - 4}
+                textAnchor="start"
+                style={{ fontSize: "9px", fill: T.accent, fontWeight: 700 }}
+              >
+                {formatTimeLabel(commit.minutesElapsed)}
+              </text>
+            </g>
           );
         })()}
 
-        {/* Commit dots */}
+        {/* Commit dots — scale down when many commits */}
         {commits.map((commit, dotIndex) => {
-          const xPos = toX(dotIndex, commits.length);
+          const xPos = timeToX(commit.minutesElapsed, totalMinutes);
           const yPos = toY(getYValue(commit, activeSuite), yMax);
           const isSelected = dotIndex === selectedIndex;
           const isBeforeSelection = dotIndex <= selectedIndex;
@@ -349,7 +377,12 @@ export function ProgressCurve({
                 ? T.accent
                 : T.textDim;
 
-          const dotRadius = isSelected ? 5 : 3;
+          const baseRadius = commits.length > 100
+            ? 1.5
+            : commits.length > 50
+              ? 2
+              : 3;
+          const dotRadius = isSelected ? baseRadius + 2 : baseRadius;
 
           return (
             <circle

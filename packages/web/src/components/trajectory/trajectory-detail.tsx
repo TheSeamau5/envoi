@@ -14,8 +14,9 @@
 import { useState, useCallback, useRef, useMemo } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type { Trajectory, Suite, CodeSnapshot, Commit } from "@/lib/types";
+import type { Trajectory, Suite, CodeSnapshot, Commit, Step, ChangedFile } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
+import { usePersistedState } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
 import { useLiveTrajectory } from "@/lib/use-live-trajectory";
@@ -70,6 +71,58 @@ export function TrajectoryDetail({
 
   /** Critical-only filter */
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
+
+  /** Turn-centric view toggle — persisted globally */
+  const [groupByTurn, setGroupByTurn] = usePersistedState("groupByTurn", false);
+
+  /** Group commits by turn: pick last commit per turn, aggregate steps + changedFiles */
+  const effectiveCommits: Commit[] = useMemo(() => {
+    if (!groupByTurn) {
+      return commits;
+    }
+    const turnMap = new Map<number, Commit[]>();
+    for (const commit of commits) {
+      const group = turnMap.get(commit.turn);
+      if (group) {
+        group.push(commit);
+      } else {
+        turnMap.set(commit.turn, [commit]);
+      }
+    }
+    const grouped: Commit[] = [];
+    for (const [, turnCommits] of turnMap) {
+      const lastCommit = turnCommits[turnCommits.length - 1];
+      if (!lastCommit) {
+        continue;
+      }
+      const allSteps: Step[] = [];
+      const allChangedFiles: ChangedFile[] = [];
+      for (const commit of turnCommits) {
+        allSteps.push(...commit.steps);
+        allChangedFiles.push(...commit.changedFiles);
+      }
+      grouped.push({ ...lastCommit, steps: allSteps, changedFiles: allChangedFiles });
+    }
+    /** Recompute deltas relative to previous turn */
+    for (let idx = 1; idx < grouped.length; idx++) {
+      const current = grouped[idx];
+      const prev = grouped[idx - 1];
+      if (!current || !prev) {
+        continue;
+      }
+      const turnDelta = current.totalPassed - prev.totalPassed;
+      grouped[idx] = {
+        ...current,
+        delta: turnDelta,
+        isRegression: turnDelta < 0,
+        feedback: {
+          ...current.feedback,
+          passedDelta: turnDelta,
+        },
+      };
+    }
+    return grouped;
+  }, [commits, groupByTurn]);
 
   /** Code history — fetched lazily from code_snapshots.parquet.
    *  Ref-guarded fetch in render body — no useEffect needed. */
@@ -136,31 +189,33 @@ export function TrajectoryDetail({
   const containerRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
 
-  const selectedCommit = commits[selectedIndex];
+  /** Clamp index when switching between commits/turns mode */
+  const safeIndex = Math.min(selectedIndex, effectiveCommits.length - 1);
+  const selectedCommit = effectiveCommits[safeIndex];
 
-  /** Pre-compute criticality tags for all commits */
+  /** Pre-compute criticality tags for all effective commits */
   const criticalityMap: Map<number, CriticalityTag[]> = useMemo(() => {
     const map = new Map<number, CriticalityTag[]>();
-    for (let commitIdx = 0; commitIdx < commits.length; commitIdx++) {
-      const commit = commits[commitIdx];
+    for (let commitIdx = 0; commitIdx < effectiveCommits.length; commitIdx++) {
+      const commit = effectiveCommits[commitIdx];
       if (!commit) {
         continue;
       }
-      const tags = computeCriticality(commit, commitIdx, commits, suites);
+      const tags = computeCriticality(commit, commitIdx, effectiveCommits, suites);
       if (tags.length > 0) {
         map.set(commitIdx, tags);
       }
     }
     return map;
-  }, [commits, suites]);
+  }, [effectiveCommits, suites]);
 
   /** Filter commits when showCriticalOnly is enabled */
   const visibleCommits = useMemo(() => {
     if (!showCriticalOnly) {
-      return commits;
+      return effectiveCommits;
     }
-    return commits.filter((_, commitIdx) => criticalityMap.has(commitIdx));
-  }, [commits, showCriticalOnly, criticalityMap]);
+    return effectiveCommits.filter((_, commitIdx) => criticalityMap.has(commitIdx));
+  }, [effectiveCommits, showCriticalOnly, criticalityMap]);
 
   /** Merge code snapshot into selected commit when code history is available */
   const enrichedCommit: Commit | undefined = useMemo(() => {
@@ -179,10 +234,10 @@ export function TrajectoryDetail({
 
   const handleSelectCommit = useCallback(
     (index: number) => {
-      const clamped = Math.max(0, Math.min(commits.length - 1, index));
+      const clamped = Math.max(0, Math.min(effectiveCommits.length - 1, index));
       setSelectedIndex(clamped);
     },
-    [commits.length],
+    [effectiveCommits.length],
   );
 
   const handleTogglePlay = useCallback(() => {
@@ -200,20 +255,20 @@ export function TrajectoryDetail({
         case "ArrowUp":
         case "k":
           event.preventDefault();
-          handleSelectCommit(selectedIndex - 1);
+          handleSelectCommit(safeIndex - 1);
           break;
         case "ArrowDown":
         case "j":
           event.preventDefault();
-          handleSelectCommit(selectedIndex + 1);
+          handleSelectCommit(safeIndex + 1);
           break;
         case "ArrowLeft":
           event.preventDefault();
-          handleSelectCommit(selectedIndex - 1);
+          handleSelectCommit(safeIndex - 1);
           break;
         case "ArrowRight":
           event.preventDefault();
-          handleSelectCommit(selectedIndex + 1);
+          handleSelectCommit(safeIndex + 1);
           break;
         case " ":
           event.preventDefault();
@@ -225,7 +280,7 @@ export function TrajectoryDetail({
           break;
         case "End":
           event.preventDefault();
-          handleSelectCommit(commits.length - 1);
+          handleSelectCommit(effectiveCommits.length - 1);
           break;
         case "Escape":
           if (event.target instanceof HTMLElement) {
@@ -234,7 +289,7 @@ export function TrajectoryDetail({
           break;
       }
     },
-    [selectedIndex, commits.length, handleSelectCommit, handleTogglePlay],
+    [safeIndex, effectiveCommits.length, handleSelectCommit, handleTogglePlay],
   );
 
   /** Auto-focus via ref callback — no useEffect needed */
@@ -299,10 +354,34 @@ export function TrajectoryDetail({
         style={{ width: panelSpring.leftWidth.to((width) => `${width}%`) }}
       >
         <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Commits / Turns toggle */}
+          <div className="flex items-center gap-1 border-b border-envoi-border px-3.5 py-1.5">
+            <button
+              onClick={() => setGroupByTurn(false)}
+              className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
+                !groupByTurn
+                  ? "bg-envoi-text text-white"
+                  : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+              }`}
+            >
+              commits
+            </button>
+            <button
+              onClick={() => setGroupByTurn(true)}
+              className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
+                groupByTurn
+                  ? "bg-envoi-text text-white"
+                  : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+              }`}
+            >
+              turns
+            </button>
+          </div>
+
           {/* Progress curve */}
           <ProgressCurve
-            commits={commits}
-            selectedIndex={selectedIndex}
+            commits={effectiveCommits}
+            selectedIndex={safeIndex}
             onSelect={handleSelectCommit}
             activeSuite={activeSuite}
             suites={suites}
@@ -311,8 +390,8 @@ export function TrajectoryDetail({
 
           {/* Playback controls */}
           <PlayControls
-            totalCommits={commits.length}
-            selectedIndex={selectedIndex}
+            totalCommits={effectiveCommits.length}
+            selectedIndex={safeIndex}
             onSelect={handleSelectCommit}
             isPlaying={isPlaying}
             onTogglePlay={handleTogglePlay}
@@ -404,16 +483,22 @@ export function TrajectoryDetail({
           {/* Commit list (scrollable) */}
           <div className="flex-1 overflow-y-auto">
             {visibleCommits.map((commit) => {
-              const commitIdx = commits.indexOf(commit);
+              const commitIdx = effectiveCommits.indexOf(commit);
+              const prevCommit = commitIdx > 0 ? effectiveCommits[commitIdx - 1] : undefined;
+              const elapsedSincePrev = prevCommit !== undefined
+                ? commit.minutesElapsed - prevCommit.minutesElapsed
+                : undefined;
               return (
                 <CommitRow
                   key={commit.index}
                   commit={commit}
-                  isSelected={commit.index === selectedIndex}
-                  onSelect={handleSelectCommit}
+                  isSelected={commitIdx === safeIndex}
+                  onSelect={() => handleSelectCommit(commitIdx)}
                   activeSuite={activeSuite}
                   suites={suites}
                   criticalityTags={criticalityMap.get(commitIdx)}
+                  elapsedSincePrev={elapsedSincePrev}
+                  prevCommit={prevCommit}
                 />
               );
             })}

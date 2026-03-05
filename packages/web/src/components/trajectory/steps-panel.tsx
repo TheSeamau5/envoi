@@ -500,7 +500,7 @@ export function StepsPanel({ commit }: StepsPanelProps) {
         <div key={commit.index}>
           {filteredSteps.map((step, stepIndex) => (
             <StepRow
-              key={`${commit.index}-${step.index}`}
+              key={`${commit.index}-${stepIndex}`}
               step={step}
               stepIndex={stepIndex}
               isSelected={selectedStepIndex === stepIndex}

@@ -9,7 +9,7 @@
 
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /** Prefix all envoi localStorage keys to avoid collisions */
 const STORAGE_PREFIX = "envoi:";
@@ -42,41 +42,60 @@ function readStoredValue<T>(prefixedKey: string, defaultValue: T): T | undefined
   }
 }
 
-/** React hook that persists state to localStorage */
+/**
+ * Subscribe to storage events so useSyncExternalStore knows when to re-read.
+ * We also dispatch a custom event on writes so same-tab updates propagate.
+ */
+const STORAGE_EVENT = "envoi-storage";
+function subscribeToStorage(callback: () => void): () => void {
+  /** Cross-tab: native storage event */
+  window.addEventListener("storage", callback);
+  /** Same-tab: custom event dispatched by our setter */
+  window.addEventListener(STORAGE_EVENT, callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener(STORAGE_EVENT, callback);
+  };
+}
+
+/**
+ * React hook that persists state to localStorage.
+ * Uses useSyncExternalStore for hydration-safe reads — the server snapshot
+ * always returns defaultValue, so SSR and first client render match.
+ */
 export function usePersistedState<T>(
   key: string,
   defaultValue: T,
 ): [T, (valueOrUpdater: T | ((prev: T) => T)) => void] {
   const prefixedKey = `${STORAGE_PREFIX}${key}`;
 
-  /**
-   * Lazy initializer: reads localStorage on the client, returns defaultValue
-   * on the server. This is a pure read — no side effects, no setState.
-   */
-  const [value, setValue] = useState<T>(() => {
+  const getSnapshot = useCallback((): T => {
     const stored = readStoredValue(prefixedKey, defaultValue);
     return stored !== undefined ? stored : defaultValue;
-  });
+  }, [prefixedKey, defaultValue]);
 
-  /**
-   * Setter that persists to localStorage inline — no useEffect needed.
-   */
+  const getServerSnapshot = useCallback((): T => {
+    return defaultValue;
+  }, [defaultValue]);
+
+  const value = useSyncExternalStore(subscribeToStorage, getSnapshot, getServerSnapshot);
+
   const setPersistedValue = useCallback(
     (valueOrUpdater: T | ((prev: T) => T)) => {
-      setValue((prev) => {
-        const next =
-          typeof valueOrUpdater === "function"
-            ? (valueOrUpdater as (prev: T) => T)(prev)
-            : valueOrUpdater;
-        try {
-          window.localStorage.setItem(prefixedKey, JSON.stringify(next));
-        } catch {
-          /** Storage full or blocked — silently ignore */
-        }
-        return next;
-      });
+      const current = readStoredValue(prefixedKey, defaultValue) ?? defaultValue;
+      const next =
+        typeof valueOrUpdater === "function"
+          ? (valueOrUpdater as (prev: T) => T)(current)
+          : valueOrUpdater;
+      try {
+        window.localStorage.setItem(prefixedKey, JSON.stringify(next));
+      } catch {
+        /** Storage full or blocked — silently ignore */
+      }
+      /** Notify same-tab subscribers */
+      window.dispatchEvent(new Event(STORAGE_EVENT));
     },
-    [prefixedKey],
+    [prefixedKey, defaultValue],
   );
 
   return [value, setPersistedValue];
