@@ -7,17 +7,25 @@
 const COOKIE_RIGHT_PANEL = "envoi:detail-right-panel-open";
 const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
+const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
+
+export type LayoutCookieKey =
+  | "rightPanelOpen"
+  | "dividerPct"
+  | "sidebarCollapsed"
+  | "groupByTurn";
 
 /** Write a layout cookie. Max-age: 1 year, SameSite=Lax, path=/. */
 export function setLayoutCookie(
-  key: "rightPanelOpen" | "dividerPct" | "sidebarCollapsed",
+  key: LayoutCookieKey,
   value: boolean | number,
 ): void {
   const cookieNames: Record<string, string> = {
     rightPanelOpen: COOKIE_RIGHT_PANEL,
     dividerPct: COOKIE_DIVIDER_PCT,
     sidebarCollapsed: COOKIE_SIDEBAR_COLLAPSED,
+    groupByTurn: COOKIE_GROUP_BY_TURN,
   };
   const name = cookieNames[key];
   if (!name) {

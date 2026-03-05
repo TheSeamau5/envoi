@@ -3,7 +3,8 @@
  * Resizable split layout: left panel (Timeline / Tests & Metrics) and right panel (Steps / Code).
  *
  * Manages all interactive state: selected commit, playback, tabs, suite filter,
- * panel visibility, divider position. Keyboard navigation for commit selection.
+ * panel visibility, divider position. Centralized keyboard navigation via activePanel
+ * state machine — one handleKeyDown routes to commit or step navigation.
  *
  * Panel open/close is animated with react-spring. Both panels are always mounted;
  * the right panel's width animates to 0 when closed.
@@ -12,13 +13,22 @@
 "use client";
 
 import { useState, useCallback, useRef, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type { Trajectory, Suite, CodeSnapshot, Commit, Step, ChangedFile } from "@/lib/types";
+import type {
+  Trajectory,
+  Suite,
+  CodeSnapshot,
+  Commit,
+  Step,
+  ChangedFile,
+} from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { usePersistedState } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
+import { queryKeys } from "@/lib/query-keys";
 import { useLiveTrajectory } from "@/lib/use-live-trajectory";
 import {
   Tooltip,
@@ -31,6 +41,7 @@ import { CommitRow, computeCriticality } from "./commit-row";
 import type { CriticalityTag } from "./commit-row";
 import { TestsPanel } from "./tests-panel";
 import { StepsPanel } from "./steps-panel";
+import type { StepsPanelHandle } from "./steps-panel";
 import { CodePanel } from "./code-panel";
 
 type TrajectoryDetailProps = {
@@ -39,10 +50,14 @@ type TrajectoryDetailProps = {
   /** Server-read initial values — eliminates FOUC on panel layout */
   initialRightPanelOpen: boolean;
   initialDividerPct: number;
+  initialGroupByTurn: boolean;
 };
 
 /** Right panel tab options */
 type RightTab = "steps" | "code" | "tests";
+
+/** Which panel owns keyboard navigation */
+type ActivePanel = "commits" | "steps";
 
 /** Main trajectory detail view with resizable split layout */
 export function TrajectoryDetail({
@@ -50,6 +65,7 @@ export function TrajectoryDetail({
   project,
   initialRightPanelOpen,
   initialDividerPct,
+  initialGroupByTurn,
 }: TrajectoryDetailProps) {
   const { trajectory, isLive } = useLiveTrajectory(initialTrajectory, project);
   const { commits } = trajectory;
@@ -72,8 +88,23 @@ export function TrajectoryDetail({
   /** Critical-only filter */
   const [showCriticalOnly, setShowCriticalOnly] = useState(false);
 
+  const handleGroupByTurnChange = useCallback((nextValue: boolean) => {
+    setLayoutCookie("groupByTurn", nextValue);
+  }, []);
+
   /** Turn-centric view toggle — persisted globally */
-  const [groupByTurn, setGroupByTurn] = usePersistedState("groupByTurn", false);
+  const [groupByTurn, setGroupByTurn] = usePersistedState(
+    "groupByTurn",
+    false,
+    {
+      initialValue: initialGroupByTurn,
+      onChange: handleGroupByTurnChange,
+    },
+  );
+
+  /** Keyboard navigation state machine */
+  const [activePanel, setActivePanel] = useState<ActivePanel>("commits");
+  const [selectedStepIndex, setSelectedStepIndex] = useState<number>();
 
   /** Group commits by turn: pick last commit per turn, aggregate steps + changedFiles */
   const effectiveCommits: Commit[] = useMemo(() => {
@@ -101,7 +132,15 @@ export function TrajectoryDetail({
         allSteps.push(...commit.steps);
         allChangedFiles.push(...commit.changedFiles);
       }
-      grouped.push({ ...lastCommit, steps: allSteps, changedFiles: allChangedFiles });
+      const reindexedSteps = allSteps.map((step, mergedIndex) => ({
+        ...step,
+        index: mergedIndex,
+      }));
+      grouped.push({
+        ...lastCommit,
+        steps: reindexedSteps,
+        changedFiles: allChangedFiles,
+      });
     }
     /** Recompute deltas relative to previous turn */
     for (let idx = 1; idx < grouped.length; idx++) {
@@ -124,39 +163,25 @@ export function TrajectoryDetail({
     return grouped;
   }, [commits, groupByTurn]);
 
-  /** Code history — fetched lazily from code_snapshots.parquet.
-   *  Ref-guarded fetch in render body — no useEffect needed. */
-  const [codeHistory, setCodeHistory] =
-    useState<Record<number, CodeSnapshot>>();
-  const codeHistoryFetchRef = useRef<string | null>(null);
-
-  if (codeHistoryFetchRef.current !== trajectory.id) {
-    codeHistoryFetchRef.current = trajectory.id;
-    const fetchId = trajectory.id;
-    fetch(
-      `/api/trajectories/${encodeURIComponent(fetchId)}/code-history?project=${encodeURIComponent(project)}`,
-    )
-      .then((response) => {
-        if (!response.ok) {
-          return null;
-        }
-        return response.json();
-      })
-      .then((data: Record<string, CodeSnapshot> | null) => {
-        if (!data || codeHistoryFetchRef.current !== fetchId) {
-          return;
-        }
-        /** Convert string keys from JSON to numeric keys */
-        const mapped: Record<number, CodeSnapshot> = {};
-        for (const [key, snapshot] of Object.entries(data)) {
-          mapped[Number(key)] = snapshot;
-        }
-        setCodeHistory(mapped);
-      })
-      .catch(() => {
-        /** Code history is optional — silently ignore fetch errors */
-      });
-  }
+  /** Code history — fetched lazily from code_snapshots.parquet via TanStack Query */
+  const codeHistoryQuery = useQuery({
+    queryKey: queryKeys.trajectories.codeHistory(project, trajectory.id),
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history?project=${encodeURIComponent(project)}`,
+      );
+      if (!response.ok) {
+        return null;
+      }
+      const data: Record<string, CodeSnapshot> = await response.json();
+      const mapped: Record<number, CodeSnapshot> = {};
+      for (const [key, snapshot] of Object.entries(data)) {
+        mapped[Number(key)] = snapshot;
+      }
+      return mapped;
+    },
+  });
+  const codeHistory = codeHistoryQuery.data ?? undefined;
 
   /**
    * Right panel open/close + divider position.
@@ -172,6 +197,9 @@ export function TrajectoryDetail({
   const setRightPanelOpen = useCallback((open: boolean) => {
     setRightPanelOpenRaw(open);
     setLayoutCookie("rightPanelOpen", open);
+    if (!open) {
+      setActivePanel("commits");
+    }
   }, []);
 
   /** Animated panel layout — immediate during drag for responsiveness */
@@ -188,10 +216,21 @@ export function TrajectoryDetail({
   /** Refs for drag + keyboard */
   const containerRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
+  const stepsPanelRef = useRef<StepsPanelHandle>(null);
 
   /** Clamp index when switching between commits/turns mode */
   const safeIndex = Math.min(selectedIndex, effectiveCommits.length - 1);
   const selectedCommit = effectiveCommits[safeIndex];
+
+  /** Count of visible steps for keyboard bounds */
+  const filteredStepCount = useMemo(() => {
+    if (!selectedCommit) {
+      return 0;
+    }
+    return selectedCommit.steps.filter(
+      (step) => step.summary.length > 0 || step.detail.length > 0,
+    ).length;
+  }, [selectedCommit]);
 
   /** Pre-compute criticality tags for all effective commits */
   const criticalityMap: Map<number, CriticalityTag[]> = useMemo(() => {
@@ -201,7 +240,12 @@ export function TrajectoryDetail({
       if (!commit) {
         continue;
       }
-      const tags = computeCriticality(commit, commitIdx, effectiveCommits, suites);
+      const tags = computeCriticality(
+        commit,
+        commitIdx,
+        effectiveCommits,
+        suites,
+      );
       if (tags.length > 0) {
         map.set(commitIdx, tags);
       }
@@ -214,7 +258,9 @@ export function TrajectoryDetail({
     if (!showCriticalOnly) {
       return effectiveCommits;
     }
-    return effectiveCommits.filter((_, commitIdx) => criticalityMap.has(commitIdx));
+    return effectiveCommits.filter((_, commitIdx) =>
+      criticalityMap.has(commitIdx),
+    );
   }, [effectiveCommits, showCriticalOnly, criticalityMap]);
 
   /** Merge code snapshot into selected commit when code history is available */
@@ -236,6 +282,8 @@ export function TrajectoryDetail({
     (index: number) => {
       const clamped = Math.max(0, Math.min(effectiveCommits.length - 1, index));
       setSelectedIndex(clamped);
+      setSelectedStepIndex(undefined);
+      setActivePanel("commits");
     },
     [effectiveCommits.length],
   );
@@ -248,58 +296,163 @@ export function TrajectoryDetail({
     setSpeed(newSpeed);
   }, []);
 
-  /** Keyboard navigation */
+  /** Handle right tab changes — reset activePanel when leaving steps */
+  const handleRightTabChange = useCallback((tab: RightTab) => {
+    setRightTab(tab);
+    if (tab !== "steps") {
+      setActivePanel("commits");
+    }
+  }, []);
+
+  /** Handle step selection from StepsPanel clicks */
+  const handleSelectStep = useCallback((index: number) => {
+    setSelectedStepIndex(index);
+    setActivePanel("steps");
+  }, []);
+
+  /**
+   * Centralized keyboard navigation — routes based on activePanel state.
+   * Uses functional updaters to avoid stale-closure bugs.
+   */
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      const maxCommitIndex = effectiveCommits.length - 1;
+      const maxStepIndex = filteredStepCount - 1;
+
       switch (event.key) {
+        case "Tab":
+          event.preventDefault();
+          if (rightPanelOpen && rightTab === "steps") {
+            setActivePanel((prev) => {
+              if (prev === "commits") {
+                if (selectedStepIndex === undefined) {
+                  setSelectedStepIndex(0);
+                  stepsPanelRef.current?.scrollToStep(0);
+                }
+                return "steps";
+              }
+              return "commits";
+            });
+          }
+          break;
+
+        case "ArrowRight":
+          if (
+            activePanel === "commits" &&
+            rightPanelOpen &&
+            rightTab === "steps"
+          ) {
+            event.preventDefault();
+            setActivePanel("steps");
+            if (selectedStepIndex === undefined) {
+              setSelectedStepIndex(0);
+              stepsPanelRef.current?.scrollToStep(0);
+            }
+          }
+          break;
+
+        case "ArrowLeft":
+          if (activePanel === "steps") {
+            event.preventDefault();
+            setActivePanel("commits");
+          }
+          break;
+
         case "ArrowUp":
         case "k":
           event.preventDefault();
-          handleSelectCommit(safeIndex - 1);
+          if (activePanel === "commits") {
+            setSelectedIndex((prev) => Math.max(0, prev - 1));
+            setSelectedStepIndex(undefined);
+          } else {
+            setSelectedStepIndex((prev) => {
+              const next = prev === undefined ? 0 : Math.max(0, prev - 1);
+              stepsPanelRef.current?.scrollToStep(next);
+              return next;
+            });
+          }
           break;
+
         case "ArrowDown":
         case "j":
           event.preventDefault();
-          handleSelectCommit(safeIndex + 1);
+          if (activePanel === "commits") {
+            setSelectedIndex((prev) => Math.min(maxCommitIndex, prev + 1));
+            setSelectedStepIndex(undefined);
+          } else {
+            setSelectedStepIndex((prev) => {
+              const next =
+                prev === undefined ? 0 : Math.min(maxStepIndex, prev + 1);
+              stepsPanelRef.current?.scrollToStep(next);
+              return next;
+            });
+          }
           break;
-        case "ArrowLeft":
-          event.preventDefault();
-          handleSelectCommit(safeIndex - 1);
-          break;
-        case "ArrowRight":
-          event.preventDefault();
-          handleSelectCommit(safeIndex + 1);
-          break;
+
         case " ":
           event.preventDefault();
-          handleTogglePlay();
+          if (activePanel === "commits") {
+            handleTogglePlay();
+          } else if (selectedStepIndex !== undefined) {
+            stepsPanelRef.current?.toggleExpand(selectedStepIndex);
+          }
           break;
+
+        case "Enter":
+          if (activePanel === "steps" && selectedStepIndex !== undefined) {
+            event.preventDefault();
+            stepsPanelRef.current?.toggleExpand(selectedStepIndex);
+          }
+          break;
+
         case "Home":
           event.preventDefault();
-          handleSelectCommit(0);
+          if (activePanel === "commits") {
+            setSelectedIndex(0);
+            setSelectedStepIndex(undefined);
+          } else {
+            setSelectedStepIndex(0);
+            stepsPanelRef.current?.scrollToStep(0);
+          }
           break;
+
         case "End":
           event.preventDefault();
-          handleSelectCommit(effectiveCommits.length - 1);
+          if (activePanel === "commits") {
+            setSelectedIndex(maxCommitIndex);
+            setSelectedStepIndex(undefined);
+          } else {
+            setSelectedStepIndex(maxStepIndex);
+            stepsPanelRef.current?.scrollToStep(maxStepIndex);
+          }
           break;
+
         case "Escape":
-          if (event.target instanceof HTMLElement) {
+          if (activePanel === "steps") {
+            event.preventDefault();
+            setActivePanel("commits");
+          } else if (event.target instanceof HTMLElement) {
             event.target.blur();
           }
           break;
       }
     },
-    [safeIndex, effectiveCommits.length, handleSelectCommit, handleTogglePlay],
+    [
+      effectiveCommits.length,
+      filteredStepCount,
+      activePanel,
+      handleTogglePlay,
+      rightPanelOpen,
+      rightTab,
+      selectedStepIndex,
+    ],
   );
 
   /** Auto-focus via ref callback — no useEffect needed */
-  const containerCallbackRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      containerRef.current = node;
-      node?.focus();
-    },
-    [],
-  );
+  const containerCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    node?.focus();
+  }, []);
 
   /** Draggable divider handlers — uses raw state during drag (no cookie, no spring) for responsiveness */
   const handleDividerMouseDown = useCallback(() => {
@@ -344,242 +497,295 @@ export function TrajectoryDetail({
   return (
     <div
       ref={containerCallbackRef}
-      className="flex flex-1 overflow-hidden outline-none"
+      className="flex flex-1 flex-col overflow-hidden outline-none"
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      {/* Left panel — always shows timeline */}
-      <animated.div
-        className="flex flex-col overflow-hidden"
-        style={{ width: panelSpring.leftWidth.to((width) => `${width}%`) }}
-      >
-        <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Commits / Turns toggle */}
-          <div className="flex items-center gap-1 border-b border-envoi-border px-3.5 py-1.5">
-            <button
-              onClick={() => setGroupByTurn(false)}
-              className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
-                !groupByTurn
-                  ? "bg-envoi-text text-white"
-                  : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
-              }`}
-            >
-              commits
-            </button>
-            <button
-              onClick={() => setGroupByTurn(true)}
-              className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
-                groupByTurn
-                  ? "bg-envoi-text text-white"
-                  : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
-              }`}
-            >
-              turns
-            </button>
-          </div>
+      {/* Run header */}
+      <TrajectoryHeader trajectory={trajectory} project={project} />
 
-          {/* Progress curve */}
-          <ProgressCurve
-            commits={effectiveCommits}
-            selectedIndex={safeIndex}
-            onSelect={handleSelectCommit}
-            activeSuite={activeSuite}
-            suites={suites}
-            totalTests={totalTests}
-          />
+      {/* Split panel layout */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left panel — always shows timeline */}
+        <animated.div
+          className="flex flex-col overflow-hidden"
+          style={{ width: panelSpring.leftWidth.to((width) => `${width}%`) }}
+        >
+          <div className="flex flex-1 flex-col overflow-hidden">
+            {/* Commits / Turns toggle */}
+            <div className="flex items-center gap-1 border-b border-envoi-border px-3.5 py-1.5">
+              <button
+                onClick={() => setGroupByTurn(false)}
+                className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
+                  !groupByTurn
+                    ? "bg-envoi-text text-white"
+                    : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+                }`}
+              >
+                commits
+              </button>
+              <button
+                onClick={() => setGroupByTurn(true)}
+                className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
+                  groupByTurn
+                    ? "bg-envoi-text text-white"
+                    : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+                }`}
+              >
+                turns
+              </button>
+            </div>
 
-          {/* Playback controls */}
-          <PlayControls
-            totalCommits={effectiveCommits.length}
-            selectedIndex={safeIndex}
-            onSelect={handleSelectCommit}
-            isPlaying={isPlaying}
-            onTogglePlay={handleTogglePlay}
-            speed={speed}
-            onSpeedChange={handleSpeedChange}
-          />
+            {/* Progress curve */}
+            <ProgressCurve
+              commits={effectiveCommits}
+              selectedIndex={safeIndex}
+              onSelect={handleSelectCommit}
+              activeSuite={activeSuite}
+              suites={suites}
+              totalTests={totalTests}
+            />
 
-          {/* Suite filter pills + critical filter toggle */}
-          <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-envoi-border px-3.5 py-1.5">
-            {isLive && <LiveBadge />}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={() => setActiveSuite("all")}
-                  className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
-                    activeSuite === "all"
-                      ? "bg-envoi-text text-white"
-                      : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
-                  }`}
-                >
-                  all
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>All suites: {totalTests} tests</TooltipContent>
-            </Tooltip>
-            {suites.map((suite) => (
-              <Tooltip key={suite.name}>
+            {/* Playback controls */}
+            <PlayControls
+              totalCommits={effectiveCommits.length}
+              selectedIndex={safeIndex}
+              onSelect={handleSelectCommit}
+              isPlaying={isPlaying}
+              onTogglePlay={handleTogglePlay}
+              speed={speed}
+              onSpeedChange={handleSpeedChange}
+            />
+
+            {/* Suite filter pills + critical filter toggle */}
+            <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-envoi-border px-3.5 py-1.5">
+              {isLive && <LiveBadge />}
+              <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={() => setActiveSuite(suite.name)}
+                    onClick={() => setActiveSuite("all")}
                     className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
-                      activeSuite === suite.name
+                      activeSuite === "all"
                         ? "bg-envoi-text text-white"
                         : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
                     }`}
                   >
-                    {suite.name}
+                    all
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>
-                  {suite.name}: {suite.total} tests
-                </TooltipContent>
+                <TooltipContent>All suites: {totalTests} tests</TooltipContent>
               </Tooltip>
-            ))}
-
-            {/* Separator + critical filter */}
-            {criticalityMap.size > 0 && (
-              <>
-                <div className="mx-1 h-3.5 w-px bg-envoi-border-light" />
-                <Tooltip>
+              {suites.map((suite) => (
+                <Tooltip key={suite.name}>
                   <TooltipTrigger asChild>
                     <button
-                      onClick={() => setShowCriticalOnly((prev) => !prev)}
+                      onClick={() => setActiveSuite(suite.name)}
                       className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
-                        showCriticalOnly
-                          ? "bg-envoi-accent text-white"
+                        activeSuite === suite.name
+                          ? "bg-envoi-text text-white"
                           : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
                       }`}
                     >
-                      critical ({criticalityMap.size})
+                      {suite.name}
                     </button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    Show only critical commits (large deltas, suite transitions,
-                    regression recoveries)
+                    {suite.name}: {suite.total} tests
                   </TooltipContent>
                 </Tooltip>
-              </>
-            )}
+              ))}
 
-            {!rightPanelOpen && (
-              <>
-                <div className="flex-1" />
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() => setRightPanelOpen(true)}
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
-                    >
-                      <PanelRightOpen size={14} />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Open right panel</TooltipContent>
-                </Tooltip>
-              </>
-            )}
+              {/* Separator + critical filter */}
+              {criticalityMap.size > 0 && (
+                <>
+                  <div className="mx-1 h-3.5 w-px bg-envoi-border-light" />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() => setShowCriticalOnly((prev) => !prev)}
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[13px] font-semibold transition-colors ${
+                          showCriticalOnly
+                            ? "bg-envoi-accent text-white"
+                            : "bg-envoi-surface text-envoi-text-dim hover:bg-envoi-border-light hover:text-envoi-text"
+                        }`}
+                      >
+                        critical ({criticalityMap.size})
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Show only critical commits (large deltas, suite
+                      transitions, regression recoveries)
+                    </TooltipContent>
+                  </Tooltip>
+                </>
+              )}
+
+              {!rightPanelOpen && (
+                <>
+                  <div className="flex-1" />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() => setRightPanelOpen(true)}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+                      >
+                        <PanelRightOpen size={14} />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Open right panel</TooltipContent>
+                  </Tooltip>
+                </>
+              )}
+            </div>
+
+            {/* Commit list (scrollable) */}
+            <div className="flex-1 overflow-y-auto">
+              {visibleCommits.map((commit) => {
+                const commitIdx = effectiveCommits.indexOf(commit);
+                const prevCommit =
+                  commitIdx > 0 ? effectiveCommits[commitIdx - 1] : undefined;
+                const elapsedSincePrev =
+                  prevCommit !== undefined
+                    ? commit.minutesElapsed - prevCommit.minutesElapsed
+                    : undefined;
+                return (
+                  <CommitRow
+                    key={commit.index}
+                    commit={commit}
+                    isSelected={commitIdx === safeIndex}
+                    isFocused={activePanel === "commits"}
+                    onSelect={() => handleSelectCommit(commitIdx)}
+                    activeSuite={activeSuite}
+                    suites={suites}
+                    criticalityTags={criticalityMap.get(commitIdx)}
+                    elapsedSincePrev={elapsedSincePrev}
+                    prevCommit={prevCommit}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        </animated.div>
+
+        {/* Draggable divider — always mounted, width animates to 0 */}
+        <animated.div
+          onMouseDown={rightPanelOpen ? handleDividerMouseDown : undefined}
+          className="group relative flex shrink-0 items-center justify-center"
+          style={{
+            width: panelSpring.dividerWidth.to((width) => `${width}px`),
+            cursor: rightPanelOpen ? "col-resize" : "default",
+            touchAction: "none",
+            overflow: "hidden",
+          }}
+        >
+          {/* Thin vertical line */}
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-envoi-border-light" />
+          {/* Capsule handle — turns orange on hover/drag */}
+          <div
+            className={`relative z-10 h-9 w-1 rounded-full transition-colors ${
+              dragging ? "" : "bg-envoi-border group-hover:bg-envoi-accent"
+            }`}
+            style={dragging ? { background: T.accent } : undefined}
+          />
+        </animated.div>
+
+        {/* Right panel — always mounted, width + opacity animated */}
+        <animated.div
+          className="flex flex-col overflow-hidden"
+          style={{
+            width: panelSpring.rightWidth.to((width) => `${width}%`),
+            opacity: panelSpring.rightOpacity,
+          }}
+        >
+          {/* Tab bar */}
+          <div className="flex h-10.25 shrink-0 items-stretch border-b border-envoi-border">
+            <TabButton
+              label="Steps"
+              isActive={rightTab === "steps"}
+              onClick={() => handleRightTabChange("steps")}
+            />
+            <TabButton
+              label="Code"
+              isActive={rightTab === "code"}
+              onClick={() => handleRightTabChange("code")}
+            />
+            <TabButton
+              label="Tests & Metrics"
+              isActive={rightTab === "tests"}
+              onClick={() => handleRightTabChange("tests")}
+            />
+            <div className="flex-1" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setRightPanelOpen(false)}
+                  className="mr-2 flex h-6 w-6 shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
+                >
+                  <PanelRightClose size={14} />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Close right panel</TooltipContent>
+            </Tooltip>
           </div>
 
-          {/* Commit list (scrollable) */}
-          <div className="flex-1 overflow-y-auto">
-            {visibleCommits.map((commit) => {
-              const commitIdx = effectiveCommits.indexOf(commit);
-              const prevCommit = commitIdx > 0 ? effectiveCommits[commitIdx - 1] : undefined;
-              const elapsedSincePrev = prevCommit !== undefined
-                ? commit.minutesElapsed - prevCommit.minutesElapsed
-                : undefined;
-              return (
-                <CommitRow
-                  key={commit.index}
-                  commit={commit}
-                  isSelected={commitIdx === safeIndex}
-                  onSelect={() => handleSelectCommit(commitIdx)}
-                  activeSuite={activeSuite}
-                  suites={suites}
-                  criticalityTags={criticalityMap.get(commitIdx)}
-                  elapsedSincePrev={elapsedSincePrev}
-                  prevCommit={prevCommit}
-                />
-              );
-            })}
-          </div>
-        </div>
-      </animated.div>
+          {/* Right tab content */}
+          {rightTab === "steps" ? (
+            <StepsPanel
+              ref={stepsPanelRef}
+              commit={selectedCommit}
+              selectedStepIndex={selectedStepIndex}
+              isFocused={activePanel === "steps"}
+              onSelectStep={handleSelectStep}
+            />
+          ) : rightTab === "code" ? (
+            <CodePanel commit={enrichedCommit ?? selectedCommit} />
+          ) : (
+            <TestsPanel
+              commit={selectedCommit}
+              suites={suites}
+              totalTests={totalTests}
+            />
+          )}
+        </animated.div>
+      </div>
+    </div>
+  );
+}
 
-      {/* Draggable divider — always mounted, width animates to 0 */}
-      <animated.div
-        onMouseDown={rightPanelOpen ? handleDividerMouseDown : undefined}
-        className="group relative flex shrink-0 items-center justify-center"
-        style={{
-          width: panelSpring.dividerWidth.to((width) => `${width}px`),
-          cursor: rightPanelOpen ? "col-resize" : "default",
-          touchAction: "none",
-          overflow: "hidden",
-        }}
-      >
-        {/* Thin vertical line */}
-        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-envoi-border-light" />
-        {/* Capsule handle — turns orange on hover/drag */}
-        <div
-          className={`relative z-10 h-9 w-1 rounded-full transition-colors ${
-            dragging ? "" : "bg-envoi-border group-hover:bg-envoi-accent"
-          }`}
-          style={dragging ? { background: T.accent } : undefined}
-        />
-      </animated.div>
+/** Header bar showing run metadata: project, environment, agent, model */
+function TrajectoryHeader({
+  trajectory,
+  project,
+}: {
+  trajectory: Trajectory;
+  project: string;
+}) {
+  /** Strip agent prefix from model if it duplicates agentHarness (e.g. "codex/gpt-5.3" → "gpt-5.3") */
+  const displayModel =
+    trajectory.agentHarness &&
+    trajectory.model.startsWith(`${trajectory.agentHarness}/`)
+      ? trajectory.model.slice(trajectory.agentHarness.length + 1)
+      : trajectory.model;
 
-      {/* Right panel — always mounted, width + opacity animated */}
-      <animated.div
-        className="flex flex-col overflow-hidden"
-        style={{
-          width: panelSpring.rightWidth.to((width) => `${width}%`),
-          opacity: panelSpring.rightOpacity,
-        }}
-      >
-        {/* Tab bar */}
-        <div className="flex h-10.25 shrink-0 items-stretch border-b border-envoi-border">
-          <TabButton
-            label="Steps"
-            isActive={rightTab === "steps"}
-            onClick={() => setRightTab("steps")}
-          />
-          <TabButton
-            label="Code"
-            isActive={rightTab === "code"}
-            onClick={() => setRightTab("code")}
-          />
-          <TabButton
-            label="Tests & Metrics"
-            isActive={rightTab === "tests"}
-            onClick={() => setRightTab("tests")}
-          />
-          <div className="flex-1" />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={() => setRightPanelOpen(false)}
-                className="mr-2 flex h-6 w-6 shrink-0 self-center items-center justify-center rounded text-envoi-text-dim hover:bg-envoi-surface hover:text-envoi-text"
-              >
-                <PanelRightClose size={14} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Close right panel</TooltipContent>
-          </Tooltip>
-        </div>
+  const segments = [project, trajectory.agentHarness, displayModel].filter(
+    Boolean,
+  );
 
-        {/* Right tab content */}
-        {rightTab === "steps" ? (
-          <StepsPanel commit={selectedCommit} />
-        ) : rightTab === "code" ? (
-          <CodePanel commit={enrichedCommit ?? selectedCommit} />
-        ) : (
-          <TestsPanel
-            commit={selectedCommit}
-            suites={suites}
-            totalTests={totalTests}
-          />
-        )}
-      </animated.div>
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-envoi-border px-3.5 py-1.5">
+      {segments.map((segment, segmentIndex) => (
+        <span key={segmentIndex} className="flex items-center gap-2">
+          {segmentIndex > 0 && (
+            <span className="text-[12px] text-envoi-text-dim">/</span>
+          )}
+          <span
+            className="text-[13px] font-semibold text-envoi-text"
+            style={{ fontFamily: T.mono }}
+          >
+            {segment}
+          </span>
+        </span>
+      ))}
     </div>
   );
 }

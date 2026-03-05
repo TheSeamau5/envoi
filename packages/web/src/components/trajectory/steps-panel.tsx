@@ -1,6 +1,6 @@
 /**
  * Steps panel with feedback banner and expandable step list.
- * Client component — renders steps with stagger animation on commit change.
+ * Display component — keyboard navigation is handled by the parent.
  *
  * All steps are expandable. Expanded content varies by type:
  * - reasoning: THINKING section + optional PLAN section
@@ -19,7 +19,7 @@
 
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle } from "react";
 import {
   Diamond,
   ArrowRight,
@@ -43,6 +43,15 @@ import { StepsTimeline } from "./steps-timeline";
 
 type StepsPanelProps = {
   commit: Commit;
+  selectedStepIndex?: number;
+  isFocused: boolean;
+  onSelectStep: (index: number) => void;
+};
+
+/** Imperative handle for parent keyboard navigation */
+export type StepsPanelHandle = {
+  toggleExpand: (index: number) => void;
+  scrollToStep: (index: number) => void;
 };
 
 /** Map step type to icon and color */
@@ -254,21 +263,24 @@ function hasExpandableContent(step: Step): boolean {
   );
 }
 
-/** Individual step row */
+/** Individual step row — expand state controlled by parent */
 function StepRow({
   step,
   stepIndex,
   isSelected,
+  isFocused,
+  expanded,
   onSelect,
   rowRef,
 }: {
   step: Step;
   stepIndex: number;
   isSelected: boolean;
+  isFocused: boolean;
+  expanded: boolean;
   onSelect: (index: number) => void;
   rowRef: (element: HTMLDivElement | null) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const config = STEP_CONFIG[step.type];
   const StepIcon = config.icon;
   const expandable = hasExpandableContent(step);
@@ -280,21 +292,14 @@ function StepRow({
       ref={rowRef}
       className="border-b border-envoi-border-light px-3.5 py-2.5"
       style={{
-        animation: `stepFadeIn 0.3s ease both`,
-        animationDelay: `${stepIndex * 40}ms`,
-        background: isSelected ? T.accentBg : undefined,
-        borderLeft: isSelected ? `3px solid ${T.accent}` : "3px solid transparent",
+        background: isSelected ? (isFocused ? T.accentBg : T.surface) : undefined,
+        borderLeft: isSelected ? `3px solid ${isFocused ? T.accent : T.borderLight}` : "3px solid transparent",
       }}
     >
       {/* Clickable header */}
       <div
         className={`flex items-start gap-2.5 ${expandable ? "cursor-pointer" : ""}`}
-        onClick={() => {
-          onSelect(stepIndex);
-          if (expandable) {
-            setExpanded((prev) => !prev);
-          }
-        }}
+        onClick={() => onSelect(stepIndex)}
       >
         {/* Expand chevron */}
         <div className="flex w-3.5 shrink-0 items-center pt-1.5">
@@ -422,11 +427,33 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
 }
 
 /** Steps panel with fixed timeline and scrollable step list */
-export function StepsPanel({ commit }: StepsPanelProps) {
+export const StepsPanel = forwardRef<StepsPanelHandle, StepsPanelProps>(
+  function StepsPanel({ commit, selectedStepIndex, isFocused, onSelectStep }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevCommitIndex = useRef(commit.index);
   const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const [selectedStepIndex, setSelectedStepIndex] = useState<number>();
+  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
+
+  /** Expose toggleExpand and scrollToStep to parent */
+  useImperativeHandle(ref, () => ({
+    toggleExpand: (index: number) => {
+      setExpandedSteps((prev) => {
+        const next = new Set(prev);
+        if (next.has(index)) {
+          next.delete(index);
+        } else {
+          next.add(index);
+        }
+        return next;
+      });
+    },
+    scrollToStep: (index: number) => {
+      const element = stepRefs.current.get(index);
+      if (element) {
+        element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    },
+  }), []);
 
   /** Filter steps once for both timeline and list */
   const filteredSteps = useMemo(
@@ -434,31 +461,31 @@ export function StepsPanel({ commit }: StepsPanelProps) {
     [commit.steps],
   );
 
-  /** Reset scroll and selection when commit changes */
+  /** Reset scroll and expand state when commit changes */
   useEffect(() => {
     if (prevCommitIndex.current !== commit.index) {
       if (scrollRef.current) {
         scrollRef.current.scrollTop = 0;
       }
-      setSelectedStepIndex(undefined);
+      setExpandedSteps(new Set());
       stepRefs.current.clear();
     }
     prevCommitIndex.current = commit.index;
   }, [commit.index]);
 
-  /** Handle step selection from timeline — scroll to the step */
-  const handleTimelineSelect = useCallback((index: number) => {
-    setSelectedStepIndex(index);
-    const element = stepRefs.current.get(index);
-    if (element) {
-      element.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
-  }, []);
-
-  /** Handle step selection from list click */
+  /** Handle step click — select + toggle expand */
   const handleStepClick = useCallback((index: number) => {
-    setSelectedStepIndex((prev) => prev === index ? undefined : index);
-  }, []);
+    onSelectStep(index);
+    setExpandedSteps((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  }, [onSelectStep]);
 
   /** Ref callback factory for step rows */
   const getStepRef = useCallback((index: number) => {
@@ -473,30 +500,19 @@ export function StepsPanel({ commit }: StepsPanelProps) {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Inline keyframes for stagger animation */}
-      <style>{`
-        @keyframes stepFadeIn {
-          from {
-            opacity: 0;
-            transform: translateY(6px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-      `}</style>
-
       {/* Fixed: feedback banner + timeline */}
       <FeedbackBanner commit={commit} />
       <StepsTimeline
         steps={filteredSteps}
         selectedStepIndex={selectedStepIndex}
-        onSelectStep={handleTimelineSelect}
+        onSelectStep={onSelectStep}
       />
 
       {/* Scrollable step list */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto overflow-x-hidden outline-none"
+      >
         <div key={commit.index}>
           {filteredSteps.map((step, stepIndex) => (
             <StepRow
@@ -504,6 +520,8 @@ export function StepsPanel({ commit }: StepsPanelProps) {
               step={step}
               stepIndex={stepIndex}
               isSelected={selectedStepIndex === stepIndex}
+              isFocused={isFocused}
+              expanded={expandedSteps.has(stepIndex)}
               onSelect={handleStepClick}
               rowRef={getStepRef(stepIndex)}
             />
@@ -512,4 +530,4 @@ export function StepsPanel({ commit }: StepsPanelProps) {
       </div>
     </div>
   );
-}
+});

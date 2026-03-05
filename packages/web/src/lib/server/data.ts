@@ -16,6 +16,7 @@ import {
   query,
   hasSummaryTables,
 } from "./db";
+import { sqlLiteral } from "./utils";
 import {
   reconstructTrajectory,
   summaryRowToTrajectory,
@@ -59,15 +60,6 @@ async function getMockTrajectoryById(
 
 async function resolveProject(project?: string): Promise<string> {
   return getActiveProject(project);
-}
-
-// ---------------------------------------------------------------------------
-// Escape helpers (prevent SQL injection for identifiers)
-// ---------------------------------------------------------------------------
-
-/** Escape single quotes in SQL string literals */
-function escapeString(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +235,10 @@ async function getAllTrajectoriesFromSummary(
   let sql = `SELECT * FROM trajectory_summary WHERE 1=1`;
 
   if (opts?.environment) {
-    sql += ` AND environment = '${escapeString(opts.environment)}'`;
+    sql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
   }
   if (opts?.model) {
-    sql += ` AND agent_model = '${escapeString(opts.model)}'`;
+    sql += ` AND agent_model = '${sqlLiteral(opts.model)}'`;
   }
 
   sql += ` ORDER BY started_at DESC`;
@@ -311,10 +303,10 @@ async function getAllTrajectoriesFromGlob(
   `;
 
   if (opts?.environment) {
-    sql += ` AND s.environment = '${escapeString(opts.environment)}'`;
+    sql += ` AND s.environment = '${sqlLiteral(opts.environment)}'`;
   }
   if (opts?.model) {
-    sql += ` AND s.agent_model = '${escapeString(opts.model)}'`;
+    sql += ` AND s.agent_model = '${sqlLiteral(opts.model)}'`;
   }
 
   sql += ` ORDER BY s.started_at DESC`;
@@ -445,7 +437,7 @@ async function loadTrajectory(
       const rawRows = await query(
         `
         SELECT *
-        FROM read_parquet('${escapeString(uri)}')
+        FROM read_parquet('${sqlLiteral(uri)}')
         ORDER BY part
       `,
         project,
@@ -465,7 +457,7 @@ async function loadTrajectory(
       query(
         `
         SELECT * EXCLUDE (eval_events_delta)
-        FROM read_parquet('${escapeString(uri)}')
+        FROM read_parquet('${sqlLiteral(uri)}')
         ORDER BY part
       `,
         project,
@@ -475,7 +467,7 @@ async function loadTrajectory(
         SELECT part, turn, eval_id, status, passed, failed, total,
           target_commit, suite_results, finished_at
         FROM evaluations
-        WHERE trajectory_id = '${escapeString(id)}'
+        WHERE trajectory_id = '${sqlLiteral(id)}'
         ORDER BY part
       `,
         project,
@@ -498,7 +490,7 @@ async function loadTrajectory(
     const fullRows = await query(
       `
       SELECT *
-      FROM read_parquet('${escapeString(uri)}')
+      FROM read_parquet('${sqlLiteral(uri)}')
       ORDER BY part
     `,
       project,
@@ -532,7 +524,7 @@ export async function getTrajectorySandboxMeta(
       `
       SELECT session_end_reason
       FROM trajectories
-      WHERE trajectory_id = '${escapeString(id)}'
+      WHERE trajectory_id = '${sqlLiteral(id)}'
       LIMIT 1
     `,
       activeProject,
@@ -592,7 +584,7 @@ export async function getTrajectoryEvaluations(
     const sql = `
       SELECT eval_id, part, passed, failed, total, suite_results, target_commit
       FROM evaluations
-      WHERE trajectory_id = '${escapeString(id)}'
+      WHERE trajectory_id = '${sqlLiteral(id)}'
         AND status = 'completed'
       ORDER BY part
     `;
@@ -737,13 +729,13 @@ async function getCompareTrajectoriesFromSummary(
   let evalSql = `SELECT * FROM evaluation_summary WHERE 1=1`;
 
   if (opts?.ids && opts.ids.length > 0) {
-    const idList = opts.ids.map((id) => `'${escapeString(id)}'`).join(", ");
+    const idList = opts.ids.map((id) => `'${sqlLiteral(id)}'`).join(", ");
     summSql += ` AND trajectory_id IN (${idList})`;
     evalSql += ` AND trajectory_id IN (${idList})`;
   }
   if (opts?.environment) {
-    summSql += ` AND environment = '${escapeString(opts.environment)}'`;
-    evalSql += ` AND environment = '${escapeString(opts.environment)}'`;
+    summSql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
+    evalSql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
   }
 
   summSql += ` ORDER BY started_at DESC`;
@@ -776,7 +768,7 @@ async function getCompareTrajectoriesFromMaterialized(
   if (ids.length === 0) {
     let sql = `SELECT trajectory_id FROM trajectories WHERE 1=1`;
     if (opts?.environment) {
-      sql += ` AND environment = '${escapeString(opts.environment)}'`;
+      sql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
     }
     const rows = await query(sql, project);
     ids = rows.map((row) => String(row.trajectory_id ?? ""));
@@ -855,7 +847,7 @@ export async function getCodeHistory(
   try {
     const sql = `
       SELECT commit_hash, commit_index, file_path, status, content, added_lines
-      FROM read_parquet('${escapeString(uri)}')
+      FROM read_parquet('${sqlLiteral(uri)}')
       ORDER BY commit_index, file_path
     `;
     const rawRows = await query(sql, activeProject);
@@ -1383,7 +1375,7 @@ export async function getParetoData(
       `;
 
       if (environment) {
-        sql += ` AND t.environment = '${escapeString(environment)}'`;
+        sql += ` AND t.environment = '${sqlLiteral(environment)}'`;
       }
 
       sql += ` ORDER BY t.total_tokens ASC`;

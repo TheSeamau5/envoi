@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import type { Project } from "@/lib/types";
 
 type CreateProjectDialogProps = {
@@ -15,26 +16,18 @@ export function CreateProjectDialog({
 }: CreateProjectDialogProps) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [error, setError] = useState<string>();
-  const [saving, setSaving] = useState(false);
 
-  const canSubmit =
-    !saving && name.trim().length >= 2 && name.trim().length <= 64;
-
-  async function createProject(): Promise<void> {
-    if (!canSubmit) {
-      return;
-    }
-
-    setSaving(true);
-    setError(undefined);
-    try {
+  const createMutation = useMutation({
+    mutationFn: async (params: {
+      name: string;
+      description: string | undefined;
+    }) => {
       const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          name: name.trim(),
-          description: description.trim() || undefined,
+          name: params.name,
+          description: params.description,
         }),
       });
 
@@ -44,10 +37,9 @@ export function CreateProjectDialog({
           typeof payload === "object" && payload !== null
             ? Reflect.get(payload, "error")
             : undefined;
-        setError(
+        throw new Error(
           typeof rawError === "string" ? rawError : "Failed to create project",
         );
-        return;
       }
 
       const rawProject =
@@ -77,14 +69,20 @@ export function CreateProjectDialog({
           ),
           modelCount: Number(Reflect.get(rawProject, "modelCount") ?? 0),
         };
-        onCreated(project);
+        return project;
       }
-    } catch {
-      setError("Network error while creating project");
-    } finally {
-      setSaving(false);
-    }
-  }
+      throw new Error("Invalid response from server");
+    },
+    onSuccess: (project) => {
+      onCreated(project);
+    },
+  });
+
+  const saving = createMutation.isPending;
+  const error = createMutation.error?.message;
+
+  const canSubmit =
+    !saving && name.trim().length >= 2 && name.trim().length <= 64;
 
   return (
     <div className="border-b border-envoi-border-light bg-envoi-bg px-3.5 py-3">
@@ -105,7 +103,12 @@ export function CreateProjectDialog({
           <button
             type="button"
             onClick={() => {
-              void createProject();
+              if (canSubmit) {
+                createMutation.mutate({
+                  name: name.trim(),
+                  description: description.trim() || undefined,
+                });
+              }
             }}
             disabled={!canSubmit}
             className="h-8 rounded border border-envoi-border px-3 text-[12px] text-envoi-text-dim transition-colors hover:border-envoi-accent hover:text-envoi-accent disabled:cursor-not-allowed disabled:opacity-50"

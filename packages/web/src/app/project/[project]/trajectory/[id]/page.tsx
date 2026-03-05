@@ -28,10 +28,11 @@ async function TrajectoryContent({
   project: string;
   id: string;
 }) {
-  const [trajectory, { rightPanelOpen, dividerPct }] = await Promise.all([
-    getTrajectoryById(id, { project }),
-    readLayoutCookies(),
-  ]);
+  const [trajectory, { rightPanelOpen, dividerPct, groupByTurn }] =
+    await Promise.all([
+      getTrajectoryById(id, { project }),
+      readLayoutCookies(),
+    ]);
 
   if (!trajectory) {
     notFound();
@@ -43,6 +44,7 @@ async function TrajectoryContent({
       project={project}
       initialRightPanelOpen={rightPanelOpen}
       initialDividerPct={dividerPct}
+      initialGroupByTurn={groupByTurn}
     />
   );
 }

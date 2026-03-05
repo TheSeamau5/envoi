@@ -13,12 +13,14 @@ import { cookies } from "next/headers";
 const COOKIE_RIGHT_PANEL = "envoi:detail-right-panel-open";
 const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
+const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
 
 export type LayoutCookies = {
   rightPanelOpen: boolean;
   dividerPct: number;
   sidebarCollapsed: boolean;
+  groupByTurn: boolean;
   project?: string;
 };
 
@@ -60,6 +62,16 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
+  let groupByTurn = false;
+  try {
+    const groupByTurnCookie = jar.get(COOKIE_GROUP_BY_TURN);
+    if (groupByTurnCookie) {
+      groupByTurn = groupByTurnCookie.value === "true";
+    }
+  } catch {
+    // cookie unavailable — use default
+  }
+
   let project: string | undefined;
   try {
     const projectCookie = jar.get(COOKIE_PROJECT);
@@ -71,5 +83,11 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
-  return { rightPanelOpen, dividerPct, sidebarCollapsed, project };
+  return {
+    rightPanelOpen,
+    dividerPct,
+    sidebarCollapsed,
+    groupByTurn,
+    project,
+  };
 }

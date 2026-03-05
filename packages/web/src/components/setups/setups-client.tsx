@@ -1,17 +1,15 @@
 /**
  * Setups Client — wraps SetupCompare with full-data fetching.
- * Fetches all trajectory data (with commit histories) on mount,
+ * Uses TanStack Query to fetch all trajectory data (with commit histories),
  * then renders SetupCompare once loaded.
- *
- * ZERO useEffect — fetch is ref-guarded in the render body;
- * setState happens in async .then callbacks, not in effects.
  */
 
 "use client";
 
-import { useState, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
 import { SetupCompare } from "@/components/compare/setup-compare";
+import { queryKeys } from "@/lib/query-keys";
 
 type SetupsClientProps = {
   /** Summary-level trajectories from the server (fallback while loading) */
@@ -20,24 +18,21 @@ type SetupsClientProps = {
 };
 
 export function SetupsClient({ allTraces, project }: SetupsClientProps) {
-  const [fullTraces, setFullTraces] = useState<Trajectory[]>([]);
-  const [loading, setLoading] = useState(true);
-  const fetchRef = useRef(false);
+  const compareQuery = useQuery({
+    queryKey: queryKeys.compare.all(project),
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/compare?project=${encodeURIComponent(project)}`,
+      );
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectory data");
+      }
+      const data: Trajectory[] = await response.json();
+      return data.filter((trace) => trace.finalPassed > 0);
+    },
+  });
 
-  /** Fire fetch exactly once — guarded by ref, not driven by useEffect */
-  if (!fetchRef.current) {
-    fetchRef.current = true;
-    fetch(`/api/compare?project=${encodeURIComponent(project)}`)
-      .then((res) => res.json())
-      .then((data: Trajectory[]) => {
-        const active = data.filter((trace) => trace.finalPassed > 0);
-        setFullTraces(active);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }
-
-  if (loading) {
+  if (compareQuery.isLoading) {
     return (
       <div className="flex flex-1 items-center justify-center">
         <span className="text-[12px] text-envoi-text-muted">
@@ -47,7 +42,21 @@ export function SetupsClient({ allTraces, project }: SetupsClientProps) {
     );
   }
 
+  if (compareQuery.isError) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <span className="text-[12px] text-red-500">
+          Failed to load trajectory data
+        </span>
+      </div>
+    );
+  }
+
+  const traces = compareQuery.data;
+
   return (
-    <SetupCompare allTraces={fullTraces.length > 0 ? fullTraces : allTraces} />
+    <SetupCompare
+      allTraces={traces && traces.length > 0 ? traces : allTraces}
+    />
   );
 }

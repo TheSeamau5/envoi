@@ -7,6 +7,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useMemo } from "react";
+import { useMutation } from "@tanstack/react-query";
 import {
   Play,
   Loader2,
@@ -56,9 +57,6 @@ export function QueryClient({
   project,
 }: QueryClientProps) {
   const [sql, setSql] = useState("");
-  const [result, setResult] = useState<QueryResult>();
-  const [error, setError] = useState<string>();
-  const [isLoading, setIsLoading] = useState(false);
   const [savedTemplates, setSavedTemplates] = usePersistedState<
     QueryTemplate[]
   >("saved-templates", EMPTY_TEMPLATES);
@@ -97,46 +95,42 @@ export function QueryClient({
     return interpolated;
   }, [activeTemplate, paramValues, sql]);
 
+  const queryMutation = useMutation({
+    mutationFn: async (queryText: string) => {
+      const response = await fetch(
+        `/api/query?project=${encodeURIComponent(project)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sql: queryText }),
+        },
+      );
+      if (!response.ok) {
+        const errorBody: { error?: string } = await response.json();
+        throw new Error(errorBody.error ?? "Query failed");
+      }
+      const result: QueryResult = await response.json();
+      return result;
+    },
+  });
+
   const runQuery = useCallback(
-    async (queryText: string) => {
+    (queryText: string) => {
       if (queryText.trim().length === 0) {
         return;
       }
-
-      setIsLoading(true);
-      setError(undefined);
-      setResult(undefined);
-
-      try {
-        const response = await fetch(
-          `/api/query?project=${encodeURIComponent(project)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sql: queryText }),
-          },
-        );
-        const data: unknown = await response.json();
-
-        if (!response.ok) {
-          const errorData = data as Record<string, unknown>;
-          setError(String(errorData.error ?? "Query failed"));
-          return;
-        }
-
-        setResult(data as QueryResult);
-      } catch {
-        setError("Failed to execute query");
-      } finally {
-        setIsLoading(false);
-      }
+      queryMutation.mutate(queryText);
     },
-    [project],
+    [queryMutation],
   );
 
   const handleRun = useCallback(() => {
     runQuery(interpolatedSql);
   }, [runQuery, interpolatedSql]);
+
+  const isLoading = queryMutation.isPending;
+  const error = queryMutation.error?.message;
+  const result = queryMutation.data;
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -169,8 +163,7 @@ export function QueryClient({
       }
       setActiveTemplateId(templateId);
       setActiveVisualization(tmpl.visualization);
-      setResult(undefined);
-      setError(undefined);
+      queryMutation.reset();
 
       /** Populate default param values */
       const defaults: Record<string, string> = {};

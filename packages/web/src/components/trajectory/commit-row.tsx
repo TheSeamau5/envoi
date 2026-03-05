@@ -121,6 +121,7 @@ function formatElapsed(minutes: number): string {
 type CommitRowProps = {
   commit: Commit;
   isSelected: boolean;
+  isFocused: boolean;
   onSelect: (index: number) => void;
   activeSuite: string;
   suites?: Suite[];
@@ -133,7 +134,7 @@ type CommitRowProps = {
 };
 
 /** Single commit row with optional criticality indicator */
-export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: suitesProp, criticalityTags, elapsedSincePrev, prevCommit }: CommitRowProps) {
+export function CommitRow({ commit, isSelected, isFocused, onSelect, activeSuite, suites: suitesProp, criticalityTags, elapsedSincePrev, prevCommit }: CommitRowProps) {
   const effectiveSuites = suitesProp ?? DEFAULT_SUITES;
   const rowRef = useRef<HTMLDivElement>(null);
 
@@ -146,7 +147,7 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
   const isCritical = criticalityTags !== undefined && criticalityTags.length > 0;
 
   const leftBorderColor = isSelected
-    ? T.accent
+    ? (isFocused ? T.accent : T.borderLight)
     : commit.isRegression
       ? T.red
       : commit.isMilestone
@@ -155,7 +156,9 @@ export function CommitRow({ commit, isSelected, onSelect, activeSuite, suites: s
           ? T.accent
           : "transparent";
 
-  const bgColor = isSelected ? T.accentBg : "transparent";
+  const bgColor = isSelected
+    ? (isFocused ? T.accentBg : T.surface)
+    : "transparent";
 
   const suitesToShow =
     activeSuite === "all"

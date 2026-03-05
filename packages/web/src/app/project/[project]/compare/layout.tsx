@@ -31,10 +31,9 @@ async function CompareContent({
   children: ReactNode;
 }) {
   const allTraces = await getAllTrajectories({ project });
-  const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
 
   return (
-    <CompareProvider allTraces={activeTraces} project={project}>
+    <CompareProvider allTraces={allTraces} project={project}>
       <CompareShell project={project}>{children}</CompareShell>
     </CompareProvider>
   );

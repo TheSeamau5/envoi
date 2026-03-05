@@ -278,14 +278,15 @@ export function CompareShell({ children, project }: CompareShellProps) {
                 </span>
               </div>
             </div>
-          ) : isLoadingFull ? (
-            <div className="flex h-full items-center justify-center">
-              <span className="text-[12px] text-envoi-text-muted">
-                Loading trajectory data...
-              </span>
-            </div>
           ) : (
-            children
+            <div className="flex h-full flex-col">
+              {isLoadingFull ? (
+                <div className="mb-2 text-[12px] text-envoi-text-muted">
+                  Updating trajectory data...
+                </div>
+              ) : null}
+              <div className="min-h-0 flex-1">{children}</div>
+            </div>
           )}
         </div>
       </div>

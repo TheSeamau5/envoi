@@ -3,17 +3,22 @@
  * Groups trajectories by environment (first level) then model (second level),
  * sorted in reverse chronological order within each group.
  * Failed runs (best score = 0) are shown in a separate tab.
+ *
+ * Uses TanStack Query with refetchInterval for polling instead of
+ * manual setTimeout chains.
  */
 
 "use client";
 
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useRef } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
 import { isPossiblyLive } from "@/lib/use-live-trajectory";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
 import { formatPercent, formatDate, needsYear } from "@/lib/utils";
+import { queryKeys } from "@/lib/query-keys";
 
 type TrajectoryListProps = {
   trajectories: Trajectory[];
@@ -113,95 +118,61 @@ export function TrajectoryList({
   trajectories: initialTrajectories,
   project,
 }: TrajectoryListProps) {
-  const [trajectories, setTrajectories] = useState(initialTrajectories);
   const [activeTab, setActiveTab] = useState<Tab>("active");
-  const [liveIds, setLiveIds] = useState<Set<string>>(new Set());
+
+  /** Track IDs confirmed dead to avoid re-checking sandbox status */
   const confirmedDeadRef = useRef<Set<string>>(new Set());
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-  const mountedRef = useRef(true);
 
-  /** Ref indirection so the effect always calls the latest function */
-  const refreshAndPollRef = useRef<() => Promise<void>>(async () => {});
-
-  /**
-   * Refresh trajectory list + check liveness, then schedule next poll
-   * if any trajectories are still live. Self-chaining setTimeout pattern.
-   */
-  const refreshAndPoll = useCallback(async () => {
-    try {
+  /** Fetch trajectory list with polling */
+  const trajectoriesQuery = useQuery({
+    queryKey: queryKeys.trajectories.all(project),
+    queryFn: async () => {
       const response = await fetch(
         `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
       );
-      if (!response.ok || !mountedRef.current) {
-        return;
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectories");
       }
       const data: Trajectory[] = await response.json();
-      if (!mountedRef.current) {
-        return;
-      }
-      setTrajectories(data);
 
-      /** Check liveness for candidates */
+      /** Check liveness for candidates not already confirmed dead */
       const candidates = data
         .filter((trace) => isPossiblyLive(trace))
         .map((trace) => trace.id)
         .filter((traceId) => !confirmedDeadRef.current.has(traceId));
 
-      if (candidates.length === 0) {
-        setLiveIds(new Set());
-        return;
-      }
-
-      const confirmed = await checkLiveTrajectories(candidates, project);
-      if (!mountedRef.current) {
-        return;
-      }
-      setLiveIds(confirmed);
-      for (const traceId of candidates) {
-        if (!confirmed.has(traceId)) {
-          confirmedDeadRef.current.add(traceId);
+      let liveIds = new Set<string>();
+      if (candidates.length > 0) {
+        liveIds = await checkLiveTrajectories(candidates, project);
+        for (const traceId of candidates) {
+          if (!liveIds.has(traceId)) {
+            confirmedDeadRef.current.add(traceId);
+          }
         }
       }
 
-      /** Schedule next poll only if any are still live */
-      if (confirmed.size > 0) {
-        timerRef.current = setTimeout(
-          () => void refreshAndPollRef.current(),
-          LIST_POLL_MS,
-        );
+      return { trajectories: data, liveIds };
+    },
+    initialData: {
+      trajectories: initialTrajectories,
+      liveIds: new Set<string>(),
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) {
+        return false;
       }
-    } catch {
-      /** Network errors are transient — retry if still mounted */
-      if (mountedRef.current) {
-        timerRef.current = setTimeout(
-          () => void refreshAndPollRef.current(),
-          LIST_POLL_MS,
-        );
-      }
-    }
-  }, [project]);
+      const hasLiveCandidates = data.trajectories.some((trace) =>
+        isPossiblyLive(trace),
+      );
+      return hasLiveCandidates ? LIST_POLL_MS : false;
+    },
+    staleTime: 0,
+  });
 
-  refreshAndPollRef.current = refreshAndPoll;
-
-  /**
-   * Start poll chain on mount, clean up on unmount.
-   * No synchronous setState in the effect body — only starts an async chain.
-   * Survives React Strict Mode: cleanup kills the timer, re-fire restarts it.
-   */
-  useEffect(() => {
-    mountedRef.current = true;
-    void refreshAndPollRef.current();
-
-    return () => {
-      mountedRef.current = false;
-      if (timerRef.current !== undefined) {
-        clearTimeout(timerRef.current);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const trajectories =
+    trajectoriesQuery.data?.trajectories ?? initialTrajectories;
+  const liveIds = trajectoriesQuery.data?.liveIds ?? new Set<string>();
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];

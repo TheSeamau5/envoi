@@ -6,7 +6,9 @@
  * State persists across tab navigation because this provider
  * lives in the /compare layout.
  *
- * ZERO useEffect — all state is either initialized, derived, or event-driven.
+ * Full trajectory data is fetched via TanStack Query, keyed by
+ * the sorted set of selected IDs. Selecting/deselecting a trace
+ * changes the query key, and TanStack Query handles caching.
  */
 
 "use client";
@@ -17,15 +19,15 @@ import {
   useState,
   useMemo,
   useCallback,
-  useRef,
 } from "react";
 import type { ReactNode } from "react";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import type { Trajectory, Suite } from "@/lib/types";
 import { computeTotalTests } from "@/lib/constants";
+import { queryKeys } from "@/lib/query-keys";
+import { usePersistedState } from "@/lib/storage";
 
 type SortKey = "score" | "date";
-
-const STORAGE_KEY = "envoi:compare-trace-colors";
 
 /** Find the smallest non-negative integer not in `usedSet` */
 function minAvailableColor(usedSet: Set<number>): number {
@@ -54,38 +56,22 @@ function collectSuites(traces: Trajectory[]): Suite[] {
     .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name));
 }
 
-/** Read colorMap from localStorage, filtering to valid trace IDs */
-function readStoredColorMap(
+/** Keep only valid color assignments (id present + non-negative index). */
+function sanitizeColorMap(
+  colorMap: Record<string, number>,
   validIds: Set<string>,
 ): Record<string, number> {
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (!stored) {
-      return {};
+  const cleaned: Record<string, number> = {};
+  for (const [id, colorIdx] of Object.entries(colorMap)) {
+    if (typeof colorIdx !== "number" || colorIdx < 0) {
+      continue;
     }
-    const parsed: unknown = JSON.parse(stored);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
+    if (validIds.size > 0 && !validIds.has(id)) {
+      continue;
     }
-    const cleaned: Record<string, number> = {};
-    for (const [id, colorIdx] of Object.entries(parsed)) {
-      if (validIds.has(id) && typeof colorIdx === "number" && colorIdx >= 0) {
-        cleaned[id] = colorIdx;
-      }
-    }
-    return cleaned;
-  } catch {
-    return {};
+    cleaned[id] = colorIdx;
   }
-}
-
-/** Write colorMap to localStorage */
-function writeStoredColorMap(colorMap: Record<string, number>): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(colorMap));
-  } catch {
-    // Storage full or blocked — silently ignore
-  }
+  return cleaned;
 }
 
 type CompareContextValue = {
@@ -124,67 +110,105 @@ type CompareProviderProps = {
 };
 
 export function CompareProvider({
-  allTraces,
+  allTraces: initialAllTraces,
   children,
   project,
 }: CompareProviderProps) {
-  console.log("[DEBUG] CompareProvider render, allTraces:", allTraces.length);
-  const [fullTrajectories, setFullTrajectories] = useState<
-    Record<string, Trajectory>
-  >({});
-  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
-
   /**
    * colorMap: traceId → colorIndex.
-   * Starts empty to match SSR. Hydrated from localStorage via the fetch
-   * callback in hydrateFromStorage — the setColorMap happens in the .then,
-   * which is a proper async callback (never fires before mount).
+   * Canonically persisted in localStorage via usePersistedState.
    */
-  const [colorMap, setColorMap] = useState<Record<string, number>>({});
-  const hydratedColorsRef = useRef(false);
-
-  /**
-   * Hydrate colorMap from localStorage by kicking off a fetch.
-   * The setColorMap call lives inside the fetch .then callback —
-   * guaranteed to fire after mount.
-   */
-  if (!hydratedColorsRef.current && typeof window !== "undefined") {
-    hydratedColorsRef.current = true;
-    const validIds = new Set(allTraces.map((trace) => trace.id));
-    const stored = readStoredColorMap(validIds);
-    if (Object.keys(stored).length > 0) {
-      const storedIds = Object.keys(stored);
-      console.log("[DEBUG] CompareProvider hydrating colorMap from localStorage, ids:", storedIds);
-      // Kick off fetch — setColorMap happens in the .then callback (safe)
-      fetch(
-        `/api/compare?project=${encodeURIComponent(project)}&ids=${storedIds.join(",")}`,
-      )
-        .then((res) => res.json())
-        .then((data: Trajectory[]) => {
-          console.log("[DEBUG] CompareProvider hydration fetch complete, setting colorMap");
-          setColorMap(stored);
-          setFullTrajectories((prev) => {
-            const next = { ...prev };
-            for (const traj of data) {
-              next[traj.id] = traj;
-            }
-            return next;
-          });
-        })
-        .catch(() => {
-          // Even on fetch error, restore the colorMap — the selections are valid
-          console.log("[DEBUG] CompareProvider hydration fetch failed, still restoring colorMap");
-          setColorMap(stored);
-        });
-    }
-  }
+  const [storedColorMap, setStoredColorMap] = usePersistedState<
+    Record<string, number>
+  >("compare-trace-colors", {});
 
   const [sortBy, setSortBy] = useState<SortKey>("score");
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [focusedIndex, setFocusedIndex] = useState(0);
 
+  /** Keep trajectory list fresh; if first SSR pass is empty, poll until data arrives. */
+  const allTracesQuery = useQuery({
+    queryKey: queryKeys.trajectories.all(project),
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
+      );
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectories");
+      }
+      const data: Trajectory[] = await response.json();
+      return data;
+    },
+    initialData: initialAllTraces,
+    staleTime: 0,
+    refetchOnMount: true,
+    refetchInterval: (query) => {
+      const traces = query.state.data ?? [];
+      return traces.length === 0 ? 5_000 : false;
+    },
+  });
+  const allTraces = allTracesQuery.data ?? initialAllTraces;
+  console.log("[DEBUG] CompareProvider render, allTraces:", allTraces.length);
+  const validTraceIds = useMemo(
+    () => new Set(allTraces.map((trace) => trace.id)),
+    [allTraces],
+  );
+  const colorMap = useMemo(
+    () => sanitizeColorMap(storedColorMap, validTraceIds),
+    [storedColorMap, validTraceIds],
+  );
+
   /** Derive selected IDs from colorMap keys */
   const selectedIds = useMemo(() => Object.keys(colorMap), [colorMap]);
+  const sortedSelectedIds = useMemo(
+    () => [...selectedIds].sort(),
+    [selectedIds],
+  );
+
+  /**
+   * Fetch full trajectory data for all selected IDs.
+   * Key changes when selectedIds changes → auto-refetch.
+   * keepPreviousData ensures deselecting a trace doesn't flash loading state.
+   */
+  const compareQuery = useQuery({
+    queryKey: queryKeys.compare.byIds(project, sortedSelectedIds),
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/compare?project=${encodeURIComponent(project)}&ids=${sortedSelectedIds.join(",")}`,
+      );
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectory data");
+      }
+      const data: Trajectory[] = await response.json();
+      return data;
+    },
+    enabled: sortedSelectedIds.length > 0,
+    placeholderData: keepPreviousData,
+    staleTime: 2 * 60 * 1000,
+  });
+
+  /** Derive fullTrajectories map from query data */
+  const fullTrajectories: Record<string, Trajectory> = useMemo(() => {
+    const map: Record<string, Trajectory> = {};
+    if (compareQuery.data) {
+      for (const traj of compareQuery.data) {
+        map[traj.id] = traj;
+      }
+    }
+    return map;
+  }, [compareQuery.data]);
+
+  /** Whether any selected traces are still loading their full data */
+  const isLoadingFull = compareQuery.isFetching;
+
+  /** IDs currently being fetched — derive from query state */
+  const loadingIds = useMemo<Set<string>>(() => {
+    if (!compareQuery.isFetching) {
+      return new Set();
+    }
+    // When fetching, all selected IDs that don't have full data yet are "loading"
+    return new Set(selectedIds.filter((id) => !(id in fullTrajectories)));
+  }, [compareQuery.isFetching, selectedIds, fullTrajectories]);
 
   /** Filter traces by model */
   const filteredTraces = useMemo(() => {
@@ -244,9 +268,6 @@ export function CompareProvider({
     [selectedIds, allTraces, fullTrajectories],
   );
 
-  /** Whether any selected traces are still loading their full data */
-  const isLoadingFull = loadingIds.size > 0;
-
   /** Color indices parallel to selectedTraces */
   const colorIndices = useMemo(
     () => selectedTraces.map((trace) => colorMap[trace.id] ?? 0),
@@ -259,68 +280,25 @@ export function CompareProvider({
     [selectedTraces],
   );
 
-  /** Ref to track in-flight fetches without triggering re-renders */
-  const fetchingRef = useRef<Set<string>>(new Set());
-
-  /** Fetch full trajectory data — called from toggleTrace, not from an effect */
-  const fetchFullTrajectories = useCallback(
-    (ids: string[]) => {
-      const idsToFetch = ids.filter(
-        (id) => !fetchingRef.current.has(id),
-      );
-      if (idsToFetch.length === 0) {
-        return;
-      }
-
-      for (const id of idsToFetch) {
-        fetchingRef.current.add(id);
-      }
-      setLoadingIds(new Set(fetchingRef.current));
-
-      fetch(
-        `/api/compare?project=${encodeURIComponent(project)}&ids=${idsToFetch.join(",")}`,
-      )
-        .then((res) => res.json())
-        .then((data: Trajectory[]) => {
-          setFullTrajectories((prev) => {
-            const next = { ...prev };
-            for (const traj of data) {
-              next[traj.id] = traj;
-            }
-            return next;
-          });
-        })
-        .catch(() => {
-          // On error, silently ignore
-        })
-        .finally(() => {
-          for (const id of idsToFetch) {
-            fetchingRef.current.delete(id);
-          }
-          setLoadingIds(new Set(fetchingRef.current));
-        });
-    },
-    [project],
-  );
-  /** Toggle trace selection — assigns min available color on select */
+  /**
+   * Toggle trace selection — assigns min available color on select.
+   * Changing colorMap triggers selectedIds change → query key change → auto-refetch.
+   */
   const toggleTrace = useCallback(
     (traceId: string) => {
-      setColorMap((prev) => {
-        if (traceId in prev) {
-          const next = { ...prev };
+      setStoredColorMap((prev) => {
+        const current = sanitizeColorMap(prev, validTraceIds);
+        if (traceId in current) {
+          const next = { ...current };
           delete next[traceId];
-          writeStoredColorMap(next);
           return next;
         }
-        const usedColors = new Set(Object.values(prev));
+        const usedColors = new Set(Object.values(current));
         const newColor = minAvailableColor(usedColors);
-        const next = { ...prev, [traceId]: newColor };
-        writeStoredColorMap(next);
-        fetchFullTrajectories([traceId]);
-        return next;
+        return { ...current, [traceId]: newColor };
       });
     },
-    [fetchFullTrajectories],
+    [setStoredColorMap, validTraceIds],
   );
 
   /** Get the assigned color index for a trace (-1 if not selected) */
@@ -333,9 +311,8 @@ export function CompareProvider({
 
   /** Clear all selections */
   const clearSelection = useCallback(() => {
-    setColorMap({});
-    writeStoredColorMap({});
-  }, []);
+    setStoredColorMap({});
+  }, [setStoredColorMap]);
 
   /** Unique model names for the filter dropdown */
   const uniqueModels = useMemo(() => {

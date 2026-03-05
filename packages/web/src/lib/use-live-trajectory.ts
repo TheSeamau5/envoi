@@ -5,18 +5,16 @@
  * the /api/trajectories/:id/sandbox-status endpoint.  This is the source of
  * truth — no timestamp heuristics needed.
  *
- * If sessionEndReason is already present the trajectory is definitely done
- * and we skip the sandbox check entirely.
- *
- * The useEffect here starts the async poll chain on mount and cleans up
- * on unmount. No synchronous setState in the effect body — all state
- * updates happen inside async callbacks (fetch .then, setTimeout).
+ * Uses TanStack Query with refetchInterval for polling instead of manual
+ * setTimeout chains. Polling stops automatically when sessionEndReason
+ * is present or the sandbox reports as stopped.
  */
 
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
+import { queryKeys } from "@/lib/query-keys";
 
 /** Poll every 30 seconds while live */
 const POLL_INTERVAL_MS = 30_000;
@@ -64,91 +62,47 @@ export function useLiveTrajectory(
   isLive: boolean;
   lastRefreshed: Date;
 } {
-  const [trajectory, setTrajectory] = useState(initial);
-  const [lastRefreshed, setLastRefreshed] = useState(() => new Date());
-  const [live, setLive] = useState(() => isPossiblyLive(initial));
+  const possiblyLive = isPossiblyLive(initial);
 
-  /** Track mounted state for safe async setState */
-  const mountedRef = useRef(true);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-
-  /** Ref indirection so the effect always calls the latest refresh */
-  const refreshRef = useRef<() => Promise<void>>(async () => {});
-
-  const refresh = useCallback(async () => {
-    try {
-      /** Fetch latest trajectory data */
+  /** Poll for fresh trajectory data while possibly live */
+  const trajectoryQuery = useQuery({
+    queryKey: queryKeys.trajectories.detail(project, initial.id),
+    queryFn: async () => {
       const response = await fetch(
         `/api/trajectories/${encodeURIComponent(initial.id)}?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
       );
-      if (!response.ok || !mountedRef.current) {
-        return;
+      if (!response.ok) {
+        throw new Error("Failed to fetch trajectory");
       }
       const data: Trajectory = await response.json();
-      if (!mountedRef.current) {
-        return;
+      return data;
+    },
+    initialData: initial,
+    enabled: possiblyLive,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.sessionEndReason) {
+        return false;
       }
-      setTrajectory(data);
-      setLastRefreshed(new Date());
+      return POLL_INTERVAL_MS;
+    },
+    staleTime: 0,
+  });
 
-      /** If sessionEndReason appeared, we're done */
-      if (data.sessionEndReason) {
-        setLive(false);
-        return;
-      }
+  const trajectory = trajectoryQuery.data ?? initial;
+  const isDone = !!trajectory.sessionEndReason;
 
-      /** Ask the sandbox provider if it's still running */
-      const running = await checkSandboxStatus(initial.id, project);
-      if (!mountedRef.current) {
-        return;
-      }
-      setLive(running);
+  /** Check sandbox status — only when trajectory hasn't ended yet */
+  const sandboxQuery = useQuery({
+    queryKey: queryKeys.trajectories.sandboxStatus(project, initial.id),
+    queryFn: () => checkSandboxStatus(initial.id, project),
+    enabled: possiblyLive && !isDone,
+    refetchInterval: POLL_INTERVAL_MS,
+    staleTime: 0,
+  });
 
-      /** Schedule next poll only if still running */
-      if (running) {
-        timerRef.current = setTimeout(
-          () => void refreshRef.current(),
-          POLL_INTERVAL_MS,
-        );
-      }
-    } catch {
-      /** Network errors are transient — schedule retry if still mounted */
-      if (mountedRef.current) {
-        timerRef.current = setTimeout(
-          () => void refreshRef.current(),
-          POLL_INTERVAL_MS,
-        );
-      }
-    }
-  }, [initial.id, project]);
+  const isLive = possiblyLive && !isDone && (sandboxQuery.data === true);
+  const lastRefreshed = new Date(trajectoryQuery.dataUpdatedAt);
 
-  refreshRef.current = refresh;
-
-  /**
-   * Start poll chain on mount, clean up on unmount.
-   * The effect body has ZERO synchronous setState calls — it only calls
-   * void refreshRef.current() which is async. All setState happens in
-   * the async fetch callbacks, not in the effect body.
-   * Survives React Strict Mode: cleanup kills the timer, re-fire restarts it.
-   */
-  useEffect(() => {
-    mountedRef.current = true;
-
-    if (isPossiblyLive(initial)) {
-      void refreshRef.current();
-    }
-
-    return () => {
-      mountedRef.current = false;
-      if (timerRef.current !== undefined) {
-        clearTimeout(timerRef.current);
-      }
-    };
-    // mount-once: initial and refreshRef are stable
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return { trajectory, isLive: live, lastRefreshed };
+  return { trajectory, isLive, lastRefreshed };
 }
