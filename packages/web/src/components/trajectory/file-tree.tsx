@@ -12,7 +12,7 @@
 
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import {
   FileCode2,
   FileJson,
@@ -184,6 +184,24 @@ function TreeNodeRow({
   );
 }
 
+/** Collect visible file paths in display order (respecting expanded folders) */
+function collectVisibleFiles(
+  nodes: TreeNode[],
+  expanded: Set<string>,
+): string[] {
+  const result: string[] = [];
+  for (const node of nodes) {
+    if (node.isDirectory) {
+      if (expanded.has(node.path)) {
+        result.push(...collectVisibleFiles(node.children, expanded));
+      }
+    } else {
+      result.push(node.path);
+    }
+  }
+  return result;
+}
+
 export function FileTree({
   snapshot,
   selectedFile,
@@ -218,10 +236,49 @@ export function FileTree({
     });
   };
 
+  const visibleFiles = useMemo(
+    () => collectVisibleFiles(tree, expandedFolders),
+    [tree, expandedFolders],
+  );
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+
+      const currentIndex = selectedFile
+        ? visibleFiles.indexOf(selectedFile)
+        : -1;
+
+      if (visibleFiles.length === 0) {
+        return;
+      }
+
+      let nextIndex: number;
+      if (event.key === "ArrowUp") {
+        nextIndex = currentIndex <= 0 ? 0 : currentIndex - 1;
+      } else {
+        nextIndex =
+          currentIndex >= visibleFiles.length - 1
+            ? visibleFiles.length - 1
+            : currentIndex + 1;
+      }
+      const nextFile = visibleFiles[nextIndex];
+      if (nextFile) {
+        onSelectFile(nextFile);
+      }
+    },
+    [visibleFiles, selectedFile, onSelectFile],
+  );
+
   return (
     <div
       className="flex flex-col overflow-y-auto border-r border-envoi-border py-1.5"
       style={{ width: 190 }}
+      onKeyDown={handleKeyDown}
     >
       {tree.map((node) => (
         <TreeNodeRow
