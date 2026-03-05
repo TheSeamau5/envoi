@@ -337,24 +337,33 @@ export function TrajectoryDetail({
           break;
 
         case "ArrowRight":
-          if (
-            activePanel === "commits" &&
-            rightPanelOpen &&
-            rightTab === "steps"
-          ) {
+          if (activePanel === "commits") {
             event.preventDefault();
-            setActivePanel("steps");
-            if (selectedStepIndex === undefined) {
-              setSelectedStepIndex(0);
-              stepsPanelRef.current?.scrollToStep(0);
-            }
+            setSelectedIndex((prev) => Math.min(maxCommitIndex, prev + 1));
+            setSelectedStepIndex(undefined);
+          } else if (activePanel === "steps") {
+            event.preventDefault();
+            setSelectedStepIndex((prev) => {
+              const next =
+                prev === undefined ? 0 : Math.min(maxStepIndex, prev + 1);
+              stepsPanelRef.current?.scrollToStep(next);
+              return next;
+            });
           }
           break;
 
         case "ArrowLeft":
-          if (activePanel === "steps") {
+          if (activePanel === "commits") {
             event.preventDefault();
-            setActivePanel("commits");
+            setSelectedIndex((prev) => Math.max(0, prev - 1));
+            setSelectedStepIndex(undefined);
+          } else if (activePanel === "steps") {
+            event.preventDefault();
+            setSelectedStepIndex((prev) => {
+              const next = prev === undefined ? 0 : Math.max(0, prev - 1);
+              stepsPanelRef.current?.scrollToStep(next);
+              return next;
+            });
           }
           break;
 
