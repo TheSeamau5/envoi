@@ -571,7 +571,7 @@ export function TrajectoryDetail({
   return (
     <div
       ref={containerCallbackRef}
-      className="flex flex-1 flex-col overflow-hidden outline-none"
+      className="flex w-full min-w-0 flex-1 flex-col overflow-hidden outline-none"
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >

@@ -2,13 +2,9 @@
  * Chat drawer — right-side slide-over panel.
  * Always mounted, animated with react-spring.
  *
- * Layout: section with flex-col, overflow-hidden.
- *   header (shrink-0)
- *   messages (flex-1 overflow-y-auto) ← takes all remaining space
- *   input (shrink-0) ← pinned to bottom
- *
- * The animated wrapper uses overflow-x:clip (not overflow:hidden)
- * so height stretches naturally in the parent flex row.
+ * Behaves like the sidebar: in layout when open, zero width when closed.
+ * The fixed-width panel is absolutely positioned inside the animated rail so
+ * it never reserves layout width while collapsed.
  */
 
 "use client";
@@ -35,14 +31,15 @@ export function ChatDrawer() {
     <animated.div
       style={{
         width: spring.width,
+        minWidth: spring.width,
+        flexBasis: spring.width,
         opacity: spring.opacity,
-        minWidth: 0,
       }}
-      className="shrink-0 self-stretch overflow-x-clip border-l border-envoi-border bg-envoi-bg"
+      className="relative shrink-0 self-stretch overflow-hidden"
     >
       <section
-        className="flex h-full flex-col overflow-hidden"
-        style={{ width: DRAWER_WIDTH, minWidth: DRAWER_WIDTH }}
+        className="absolute inset-y-0 right-0 flex h-full w-[440px] min-w-[440px] flex-col overflow-hidden border-l border-envoi-border bg-envoi-bg"
+        style={{ pointerEvents: isOpen ? "auto" : "none" }}
       >
         <ChatHeader />
         <ChatMessages />

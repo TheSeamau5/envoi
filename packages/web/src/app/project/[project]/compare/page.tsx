@@ -1,12 +1,5 @@
-import { redirect } from "next/navigation";
+import ProjectCurvesPage from "./curves/page";
 
-type ProjectComparePageProps = {
-  params: Promise<{ project: string }>;
-};
-
-export default async function ProjectComparePage({
-  params,
-}: ProjectComparePageProps) {
-  const { project } = await params;
-  redirect(`/project/${encodeURIComponent(project)}/compare/curves`);
+export default function ProjectComparePage() {
+  return <ProjectCurvesPage />;
 }

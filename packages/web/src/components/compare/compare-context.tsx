@@ -30,6 +30,21 @@ import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 
 type SortKey = "score" | "date";
 
+function normalizeTrajectories(value: unknown): Trajectory[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "trajectories" in value &&
+    Array.isArray(value.trajectories)
+  ) {
+    return value.trajectories as Trajectory[];
+  }
+  return [];
+}
+
 /** Find the smallest non-negative integer not in `usedSet` */
 function minAvailableColor(usedSet: Set<number>): number {
   let colorIndex = 0;
@@ -115,6 +130,10 @@ export function CompareProvider({
   children,
   project,
 }: CompareProviderProps) {
+  const serverAllTraces = useMemo(
+    () => normalizeTrajectories(initialAllTraces),
+    [initialAllTraces],
+  );
   /**
    * colorMap: traceId → colorIndex.
    * Canonically persisted in localStorage via usePersistedState.
@@ -129,7 +148,7 @@ export function CompareProvider({
 
   /** Keep trajectory list fresh; if first SSR pass is empty, poll until data arrives. */
   const allTracesQuery = useQuery({
-    queryKey: queryKeys.trajectories.all(project),
+    queryKey: queryKeys.compare.all(project),
     queryFn: async () => {
       const response = await fetch(
         `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
@@ -137,19 +156,21 @@ export function CompareProvider({
       if (!response.ok) {
         throw new Error("Failed to fetch trajectories");
       }
-      const data: Trajectory[] = await response.json();
-      return data;
+      const data: unknown = await response.json();
+      return normalizeTrajectories(data);
     },
-    initialData: initialAllTraces,
+    initialData: serverAllTraces,
     staleTime: 0,
     refetchOnMount: true,
     refetchInterval: (query) => {
-      const traces = query.state.data ?? [];
+      const traces = normalizeTrajectories(query.state.data);
       return traces.length === 0 ? 5_000 : false;
     },
   });
-  const allTraces = allTracesQuery.data ?? initialAllTraces;
-  console.log("[DEBUG] CompareProvider render, allTraces:", allTraces.length);
+  const allTraces = useMemo(
+    () => normalizeTrajectories(allTracesQuery.data ?? serverAllTraces),
+    [allTracesQuery.data, serverAllTraces],
+  );
   const validTraceIds = useMemo(
     () => new Set(allTraces.map((trace) => trace.id)),
     [allTraces],
@@ -186,8 +207,8 @@ export function CompareProvider({
       if (!response.ok) {
         throw new Error("Failed to fetch trajectory data");
       }
-      const data: Trajectory[] = await response.json();
-      return data;
+      const data: unknown = await response.json();
+      return normalizeTrajectories(data);
     },
     enabled: sortedSelectedIds.length > 0,
     placeholderData: keepPreviousData,
@@ -197,10 +218,8 @@ export function CompareProvider({
   /** Derive fullTrajectories map from query data */
   const fullTrajectories: Record<string, Trajectory> = useMemo(() => {
     const map: Record<string, Trajectory> = {};
-    if (compareQuery.data) {
-      for (const traj of compareQuery.data) {
-        map[traj.id] = traj;
-      }
+    for (const traj of normalizeTrajectories(compareQuery.data)) {
+      map[traj.id] = traj;
     }
     return map;
   }, [compareQuery.data]);

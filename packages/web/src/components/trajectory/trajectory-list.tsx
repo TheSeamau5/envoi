@@ -27,6 +27,33 @@ type TrajectoryListProps = {
 
 type Tab = "active" | "failed";
 
+type TrajectoryListQueryData = {
+  trajectories: Trajectory[];
+  liveIds: Set<string>;
+};
+
+function normalizeTrajectoryListData(value: unknown): TrajectoryListQueryData {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "trajectories" in value &&
+    Array.isArray(value.trajectories)
+  ) {
+    const liveIds =
+      "liveIds" in value && value.liveIds instanceof Set
+        ? value.liveIds
+        : new Set<string>();
+    return {
+      trajectories: value.trajectories as Trajectory[],
+      liveIds,
+    };
+  }
+  return {
+    trajectories: [],
+    liveIds: new Set<string>(),
+  };
+}
+
 /** Fixed column widths — shared between header and rows for alignment */
 const COL = {
   id: "w-[260px] shrink-0",
@@ -158,10 +185,7 @@ export function TrajectoryList({
       liveIds: new Set<string>(),
     },
     refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data) {
-        return false;
-      }
+      const data = normalizeTrajectoryListData(query.state.data);
       const hasLiveCandidates = data.trajectories.some((trace) =>
         isPossiblyLive(trace),
       );
@@ -170,9 +194,14 @@ export function TrajectoryList({
     staleTime: 0,
   });
 
+  const normalizedQueryData = normalizeTrajectoryListData(
+    trajectoriesQuery.data,
+  );
   const trajectories =
-    trajectoriesQuery.data?.trajectories ?? initialTrajectories;
-  const liveIds = trajectoriesQuery.data?.liveIds ?? new Set<string>();
+    normalizedQueryData.trajectories.length > 0
+      ? normalizedQueryData.trajectories
+      : initialTrajectories;
+  const liveIds = normalizedQueryData.liveIds;
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];
@@ -201,7 +230,7 @@ export function TrajectoryList({
   );
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex w-full min-w-0 flex-1 flex-col overflow-hidden">
       {/* Header with tabs */}
       <div className="flex h-10.25 shrink-0 items-center gap-4 border-b border-envoi-border bg-envoi-bg px-4">
         <button

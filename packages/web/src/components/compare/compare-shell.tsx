@@ -47,8 +47,8 @@ type CompareShellProps = {
 };
 
 export function CompareShell({ children, project }: CompareShellProps) {
-  console.log("[DEBUG] CompareShell render");
   const pathname = usePathname();
+  const compareRoot = `/project/${encodeURIComponent(project)}/compare`;
   const tabs = [
     {
       href: `/project/${encodeURIComponent(project)}/compare/curves`,
@@ -106,13 +106,16 @@ export function CompareShell({ children, project }: CompareShellProps) {
   let flatIndex = 0;
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex w-full min-w-0 flex-1 flex-col overflow-hidden">
       {/* Top bar: tab navigation */}
       <div className="flex h-10.25 shrink-0 items-center border-b border-envoi-border bg-envoi-bg px-4">
         <div className="flex items-center gap-1">
           {tabs.map((tab) => {
             const Icon = tab.icon;
-            const isActive = pathname === tab.href;
+            const isCurvesTab = tab.href.endsWith("/compare/curves");
+            const isActive =
+              pathname === tab.href ||
+              (isCurvesTab && pathname === compareRoot);
             return (
               <Link
                 key={tab.href}

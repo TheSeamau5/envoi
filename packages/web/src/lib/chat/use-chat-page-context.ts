@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useChatContext } from "@/components/chat/chat-provider";
 import type { ChatPageContext } from "./types";
 
@@ -22,8 +22,11 @@ export function useChatPageContext(context: ChatPageContext) {
    * page-level props. The setter is stable, so this only fires on
    * actual context changes.
    */
-  if (prevRef.current !== serialized) {
+  useEffect(() => {
+    if (prevRef.current === serialized) {
+      return;
+    }
     prevRef.current = serialized;
     setPageContext(context);
-  }
+  }, [context, serialized, setPageContext]);
 }
