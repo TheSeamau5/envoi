@@ -15,8 +15,7 @@ import {
 
 /** Header bar for the chat drawer — matches global h-10.25 header height */
 export function ChatHeader() {
-  const { toggleOpen, clearConversation, messages } = useChatContext();
-  const hasMessages = messages.length > 0;
+  const { toggleOpen, clearConversation, hasMessages } = useChatContext();
 
   return (
     <div className="flex h-10.25 shrink-0 items-center justify-between border-b border-envoi-border px-3">

@@ -16,10 +16,14 @@ import { ChatToggle } from "@/components/chat/chat-toggle";
 
 type ProvidersProps = {
   children: ReactNode;
+  initialChatHasMessages: boolean;
 };
 
 /** Root providers — QueryClient, Tooltips, Chat */
-export function Providers({ children }: ProvidersProps) {
+export function Providers({
+  children,
+  initialChatHasMessages,
+}: ProvidersProps) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -37,7 +41,7 @@ export function Providers({ children }: ProvidersProps) {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delayDuration={0}>
-        <ChatProvider>
+        <ChatProvider initialHasMessages={initialChatHasMessages}>
           <div className="flex h-full flex-1 overflow-hidden">
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {children}

@@ -15,12 +15,14 @@ const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
+const COOKIE_CHAT_HAS_MESSAGES = "envoi:chat-has-messages";
 
 export type LayoutCookies = {
   rightPanelOpen: boolean;
   dividerPct: number;
   sidebarCollapsed: boolean;
   groupByTurn: boolean;
+  chatHasMessages: boolean;
   project?: string;
 };
 
@@ -72,6 +74,16 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
+  let chatHasMessages = false;
+  try {
+    const chatHasMessagesCookie = jar.get(COOKIE_CHAT_HAS_MESSAGES);
+    if (chatHasMessagesCookie) {
+      chatHasMessages = chatHasMessagesCookie.value === "true";
+    }
+  } catch {
+    // cookie unavailable — use default
+  }
+
   let project: string | undefined;
   try {
     const projectCookie = jar.get(COOKIE_PROJECT);
@@ -88,6 +100,7 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     dividerPct,
     sidebarCollapsed,
     groupByTurn,
+    chatHasMessages,
     project,
   };
 }

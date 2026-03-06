@@ -9,12 +9,14 @@ const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
+const COOKIE_CHAT_HAS_MESSAGES = "envoi:chat-has-messages";
 
 export type LayoutCookieKey =
   | "rightPanelOpen"
   | "dividerPct"
   | "sidebarCollapsed"
-  | "groupByTurn";
+  | "groupByTurn"
+  | "chatHasMessages";
 
 /** Write a layout cookie. Max-age: 1 year, SameSite=Lax, path=/. */
 export function setLayoutCookie(
@@ -26,6 +28,7 @@ export function setLayoutCookie(
     dividerPct: COOKIE_DIVIDER_PCT,
     sidebarCollapsed: COOKIE_SIDEBAR_COLLAPSED,
     groupByTurn: COOKIE_GROUP_BY_TURN,
+    chatHasMessages: COOKIE_CHAT_HAS_MESSAGES,
   };
   const name = cookieNames[key];
   if (!name) {

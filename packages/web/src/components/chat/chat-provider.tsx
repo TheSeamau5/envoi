@@ -27,9 +27,12 @@ import type {
   ToolCallBlock,
 } from "@/lib/chat/types";
 import { usePersistedState } from "@/lib/storage";
+import { setLayoutCookie } from "@/lib/cookies.client";
 
 type ChatContextValue = {
   messages: ChatMessage[];
+  hasMessages: boolean;
+  hasHydrated: boolean;
   isStreaming: boolean;
   isOpen: boolean;
   hasUnread: boolean;
@@ -60,22 +63,47 @@ function generateId(): string {
 
 type ChatProviderProps = {
   children: ReactNode;
+  initialHasMessages: boolean;
 };
 
 /** Root chat provider — wraps the entire app */
-export function ChatProvider({ children }: ChatProviderProps) {
-  const [messages, setMessages] = usePersistedState<ChatMessage[]>(
+export function ChatProvider({
+  children,
+  initialHasMessages,
+}: ChatProviderProps) {
+  const [storedMessages, setMessages] = usePersistedState<ChatMessage[]>(
     "chat-messages",
     [],
+    {
+      onChange: (nextMessages) => {
+        setLayoutCookie("chatHasMessages", nextMessages.length > 0);
+      },
+    },
   );
+  const [hasHydrated, setHasHydrated] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
-  const [pageContext, setPageContext] = useState<ChatPageContext>({ page: "unknown" });
+  const [pageContext, setPageContext] = useState<ChatPageContext>({
+    page: "unknown",
+  });
 
-  const abortRef = useRef<AbortController>(undefined);
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
+  useEffect(() => {
+    setHasHydrated(true);
+  }, []);
+
+  const messages = useMemo(
+    () => (hasHydrated ? storedMessages : []),
+    [hasHydrated, storedMessages],
+  );
+  const hasMessages = useMemo(
+    () => (hasHydrated ? storedMessages.length > 0 : initialHasMessages),
+    [hasHydrated, initialHasMessages, storedMessages],
+  );
+
+  const abortRef = useRef<AbortController | undefined>(undefined);
+  const messagesRef = useRef(storedMessages);
+  messagesRef.current = storedMessages;
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
 
@@ -98,7 +126,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
   const clearConversation = useCallback(() => {
     setMessages([]);
     /** usePersistedState handles localStorage automatically */
-  }, []);
+  }, [setMessages]);
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
@@ -116,7 +144,9 @@ export function ChatProvider({ children }: ChatProviderProps) {
       let buffer = "";
 
       /** Update the assistant message's blocks in state */
-      const updateBlocks = (updater: (blocks: ContentBlock[]) => ContentBlock[]) => {
+      const updateBlocks = (
+        updater: (blocks: ContentBlock[]) => ContentBlock[],
+      ) => {
         setMessages((prev) => {
           const updated = prev.map((msg) => {
             if (msg.id === assistantId) {
@@ -166,7 +196,10 @@ export function ChatProvider({ children }: ChatProviderProps) {
                       { ...last, text: last.text + event.text },
                     ];
                   }
-                  return [...blocks, { type: "text" as const, text: event.text }];
+                  return [
+                    ...blocks,
+                    { type: "text" as const, text: event.text },
+                  ];
                 });
                 break;
 
@@ -191,7 +224,11 @@ export function ChatProvider({ children }: ChatProviderProps) {
                   }
                   return blocks.map((block, index) => {
                     if (index === blockIndex && block.type === "tool-call") {
-                      return { ...block, output: event.output, status: "done" as const };
+                      return {
+                        ...block,
+                        output: event.output,
+                        status: "done" as const,
+                      };
                     }
                     return block;
                   });
@@ -206,7 +243,11 @@ export function ChatProvider({ children }: ChatProviderProps) {
                   }
                   return blocks.map((block, index) => {
                     if (index === blockIndex && block.type === "tool-call") {
-                      return { ...block, output: event.error, status: "error" as const };
+                      return {
+                        ...block,
+                        output: event.error,
+                        status: "error" as const,
+                      };
                     }
                     return block;
                   });
@@ -247,7 +288,10 @@ export function ChatProvider({ children }: ChatProviderProps) {
               case "error":
                 updateBlocks((blocks) => [
                   ...blocks,
-                  { type: "text" as const, text: `**Error:** ${event.message}` },
+                  {
+                    type: "text" as const,
+                    text: `**Error:** ${event.message}`,
+                  },
                 ]);
                 break;
 
@@ -266,7 +310,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
         ]);
       }
     },
-    [],
+    [setMessages],
   );
 
   const sendMessage = useCallback(
@@ -290,7 +334,11 @@ export function ChatProvider({ children }: ChatProviderProps) {
         timestamp: Date.now(),
       };
 
-      const updatedMessages = [...messagesRef.current, userMessage, assistantMessage];
+      const updatedMessages = [
+        ...messagesRef.current,
+        userMessage,
+        assistantMessage,
+      ];
       setMessages(updatedMessages);
       setIsStreaming(true);
 
@@ -319,12 +367,14 @@ export function ChatProvider({ children }: ChatProviderProps) {
               if (msg.id === assistantMessage.id) {
                 return {
                   ...msg,
-                  blocks: [{ type: "text" as const, text: `**Error:** ${errorText}` }],
+                  blocks: [
+                    { type: "text" as const, text: `**Error:** ${errorText}` },
+                  ],
                 };
               }
               return msg;
             });
-  
+
             return updated;
           });
           return;
@@ -340,7 +390,12 @@ export function ChatProvider({ children }: ChatProviderProps) {
             if (msg.id === assistantMessage.id) {
               return {
                 ...msg,
-                blocks: [{ type: "text" as const, text: "**Error:** Failed to send message." }],
+                blocks: [
+                  {
+                    type: "text" as const,
+                    text: "**Error:** Failed to send message.",
+                  },
+                ],
               };
             }
             return msg;
@@ -352,7 +407,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
         setIsStreaming(false);
       }
     },
-    [isStreaming, pageContext, processStream],
+    [isStreaming, pageContext, processStream, setMessages],
   );
 
   /** Global keyboard shortcut: Cmd+. to toggle chat */
@@ -370,6 +425,8 @@ export function ChatProvider({ children }: ChatProviderProps) {
   const value = useMemo(
     () => ({
       messages,
+      hasMessages,
+      hasHydrated,
       isStreaming,
       isOpen,
       hasUnread,
@@ -383,6 +440,8 @@ export function ChatProvider({ children }: ChatProviderProps) {
     }),
     [
       messages,
+      hasMessages,
+      hasHydrated,
       isStreaming,
       isOpen,
       hasUnread,
