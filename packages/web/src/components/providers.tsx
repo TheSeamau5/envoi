@@ -1,7 +1,7 @@
 /**
  * Client-side providers wrapper.
- * Wraps children with QueryClientProvider and TooltipProvider
- * so data fetching and tooltips work anywhere in the tree.
+ * Wraps children with QueryClientProvider, TooltipProvider, and ChatProvider.
+ * ChatProvider lives here so the chat drawer persists across all navigations.
  */
 
 "use client";
@@ -10,11 +10,15 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ChatProvider } from "@/components/chat/chat-provider";
+import { ChatDrawer } from "@/components/chat/chat-drawer";
+import { ChatToggle } from "@/components/chat/chat-toggle";
 
 type ProvidersProps = {
   children: ReactNode;
 };
 
+/** Root providers — QueryClient, Tooltips, Chat */
 export function Providers({ children }: ProvidersProps) {
   const [queryClient] = useState(
     () =>
@@ -32,7 +36,17 @@ export function Providers({ children }: ProvidersProps) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider delayDuration={0}>{children}</TooltipProvider>
+      <TooltipProvider delayDuration={0}>
+        <ChatProvider>
+          <div className="flex h-full flex-1 overflow-hidden">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              {children}
+            </div>
+            <ChatDrawer />
+          </div>
+          <ChatToggle />
+        </ChatProvider>
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }

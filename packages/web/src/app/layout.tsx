@@ -35,11 +35,7 @@ export default async function RootLayout({
     <html lang="en" className={monoFont.variable}>
       <body className="font-mono antialiased">
         <Providers>
-          <div className="flex h-screen overflow-hidden">
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              {children}
-            </div>
-          </div>
+          <div className="flex h-screen overflow-hidden">{children}</div>
         </Providers>
       </body>
     </html>

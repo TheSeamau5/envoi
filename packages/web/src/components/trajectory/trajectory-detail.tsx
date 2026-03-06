@@ -32,6 +32,7 @@ import { setLayoutCookie } from "@/lib/cookies.client";
 import { queryKeys } from "@/lib/query-keys";
 import { useLiveTrajectory } from "@/lib/use-live-trajectory";
 import { resolveTrajectoryLogs } from "@/lib/trajectory-log-mapping";
+import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 import {
   Tooltip,
   TooltipContent,
@@ -74,6 +75,12 @@ export function TrajectoryDetail({
   const { commits } = trajectory;
   const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
   const totalTests = computeTotalTests(suites);
+
+  useChatPageContext({
+    page: "trajectory",
+    project,
+    trajectoryId: trajectory.id,
+  });
 
   /** Selected commit index */
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -853,7 +860,7 @@ function TrajectoryHeader({
   );
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-envoi-border px-3.5 py-1.5">
+    <div className="flex h-10.25 shrink-0 items-center gap-2 border-b border-envoi-border px-3.5">
       {segments.map((segment, segmentIndex) => (
         <span key={segmentIndex} className="flex items-center gap-2">
           {segmentIndex > 0 && (
