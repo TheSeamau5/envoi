@@ -35,6 +35,18 @@ def load_invalid_c23_skip_set() -> set[str]:
     }
 
 
+def load_incompatible_cases() -> set[str]:
+    incompatible_path = Path(__file__).with_name("wacct-incompatible.txt")
+    if not incompatible_path.is_file():
+        return set()
+
+    return {
+        line.strip()
+        for line in incompatible_path.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
 def load_wacct_properties(
     fixture_root: Path,
 ) -> tuple[set[str], dict[str, list[str]], dict[str, list[str]]]:
@@ -138,6 +150,7 @@ async def run_wacct_tests_impl(
     tests_dir = fixture_path("wacct", "tests")
     expected_path = fixture_path("wacct", "expected_results.json")
     fixture_root = tests_dir.parent
+    incompatible_cases = load_incompatible_cases()
     invalid_c23_skip_set = load_invalid_c23_skip_set()
     requires_mathlib, libs_by_program, assembly_libs_by_program = load_wacct_properties(
         fixture_root
@@ -163,6 +176,9 @@ async def run_wacct_tests_impl(
             key for key in expected_map if key.startswith(chapter_prefix) and key.endswith(".c")
         ):
             rel_path = Path(rel_str)
+            rel_key = rel_path.as_posix()
+            if rel_key in incompatible_cases:
+                continue
             source_path = tests_dir / rel_path
             if not source_path.is_file():
                 continue

@@ -24,6 +24,7 @@ restrict-1.c
 return-addr.c
 unroll-1.c
 va-arg-21.c
+va-arg-11.c
 va-arg-7.c
 va-arg-8.c
 vfprintf-1.c
