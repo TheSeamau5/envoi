@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from envoi_code.params_api import (
@@ -27,19 +28,7 @@ class VariantParams(BaseModel):
 
 
 def params() -> dict[str, object]:
-    return {
-        "advisor_model": "@anthropic/claude-sonnet-4.6",
-        "advisor_model_thinking_level": "high",
-        "advisor_system_prompt": (
-            "You are a strict C compiler engineering reviewer. "
-            "Given failed tests and current Rust code, identify the most "
-            "likely root causes, cluster recurring error patterns, and "
-            "propose a prioritized fix plan with concrete file-level changes."
-        ),
-        "advisor_user_prompt_prefix": (
-            "You are reviewing a Rust C-compiler implementation "
-            "after an evaluation run."
-        ),
+    result: dict[str, object] = {
         "diagnostics_suite_priority": [
             "basics",
             "c_testsuite",
@@ -48,6 +37,27 @@ def params() -> dict[str, object]:
         ],
         "failed_tests_feedback_limit": 50,
     }
+
+    enable_advisor = os.environ.get("ENVOI_ENABLE_ADVISOR", "")
+    if enable_advisor.strip().lower() in {"1", "true", "yes", "on"}:
+        result.update(
+            {
+                "advisor_model": "@anthropic/claude-sonnet-4.6",
+                "advisor_model_thinking_level": "high",
+                "advisor_system_prompt": (
+                    "You are a strict C compiler engineering reviewer. "
+                    "Given failed tests and current Rust code, identify the most "
+                    "likely root causes, cluster recurring error patterns, and "
+                    "propose a prioritized fix plan with concrete file-level changes."
+                ),
+                "advisor_user_prompt_prefix": (
+                    "You are reviewing a Rust C-compiler implementation "
+                    "after an evaluation run."
+                ),
+            }
+        )
+
+    return result
 
 
 async def resolve_params(context: ParamsResolveContext) -> ResolvedParams:
@@ -96,6 +106,8 @@ async def resolve_params(context: ParamsResolveContext) -> ResolvedParams:
             "ENVOI_IMPL_LANG": variant.impl_lang,
             "ENVOI_TASK_LANG": variant.lang,
             "ENVOI_MILESTONE": variant.milestone,
+            "ENVOI_TEST_CONCURRENCY": "8",
+            "ENVOI_SKIP_GCC_BENCHMARK": "1",
         },
         metadata={
             "environment_family": "c_compiler",

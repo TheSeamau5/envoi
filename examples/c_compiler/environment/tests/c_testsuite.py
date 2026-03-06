@@ -16,7 +16,7 @@ import math
 
 import envoi
 
-from .utils import TestResult, fixture_path, run_case, select_cases, to_result
+from .utils import TestResult, fixture_path, run_cases_parallel, select_cases, to_result
 
 c_testsuite = envoi.suite("c_testsuite")
 
@@ -40,6 +40,7 @@ async def run_c_testsuite_impl(
             {
                 "name": source_file.stem,
                 "source": source_file.read_text(),
+                "source_path": str(source_file),
                 "expected_stdout": expected_stdout,
                 "expected_exit_code": 0,
             }
@@ -61,7 +62,17 @@ async def run_c_testsuite_impl(
             raise ValueError(f"part must be between 1 and {max_part}")
 
     selected = select_cases(selected_cases, n_tests=n_tests, test_name=test_name, offset=offset)
-    return to_result([await run_case(c) for c in selected])
+    return to_result(
+        await run_cases_parallel(
+            selected,
+            suite_name="c_testsuite",
+            run_name=(
+                "c_testsuite/all"
+                if part is None
+                else f"c_testsuite/part_{part}"
+            ),
+        )
+    )
 
 
 @c_testsuite.test()

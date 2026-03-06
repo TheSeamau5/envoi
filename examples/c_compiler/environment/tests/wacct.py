@@ -16,7 +16,7 @@ from pathlib import Path
 
 import envoi
 
-from .utils import TestResult, fixture_path, run_case, select_cases, to_result
+from .utils import TestResult, fixture_path, run_cases_parallel, select_cases, to_result
 
 wacct = envoi.suite("wacct")
 
@@ -60,6 +60,7 @@ async def run_wacct_tests_impl(
                 {
                     "name": f"chapter_{chapter_number}:{suffix}",
                     "source": source_path.read_text(errors="replace"),
+                    "source_path": str(source_path),
                     "expected_stdout": expected_stdout,
                     "expected_exit_code": expected_exit,
                 }
@@ -76,6 +77,7 @@ async def run_wacct_tests_impl(
                         {
                             "name": f"chapter_{chapter_number}:{suffix}",
                             "source": source_path.read_text(errors="replace"),
+                            "source_path": str(source_path),
                             "expected_stdout": "",
                             "expected_exit_code": 1,
                             "expect_compile_success": False,
@@ -88,7 +90,13 @@ async def run_wacct_tests_impl(
         raise RuntimeError(
             f"No WACCT cases discovered for {chapter_label}; check fixtures under {tests_dir}"
         )
-    return to_result([await run_case(c) for c in selected])
+    return to_result(
+        await run_cases_parallel(
+            selected,
+            suite_name="wacct",
+            run_name="wacct/all" if chapter is None else f"wacct/chapter_{chapter}",
+        )
+    )
 
 
 @wacct.test()

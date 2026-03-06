@@ -8,8 +8,10 @@ compiler, benchmarks it against gcc, and returns a CaseResult.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import time
@@ -53,6 +55,10 @@ class TestResult(BaseModel):
     failed: int
     total: int
     cases: list[CaseResult]
+arch_verified = False
+arch_lock: asyncio.Lock | None = None
+case_run_semaphore: asyncio.Semaphore | None = None
+case_run_semaphore_limit: int | None = None
 
 
 def session_path() -> Path:
@@ -93,9 +99,9 @@ def to_result(results: list[CaseResult]) -> TestResult:
     # reached the verify phase (i.e., the compiler never produced a working
     # binary) AND there are valid programs that failed compilation, then the
     # compiler is broken and invalid-program rejections should not be credited.
-    any_valid_compiled = any(r.phase == "verify" for r in results)
+    any_valid_compiled = any(result.phase == "verify" for result in results)
     has_valid_compile_failures = any(
-        r.phase == "compile" and not r.passed for r in results
+        result.phase == "compile" and not result.passed for result in results
     )
     if not any_valid_compiled and has_valid_compile_failures:
         adjusted: list[CaseResult] = []
@@ -105,7 +111,10 @@ def to_result(results: list[CaseResult]) -> TestResult:
                     result.model_copy(
                         update={
                             "passed": False,
-                            "stderr": "compiler did not successfully compile any valid program — rejection not credited",
+                            "stderr": (
+                                "compiler did not successfully compile any valid "
+                                "program — rejection not credited"
+                            ),
                         },
                     )
                 )
@@ -113,7 +122,7 @@ def to_result(results: list[CaseResult]) -> TestResult:
                 adjusted.append(result)
         results = adjusted
 
-    passed = sum(1 for r in results if r.passed)
+    passed = sum(1 for result in results if result.passed)
     return TestResult(
         passed=passed,
         failed=len(results) - passed,
@@ -147,9 +156,8 @@ def select_cases(
     return cases[offset:]
 
 
-def reset_debug_artifacts_dir(sp: Path) -> Path:
-    debug_dir = sp / "debug_artifacts"
-    shutil.rmtree(debug_dir, ignore_errors=True)
+def reset_debug_artifacts_dir(root: Path) -> Path:
+    debug_dir = root / "debug_artifacts"
     debug_dir.mkdir(parents=True, exist_ok=True)
     return debug_dir
 
@@ -197,8 +205,77 @@ def artifact_kind(path: Path, is_text: bool) -> str:
     return "text" if is_text else "binary"
 
 
+def max_test_concurrency() -> int:
+    raw = os.environ.get("ENVOI_TEST_CONCURRENCY", "8").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 8
+    return max(1, value)
+
+
+def skip_gcc_benchmark() -> bool:
+    raw = os.environ.get("ENVOI_SKIP_GCC_BENCHMARK", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def sanitize_fragment(value: str, *, fallback: str = "item", max_length: int = 80) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:max_length]
+
+
+def create_suite_case_root(suite_name: str, run_name: str | None = None) -> Path:
+    root = session_path() / "case_runs"
+    label = run_name or suite_name or "suite"
+    suffix = hashlib.sha1(f"{label}:{time.monotonic_ns()}".encode()).hexdigest()[:12]
+    root_name = f"{sanitize_fragment(label, fallback='suite', max_length=48)}-{suffix}"
+    case_root = root / root_name
+    case_root.mkdir(parents=True, exist_ok=True)
+    return case_root
+
+
+def create_case_dir(case_root: Path, case_name: str) -> Path:
+    suffix = hashlib.sha1(case_name.encode("utf-8")).hexdigest()[:12]
+    directory_name = f"{sanitize_fragment(case_name, fallback='case', max_length=48)}-{suffix}"
+    case_dir = case_root / directory_name
+    case_dir.mkdir(parents=True, exist_ok=True)
+    return case_dir
+
+
+def get_case_run_semaphore() -> asyncio.Semaphore:
+    global case_run_semaphore, case_run_semaphore_limit
+
+    limit = max_test_concurrency()
+    if case_run_semaphore is None or case_run_semaphore_limit != limit:
+        case_run_semaphore = asyncio.Semaphore(limit)
+        case_run_semaphore_limit = limit
+    return case_run_semaphore
+
+
+def get_arch_lock() -> asyncio.Lock:
+    global arch_lock
+    if arch_lock is None:
+        arch_lock = asyncio.Lock()
+    return arch_lock
+
+
+def reset_runner_state() -> None:
+    global arch_verified, arch_lock, case_run_semaphore, case_run_semaphore_limit
+
+    arch_verified = False
+    arch_lock = None
+    case_run_semaphore = None
+    case_run_semaphore_limit = None
+
+
 async def detect_elf_machine(path: Path) -> str | None:
-    probe = await envoi.run(f"readelf -h {shlex.quote(path.name)}", timeout_seconds=5)
+    probe = await envoi.run(
+        f"readelf -h {shlex.quote(str(path))}",
+        cwd=str(path.parent),
+        timeout_seconds=5,
+    )
     if probe.exit_code != 0:
         return None
 
@@ -210,14 +287,52 @@ async def detect_elf_machine(path: Path) -> str | None:
     return None
 
 
+async def run_timed_command(
+    *,
+    command: str,
+    cwd: Path,
+    timeout_seconds: int,
+) -> tuple[envoi.RunResult, float]:
+    started = time.monotonic()
+    result = await envoi.run(
+        command,
+        cwd=str(cwd),
+        timeout_seconds=timeout_seconds,
+    )
+    ended = time.monotonic()
+    return result, (ended - started) * 1000
+
+
+async def maybe_verify_arch(out_file: Path) -> str | None:
+    global arch_verified
+
+    if arch_verified:
+        return None
+
+    async with get_arch_lock():
+        if arch_verified:
+            return None
+
+        machine = await detect_elf_machine(out_file)
+
+        expected_arch_label, expected_machine_values = expected_target_arch()
+        if machine is not None and machine not in expected_machine_values:
+            return (
+                f"wrong target architecture: expected {expected_arch_label}, got {machine}"
+            )
+
+        arch_verified = True
+        return None
+
+
 def collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
     if not debug_dir.exists():
         return []
 
     artifacts: list[DebugArtifact] = []
     for file_path in sorted(
-        (p for p in debug_dir.rglob("*") if p.is_file()),
-        key=lambda p: str(p.relative_to(debug_dir)),
+        (path for path in debug_dir.rglob("*") if path.is_file()),
+        key=lambda path: str(path.relative_to(debug_dir)),
     ):
         payload = file_path.read_bytes()
         notes: list[str] = []
@@ -253,33 +368,65 @@ def collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
     return artifacts
 
 
-async def run_case(case: dict) -> CaseResult:
-    name = case["name"]
-    src = case["source"]
-    expected_stdout = case["expected_stdout"]
-    expected_exit = case["expected_exit_code"]
-    expect_compile_success = case.get("expect_compile_success", True)
-    sp = session_path()
+async def run_case(
+    case: dict,
+    *,
+    case_root: Path | None = None,
+) -> CaseResult:
+    name = str(case["name"])
+    src = str(case["source"])
+    expected_stdout = str(case["expected_stdout"])
+    expected_exit = int(case["expected_exit_code"])
+    expect_compile_success = bool(case.get("expect_compile_success", True))
+    session_root = session_path()
+    case_parent = session_root if case_root is None else case_root
+    case_dir = create_case_dir(case_parent, name)
 
-    c_file = sp / f"test_{name}.c"
-    out_file = sp / f"test_{name}"
-    gcc_out_file = sp / f"test_{name}_gcc"
-    c_file.write_text(src)
-    debug_dir = reset_debug_artifacts_dir(sp)
+    file_stem = sanitize_fragment(f"test-{name}", fallback="test", max_length=64)
+    source_path_value = case.get("source_path")
+    if source_path_value is None:
+        c_file = case_dir / f"{file_stem}.c"
+        c_file.write_text(src, encoding="utf-8")
+    else:
+        c_file = Path(str(source_path_value)).expanduser().resolve()
+        if not c_file.is_file():
+            raise RuntimeError(f"Missing case source file: {c_file}")
+    out_file = case_dir / file_stem
+    gcc_out_file = case_dir / f"{file_stem}_gcc"
+    debug_dir = reset_debug_artifacts_dir(case_dir)
+    cc_binary = (session_root / "cc").resolve()
 
-    t0 = time.monotonic()
-    cc = await envoi.run(
-        f"./cc {shlex.quote(c_file.name)} -o {shlex.quote(out_file.name)}",
-        timeout_seconds=45,
+    cc_command = (
+        f"{shlex.quote(str(cc_binary))} {shlex.quote(str(c_file))} "
+        f"-o {shlex.quote(str(out_file))}"
     )
-    compile_time_ms = (time.monotonic() - t0) * 1000
-
-    t0 = time.monotonic()
-    gcc = await envoi.run(
-        f"gcc {shlex.quote(c_file.name)} -o {shlex.quote(gcc_out_file.name)}",
-        timeout_seconds=45,
+    gcc_command = (
+        f"gcc {shlex.quote(str(c_file))} -o {shlex.quote(str(gcc_out_file))}"
     )
-    gcc_compile_time_ms = (time.monotonic() - t0) * 1000
+
+    compile_tasks = [
+        run_timed_command(
+            command=cc_command,
+            cwd=case_dir,
+            timeout_seconds=45,
+        )
+    ]
+    should_benchmark_with_gcc = not skip_gcc_benchmark() and expect_compile_success
+    if should_benchmark_with_gcc:
+        compile_tasks.append(
+            run_timed_command(
+                command=gcc_command,
+                cwd=case_dir,
+                timeout_seconds=45,
+            )
+        )
+
+    compile_results = await asyncio.gather(*compile_tasks)
+    cc, compile_time_ms = compile_results[0]
+    gcc: envoi.RunResult | None = None
+    gcc_compile_time_ms = 0.0
+    if should_benchmark_with_gcc:
+        gcc, gcc_compile_time_ms = compile_results[1]
 
     binary_size_bytes = file_size(out_file)
     gcc_binary_size_bytes = file_size(gcc_out_file)
@@ -321,9 +468,8 @@ async def run_case(case: dict) -> CaseResult:
             debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
-    machine = await detect_elf_machine(out_file)
-    expected_arch_label, expected_machine_values = expected_target_arch()
-    if machine is not None and machine not in expected_machine_values:
+    arch_error = await maybe_verify_arch(out_file)
+    if arch_error is not None:
         return CaseResult(
             name=name,
             phase="verify",
@@ -339,33 +485,51 @@ async def run_case(case: dict) -> CaseResult:
             gcc_binary_size_bytes=gcc_binary_size_bytes,
             run_time_ms=None,
             gcc_run_time_ms=None,
-            stderr=f"wrong target architecture: expected {expected_arch_label}, got {machine}",
+            stderr=arch_error,
             debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
-    t0 = time.monotonic()
-    run = await envoi.run(shlex.quote(f"./{out_file.name}"), timeout_seconds=15)
-    run_time_ms = (time.monotonic() - t0) * 1000
+    run_tasks = [
+        run_timed_command(
+            command=shlex.quote(str(out_file)),
+            cwd=case_dir,
+            timeout_seconds=15,
+        )
+    ]
+    should_run_gcc_binary = gcc is not None and gcc.exit_code == 0
+    if should_run_gcc_binary:
+        run_tasks.append(
+            run_timed_command(
+                command=shlex.quote(str(gcc_out_file)),
+                cwd=case_dir,
+                timeout_seconds=15,
+            )
+        )
 
-    gcc_run_time_ms = None
-    if gcc.exit_code == 0:
-        t0 = time.monotonic()
-        await envoi.run(shlex.quote(f"./{gcc_out_file.name}"), timeout_seconds=15)
-        gcc_run_time_ms = (time.monotonic() - t0) * 1000
+    run_results = await asyncio.gather(*run_tasks)
+    run, run_time_ms = run_results[0]
+    gcc_run_time_ms: float | None = None
+    if should_run_gcc_binary:
+        _, gcc_run_time_ms = run_results[1]
 
-    passed = run.stdout.strip() == expected_stdout.strip() and run.exit_code == expected_exit
+    passed = (
+        run.stdout.strip() == expected_stdout.strip()
+        and run.exit_code == expected_exit
+    )
 
     stderr = None
     if not passed:
-        parts = []
+        parts: list[str] = []
         if run.stdout.strip() != expected_stdout.strip():
             parts.append(
-                f"stdout mismatch:\n"
+                "stdout mismatch:\n"
                 f"  expected: {expected_stdout!r}\n"
                 f"  actual:   {run.stdout.strip()!r}"
             )
         if run.exit_code != expected_exit:
-            parts.append(f"exit code mismatch: expected {expected_exit}, got {run.exit_code}")
+            parts.append(
+                f"exit code mismatch: expected {expected_exit}, got {run.exit_code}"
+            )
         if run.stderr:
             parts.append(f"stderr:\n  {run.stderr.strip()}")
         stderr = "\n".join(parts)
@@ -388,3 +552,22 @@ async def run_case(case: dict) -> CaseResult:
         stderr=stderr,
         debug_artifacts=collect_debug_artifacts(debug_dir) if not passed else [],
     )
+
+
+async def run_cases_parallel(
+    cases: list[dict],
+    *,
+    suite_name: str,
+    run_name: str | None = None,
+) -> list[CaseResult]:
+    case_root = create_suite_case_root(suite_name, run_name)
+    semaphore = get_case_run_semaphore()
+
+    async def run_one(case: dict) -> CaseResult:
+        async with semaphore:
+            return await run_case(case, case_root=case_root)
+
+    try:
+        return await asyncio.gather(*(run_one(case) for case in cases))
+    finally:
+        shutil.rmtree(case_root, ignore_errors=True)

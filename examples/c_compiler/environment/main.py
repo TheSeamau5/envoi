@@ -29,13 +29,21 @@ import envoi
 from tests.basics import basics
 from tests.c_testsuite import c_testsuite
 from tests.torture import torture
+from tests.utils import reset_runner_state
 from tests.wacct import wacct
 
-__all__ = ["basics", "c_testsuite", "torture", "wacct", "build_compiler"]
+__all__ = [
+    "basics",
+    "c_testsuite",
+    "torture",
+    "wacct",
+    "build_compiler",
+]
 
 
 @envoi.setup
 async def build_compiler(submission: envoi.Documents) -> None:
+    reset_runner_state()
     build = await envoi.run("chmod +x build.sh && ./build.sh", timeout_seconds=300)
     if build.exit_code != 0:
         raise RuntimeError(f"Build failed (exit {build.exit_code}).\n{build.stderr}")

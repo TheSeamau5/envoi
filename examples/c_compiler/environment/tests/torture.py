@@ -1,10 +1,9 @@
 """
-GCC C Torture execute tests (standard-C subset).
+GCC torture execute tests, excluding only known harness-incompatible cases.
 
-Source: LLVM test-suite mirror of GCC torture tests.
-~1500 total files, filtered down to ~370 that use only standard C
-(no GNU extensions). The blacklist is pre-generated and checked in
-(see generate_blacklist.py in this directory).
+Source: LLVM test-suite mirror of GCC torture execute tests.
+The suite includes every file that passes under GNU GCC in this environment
+using the same single-file compile/run contract as the real harness.
 
 Accepts an optional `count` parameter to limit how many tests run.
 
@@ -20,15 +19,14 @@ from pathlib import Path
 
 import envoi
 
-from .utils import TestResult, fixture_path, run_case, select_cases, to_result
+from .utils import TestResult, fixture_path, run_cases_parallel, select_cases, to_result
 
 torture = envoi.suite("torture")
 
-
-def load_blacklist() -> set[str]:
-    blacklist_file = Path(__file__).resolve().parent / "torture" / "torture-blacklist.txt"
-    if blacklist_file.exists():
-        return {line.strip() for line in blacklist_file.read_text().splitlines() if line.strip()}
+def load_incompatible_cases() -> set[str]:
+    incompatible_file = Path(__file__).resolve().parent / "torture" / "torture-incompatible.txt"
+    if incompatible_file.exists():
+        return {line.strip() for line in incompatible_file.read_text().splitlines() if line.strip()}
     return set()
 
 
@@ -40,7 +38,7 @@ async def run_torture_impl(
     offset: int = 0,
 ) -> TestResult:
     part_size = 40
-    blacklist = load_blacklist()
+    incompatible_cases = load_incompatible_cases()
     torture_dir = fixture_path(
         "llvm-test-suite",
         "SingleSource",
@@ -51,19 +49,23 @@ async def run_torture_impl(
     )
     if not torture_dir.is_dir():
         raise RuntimeError(f"Missing torture fixtures directory: {torture_dir}")
-    source_files = sorted(
-        source_file for source_file in torture_dir.glob("*.c") if source_file.name not in blacklist
-    )
+    source_files = []
+    for source_file in sorted(torture_dir.glob("*.c")):
+        if source_file.name in incompatible_cases:
+            continue
+        source_text = source_file.read_text(errors="replace")
+        source_files.append((source_file, source_text))
     if not source_files:
         raise RuntimeError(f"No torture test files found in fixtures directory: {torture_dir}")
     cases = [
         {
             "name": source_file.stem,
-            "source": source_file.read_text(errors="replace"),
+            "source": source_text,
+            "source_path": str(source_file),
             "expected_stdout": "",
             "expected_exit_code": 0,
         }
-        for source_file in source_files
+        for source_file, source_text in source_files
     ]
 
     if part is not None:
@@ -86,7 +88,13 @@ async def run_torture_impl(
         test_name=test_name,
         offset=offset,
     )
-    return to_result([await run_case(c) for c in selected])
+    return to_result(
+        await run_cases_parallel(
+            selected,
+            suite_name="torture",
+            run_name="torture/all" if part is None else f"torture/part_{part}",
+        )
+    )
 
 
 @torture.test()

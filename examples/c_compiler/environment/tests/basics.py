@@ -16,7 +16,7 @@ from pathlib import Path
 
 import envoi
 
-from .utils import TestResult, run_case, select_cases, to_result
+from .utils import TestResult, run_cases_parallel, select_cases, to_result
 
 basics = envoi.suite("basics")
 
@@ -26,6 +26,7 @@ async def run_basics(
     test_name: str | None = None,
     *,
     categories: tuple[str, ...] | None = None,
+    run_name: str = "basics",
 ) -> TestResult:
     basics_dir = Path(__file__).resolve().parent / "basics"
     category_names = (
@@ -56,45 +57,87 @@ async def run_basics(
                 {
                     "name": source_file.stem,
                     "source": source,
+                    "source_path": str(source_file),
                     "expected_stdout": "\n".join(stdout_lines),
                     "expected_exit_code": int(exit_match.group(1)) if exit_match else 0,
                 }
             )
 
     cases = select_cases(all_cases, n_tests=n_tests, test_name=test_name)
-    return to_result([await run_case(c) for c in cases])
+    return to_result(
+        await run_cases_parallel(
+            cases,
+            suite_name="basics",
+            run_name=run_name,
+        )
+    )
 
 
 @basics.test("smoke")
 async def smoke(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("smoke",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("smoke",),
+        run_name="basics/smoke",
+    )
 
 
 @basics.test("variables")
 async def variables(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("variables",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("variables",),
+        run_name="basics/variables",
+    )
 
 
 @basics.test("control_flow")
 async def control_flow(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("control_flow",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("control_flow",),
+        run_name="basics/control_flow",
+    )
 
 
 @basics.test("functions")
 async def functions(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("functions",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("functions",),
+        run_name="basics/functions",
+    )
 
 
 @basics.test("expressions")
 async def expressions(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("expressions",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("expressions",),
+        run_name="basics/expressions",
+    )
 
 
 @basics.test("edge_cases")
 async def edge_cases(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("edge_cases",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("edge_cases",),
+        run_name="basics/edge_cases",
+    )
 
 
 @basics.test("stress")
 async def stress(n_tests: int = 0, test_name: str | None = None) -> TestResult:
-    return await run_basics(n_tests=n_tests, test_name=test_name, categories=("stress",))
+    return await run_basics(
+        n_tests=n_tests,
+        test_name=test_name,
+        categories=("stress",),
+        run_name="basics/stress",
+    )
