@@ -3,9 +3,15 @@
 ## Quick Reference
 - Build: `./build.sh` (produces `./cc`)
 - Test: `./run_tests.sh` (runs all your accumulated tests against `./cc` and `gcc`)
-- Debug artifacts: write to `./debug_artifacts/` (auto-captured on test failure)
 - Progress notes: maintain `PROGRESS.md`
 - Interface: `./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o output`
+- Reference docs: `/workspace/reference/` — READ BEFORE STARTING
+  - `sysv-abi-summary.md` — calling convention and stack alignment
+  - `x86-64-instructions.md` — instruction reference for codegen
+  - `codegen-examples/` — gcc output for simple C programs
+  - `wacct-chapter-map.md` — what each chapter covers and your build order
+  - `c-language-traps.md` — C23 edge cases that trip up compilers
+  - `x86-64-codegen-traps.md` — assembly generation pitfalls
 
 ## Workflow
 
@@ -18,6 +24,7 @@ Red-green-refactor. One feature at a time.
 5. Only then move to the next feature
 
 Never leave a failing test behind. If something breaks, fix it before moving on.
+Before writing assembly generation code, read the examples in `reference/codegen-examples/`. Study how gcc compiles simple programs and match those patterns.
 
 ## File Structure
 ```
@@ -33,10 +40,7 @@ Never leave a failing test behind. If something breaks, fix it before moving on.
 │   ├── variables.c        # Variables
 │   └── ...                # Tests accumulate as you add features
 ├── PROGRESS.md            # Your progress notes (maintain this)
-└── debug_artifacts/       # Intermediate representations (auto-cleared per test)
-    ├── tokens.txt
-    ├── ast.json
-    └── asm.s
+└── reference/             # Read-only ABI, codegen, and chapter reference docs
 ```
 
 ## Rules
@@ -44,4 +48,3 @@ Never leave a failing test behind. If something breaks, fix it before moving on.
 - Run ALL tests after every change. Not just the one you're working on.
 - One thing at a time. Do not implement two features in parallel.
 - Do not refactor while something is broken. Get green first, then refactor.
-- Debug artifacts are your fastest path to diagnosing failures. Don't skip them.

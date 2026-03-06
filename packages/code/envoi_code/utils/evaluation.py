@@ -17,9 +17,7 @@ from envoi_code.utils.helpers import tprint
 
 print = tprint
 
-EVALUATION_CONCURRENCY = max(
-    1, int(os.environ.get("EVALUATION_CONCURRENCY", "1"))
-)
+EVALUATION_CONCURRENCY = max(1, int(os.environ.get("EVALUATION_CONCURRENCY", "1")))
 EVALUATION_DEFAULT_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("EVALUATION_TIMEOUT_SECONDS", "7200"))
 )
@@ -302,6 +300,35 @@ def build_evaluation_python_script(
         "        if isinstance(value, (int, float)):\n"
         "            total += max(0.0, float(value))\n"
         "    return int(total) if total > 0 else None\n"
+        "def first_line(value):\n"
+        "    text = as_str(value)\n"
+        "    if text is None:\n"
+        "        return None\n"
+        "    lines = [line.strip() for line in text.splitlines() if line.strip()]\n"
+        "    return lines[0] if lines else None\n"
+        "def case_message(case, failure_type):\n"
+        "    parts = []\n"
+        "    signal_name = as_str(case.get('signal_name'))\n"
+        "    stdout_diff = as_str(case.get('stdout_diff_summary'))\n"
+        "    stderr_text = as_str(case.get('stderr') or case.get('error') or case.get('message'))\n"
+        "    runtime_stderr = as_str(case.get('runtime_stderr'))\n"
+        "    compiler_warning = first_line(case.get('compiler_warnings'))\n"
+        "    gcc_warning = first_line(case.get('gcc_warnings'))\n"
+        "    if failure_type == 'crash' and signal_name is not None:\n"
+        "        parts.append(f'process crashed with {signal_name}')\n"
+        "    if stdout_diff is not None:\n"
+        "        parts.append(stdout_diff)\n"
+        "    if stderr_text is not None:\n"
+        "        parts.append(stderr_text)\n"
+        "    if runtime_stderr is not None and runtime_stderr != stderr_text:\n"
+        "        parts.append(f'runtime stderr: {runtime_stderr}')\n"
+        "    if compiler_warning is not None:\n"
+        "        parts.append(f'compiler warnings: {compiler_warning}')\n"
+        "    if gcc_warning is not None:\n"
+        "        parts.append(f'gcc warnings: {gcc_warning}')\n"
+        "    if not parts:\n"
+        "        return None\n"
+        "    return '\\n'.join(parts)\n"
         "def extract_case_tests(cases, suite):\n"
         "    out = []\n"
         "    for idx, case in enumerate(cases):\n"
@@ -310,24 +337,32 @@ def build_evaluation_python_script(
         "        test_id = as_str(case.get('name')) or f'case_{idx + 1}'\n"
         "        passed_flag = case.get('passed')\n"
         "        passed = bool(passed_flag) if isinstance(passed_flag, bool) else False\n"
-        "        status = 'passed' if passed else 'failed'\n"
+        "        timed_out = bool(case.get('timed_out'))\n"
+        "        status = 'passed' if passed else ('timeout' if timed_out else 'failed')\n"
         "        phase = case.get('phase') if isinstance(case.get('phase'), str) else ''\n"
+        "        failure_type = as_str(case.get('failure_type'))\n"
         "        if passed:\n"
         "            failure_type = None\n"
-        "        elif phase == 'compile':\n"
+        "        elif failure_type is None and phase == 'compile':\n"
         "            failure_type = 'compile_error'\n"
-        "        elif phase in {'run', 'runtime'}:\n"
+        "        elif failure_type is None and phase in {'run', 'runtime'}:\n"
         "            failure_type = 'runtime_error'\n"
-        "        else:\n"
+        "        elif failure_type is None:\n"
         "            failure_type = 'assertion'\n"
         "        message, message_truncated = clip_message(\n"
-        "            case.get('stderr') or case.get('error') or case.get('message')\n"
+        "            case_message(case, failure_type)\n"
         "        )\n"
         "        stdout_tail, stdout_truncated = clip_tail(\n"
         "            case.get('actual_stdout') or case.get('stdout')\n"
         "        )\n"
         "        stderr_tail, stderr_truncated = clip_tail(\n"
-        "            case.get('stderr') or case.get('error')\n"
+        "            case.get('runtime_stderr') or case.get('stderr') or case.get('error')\n"
+        "        )\n"
+        "        compiler_warnings, compiler_warnings_truncated = clip_tail(\n"
+        "            case.get('compiler_warnings')\n"
+        "        )\n"
+        "        gcc_warnings, gcc_warnings_truncated = clip_tail(\n"
+        "            case.get('gcc_warnings')\n"
         "        )\n"
         "        suite_name = normalize_suite_path(suite)\n"
         "        source = as_str(case.get('c_source') or case.get('source'))\n"
@@ -341,8 +376,18 @@ def build_evaluation_python_script(
         "            'source': source,\n"
         "            'stdout_tail': stdout_tail,\n"
         "            'stderr_tail': stderr_tail,\n"
+        "            'signal_name': as_str(case.get('signal_name')),\n"
+        "            'stdout_diff_summary': as_str(case.get('stdout_diff_summary')),\n"
+        "            'compiler_warnings': compiler_warnings,\n"
+        "            'gcc_warnings': gcc_warnings,\n"
+        "            'runtime_stderr': as_str(case.get('runtime_stderr')),\n"
+        "            'timed_out': timed_out,\n"
         "            'truncated': bool(\n"
-        "                message_truncated or stdout_truncated or stderr_truncated\n"
+        "                message_truncated\n"
+        "                or stdout_truncated\n"
+        "                or stderr_truncated\n"
+        "                or compiler_warnings_truncated\n"
+        "                or gcc_warnings_truncated\n"
         "            ),\n"
         "        })\n"
         "    return out\n"
@@ -386,6 +431,12 @@ def build_evaluation_python_script(
         "        stderr_tail, stderr_truncated = clip_tail(\n"
         "            item.get('stderr_tail') or item.get('stderr') or item.get('error')\n"
         "        )\n"
+        "        compiler_warnings, compiler_warnings_truncated = clip_tail(\n"
+        "            item.get('compiler_warnings')\n"
+        "        )\n"
+        "        gcc_warnings, gcc_warnings_truncated = clip_tail(\n"
+        "            item.get('gcc_warnings')\n"
+        "        )\n"
         "        duration_ms = item.get('duration_ms')\n"
         "        if isinstance(duration_ms, float):\n"
         "            duration_ms = int(duration_ms)\n"
@@ -403,8 +454,18 @@ def build_evaluation_python_script(
         "            'source': source,\n"
         "            'stdout_tail': stdout_tail,\n"
         "            'stderr_tail': stderr_tail,\n"
+        "            'signal_name': as_str(item.get('signal_name')),\n"
+        "            'stdout_diff_summary': as_str(item.get('stdout_diff_summary')),\n"
+        "            'compiler_warnings': compiler_warnings,\n"
+        "            'gcc_warnings': gcc_warnings,\n"
+        "            'runtime_stderr': as_str(item.get('runtime_stderr')),\n"
+        "            'timed_out': bool(item.get('timed_out')),\n"
         "            'truncated': bool(\n"
-        "                message_truncated or stdout_truncated or stderr_truncated\n"
+        "                message_truncated\n"
+        "                or stdout_truncated\n"
+        "                or stderr_truncated\n"
+        "                or compiler_warnings_truncated\n"
+        "                or gcc_warnings_truncated\n"
         "            ),\n"
         "        })\n"
         "    return out\n"
@@ -607,9 +668,7 @@ def build_commit_evaluation_command(
         normalize_test_paths(test_paths),
         ensure_ascii=False,
     )
-    eval_timeout_seconds_json = json.dumps(
-        resolve_evaluation_timeout(timeout_seconds)
-    )
+    eval_timeout_seconds_json = json.dumps(resolve_evaluation_timeout(timeout_seconds))
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
     quoted_commit = shlex.quote(commit)
     quoted_repo_dir = shlex.quote(eval_repo_dir)
@@ -623,16 +682,16 @@ def build_commit_evaluation_command(
     return (
         "set -euo pipefail\n"
         f"repo_dir={quoted_repo_dir}\n"
-        "rm -rf \"$repo_dir\"\n"
-        "git clone -q /workspace \"$repo_dir\"\n"
-        "cd \"$repo_dir\"\n"
+        'rm -rf "$repo_dir"\n'
+        'git clone -q /workspace "$repo_dir"\n'
+        'cd "$repo_dir"\n'
         f"git checkout -q {quoted_commit}\n"
         "python3 - <<'PY'\n"
         f"{python_script}"
         "PY\n"
         "status=$?\n"
         "cd /workspace\n"
-        "rm -rf \"$repo_dir\"\n"
+        'rm -rf "$repo_dir"\n'
         "exit $status\n"
     )
 
@@ -649,9 +708,7 @@ def build_workspace_evaluation_command(
         normalize_test_paths(test_paths),
         ensure_ascii=False,
     )
-    eval_timeout_seconds_json = json.dumps(
-        resolve_evaluation_timeout(timeout_seconds)
-    )
+    eval_timeout_seconds_json = json.dumps(resolve_evaluation_timeout(timeout_seconds))
     marker_json = json.dumps(EVALUATION_JSON_MARKER)
     quoted_repo_dir = shlex.quote(repo_dir)
     python_script = build_evaluation_python_script(
@@ -661,13 +718,7 @@ def build_workspace_evaluation_command(
         eval_timeout_seconds_json=eval_timeout_seconds_json,
         marker_json=marker_json,
     )
-    return (
-        "set -euo pipefail\n"
-        f"repo_dir={quoted_repo_dir}\n"
-        "python3 - <<'PY'\n"
-        f"{python_script}"
-        "PY\n"
-    )
+    return f"set -euo pipefail\nrepo_dir={quoted_repo_dir}\npython3 - <<'PY'\n{python_script}PY\n"
 
 
 def parse_commit_evaluation_payload(
@@ -676,7 +727,7 @@ def parse_commit_evaluation_payload(
     for line in reversed(stdout.splitlines()):
         if not line.startswith(EVALUATION_JSON_MARKER):
             continue
-        raw_json = line[len(EVALUATION_JSON_MARKER):].strip()
+        raw_json = line[len(EVALUATION_JSON_MARKER) :].strip()
         if not raw_json:
             continue
         try:
@@ -694,9 +745,7 @@ async def run_commit_evaluation(
     test_paths: list[str] | None = None,
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    eval_repo_dir = (
-        f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
-    )
+    eval_repo_dir = f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
     resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
     command = build_commit_evaluation_command(
         commit=commit,

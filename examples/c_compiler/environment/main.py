@@ -15,12 +15,6 @@ Test suites (run in order):
 
 Each test suite lives in tests/<name>.py and exposes a run_<name>() coroutine.
 See tests/utils.py for the result models and core test runner.
-
-Debug artifact contract (REQUIRED — see task prompt):
-  - The submitted compiler MUST write debugging output to ./debug_artifacts/.
-  - This directory is cleared before each test case.
-  - Any files written there are captured and returned in structured failure data.
-  - Required: tokens.txt, ast.json, asm.s (see prompt for format).
 """
 
 from __future__ import annotations

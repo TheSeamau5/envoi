@@ -44,9 +44,7 @@ class TestingState(BaseModel):
 
 
 class SessionEnd(BaseModel):
-    reason: Literal[
-        "solved", "part_limit", "timeout", "agent_error", "envoi_error"
-    ]
+    reason: Literal["solved", "part_limit", "timeout", "agent_error", "envoi_error"]
     total_parts: int
     total_turns: int | None = None
     final_git_commit: str | None = None
@@ -96,6 +94,7 @@ class EvalEvent(BaseModel):
     passed: int = 0
     failed: int = 0
     total: int = 0
+    regressions: int = 0
     payload: dict[str, Any] = Field(default_factory=dict)
     suite_results: dict[str, Any] = Field(default_factory=dict)
     tests: list[EvalTestResult] = Field(default_factory=list)

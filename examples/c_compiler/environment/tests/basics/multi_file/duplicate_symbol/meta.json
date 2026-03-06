@@ -1,0 +1,6 @@
+{
+  "compile_inputs": ["main.c", "a.c", "b.c"],
+  "expected_stdout": "",
+  "expected_exit_code": 1,
+  "expect_compile_success": false
+}

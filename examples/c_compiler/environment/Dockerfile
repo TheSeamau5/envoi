@@ -30,6 +30,7 @@ RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
 
 # Workspace files: AGENTS.md for agent onboarding
 COPY workspace/AGENTS.md /workspace/AGENTS.md
+COPY workspace/reference/ /workspace/reference/
 
 # Bake fixtures into the image to avoid per-run sync costs.
 RUN set -eux; \

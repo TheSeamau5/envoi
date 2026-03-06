@@ -10,19 +10,13 @@ Severity = str
 _HEADER_RE = re.compile(
     r"^(?P<severity>error|warning|note|help)(?:\[(?P<code>[A-Za-z]\d+)\])?:\s*(?P<message>.+)$"
 )
-_RUST_LOCATION_RE = re.compile(
-    r"^\s*-->\s*(?P<file>.+?):(?P<line>\d+):(?P<col>\d+)\s*$"
-)
-_RUST_LABEL_RE = re.compile(
-    r"^\s*\|\s*[~^\-]+\s*(?P<label>.+)$"
-)
+_RUST_LOCATION_RE = re.compile(r"^\s*-->\s*(?P<file>.+?):(?P<line>\d+):(?P<col>\d+)\s*$")
+_RUST_LABEL_RE = re.compile(r"^\s*\|\s*[~^\-]+\s*(?P<label>.+)$")
 _GCC_RE = re.compile(
     r"^(?P<file>[^:\n]+):(?P<line>\d+):(?P<col>\d+)(?::(?P<endcol>\d+))?:\s*"
     r"(?P<severity>fatal error|error|warning|note):\s*(?P<message>.+)$"
 )
-_BYTE_OFFSET_RE = re.compile(
-    r"(?P<prefix>.+?)\s+at\s+byte\s+(?P<offset>\d+)\b"
-)
+_BYTE_OFFSET_RE = re.compile(r"(?P<prefix>.+?)\s+at\s+byte\s+(?P<offset>\d+)\b")
 _NORMALIZE_INT_RE = re.compile(r"\b\d+\b")
 _NORMALIZE_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
 _NORMALIZE_QUOTED_RE = re.compile(r"'[^']+'|\"[^\"]+\"")
@@ -60,8 +54,14 @@ def normalize_kind(failure_type: str | None, message: str | None) -> str:
         return "parse_error"
     if "unexpected token" in text:
         return "parse_error"
+    if failure == "wrong_arch":
+        return "wrong_arch"
     if failure == "compile_error":
         return "compile_error"
+    if failure == "crash":
+        return "runtime_error"
+    if failure in {"wrong_output", "wrong_exit_code"}:
+        return "assertion_error"
     if failure == "runtime_error":
         return "runtime_error"
     if failure == "assertion":
@@ -108,9 +108,7 @@ def render_primary_span(
     width = max(2, len(str(line)))
     marker_col = max(1, col)
     span = (
-        max(1, (end_col - marker_col))
-        if isinstance(end_col, int) and end_col > marker_col
-        else 1
+        max(1, (end_col - marker_col)) if isinstance(end_col, int) and end_col > marker_col else 1
     )
     marker = " " * (marker_col - 1) + "^" * span
     if label:
@@ -132,11 +130,7 @@ def render_diagnostic(
     code = str_or_none(diagnostic.get("code"))
     message = str_or_none(diagnostic.get("message")) or "diagnostic"
     primary = diagnostic.get("primary")
-    header = (
-        f"{severity}[{code}]: {message}"
-        if code
-        else f"{severity}: {message}"
-    )
+    header = f"{severity}[{code}]: {message}" if code else f"{severity}: {message}"
     lines = [header]
     if isinstance(primary, dict):
         file = str_or_none(primary.get("file")) or "<source>"
@@ -407,9 +401,7 @@ def dedupe_diagnostics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         primary = item.get("primary")
         primary_key = None
         if isinstance(primary, dict):
-            primary_key = (
-                f"{primary.get('file')}:{primary.get('line')}:{primary.get('col')}"
-            )
+            primary_key = f"{primary.get('file')}:{primary.get('line')}:{primary.get('col')}"
         key = (
             str_or_none(item.get("severity")) or "error",
             str_or_none(item.get("kind")) or "evaluation_error",
@@ -432,9 +424,7 @@ def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
     existing = test.get("diagnostics")
     source = str_or_none(test.get("source"))
     if isinstance(existing, list) and existing:
-        parsed_existing = [
-            item for item in existing if isinstance(item, dict)
-        ]
+        parsed_existing = [item for item in existing if isinstance(item, dict)]
         if parsed_existing:
             for item in parsed_existing:
                 if "rendered" not in item:
@@ -498,10 +488,7 @@ def extract_test_diagnostics(test: dict[str, Any]) -> list[dict[str, Any]]:
         return diagnostics
 
     fallback_message = (
-        message
-        or stderr_tail
-        or stdout_tail
-        or "Test failed without diagnostic output."
+        message or stderr_tail or stdout_tail or "Test failed without diagnostic output."
     )
     kind = normalize_kind(failure_type, fallback_message)
     return [
@@ -599,16 +586,8 @@ def enrich_evaluation_payload(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         diagnostics = extract_test_diagnostics(item)
         item["diagnostics"] = diagnostics
-        item["rendered_diagnostic"] = (
-            diagnostics[0].get("rendered")
-            if diagnostics
-            else None
-        )
-        item["cluster_key"] = (
-            diagnostics[0].get("cluster_key")
-            if diagnostics
-            else None
-        )
+        item["rendered_diagnostic"] = diagnostics[0].get("rendered") if diagnostics else None
+        item["cluster_key"] = diagnostics[0].get("cluster_key") if diagnostics else None
         normalized_tests.append(item)
 
     payload["tests"] = normalized_tests

@@ -3,7 +3,7 @@ Build a REAL C compiler in Rust from scratch. One that could eventually compile 
 You are not building a toy. You are building a compiler that handles real C: structs, pointers, arrays, the preprocessor, all of it. The test suites you are evaluated against include hundreds of programs from the c-testsuite conformance tests, the "Writing a C Compiler" book tests, and a subset of the GCC torture tests. A compiler that can pass all of them is a compiler that can compile real software.
 
 No cheating, no wrappers, no shortcuts.
-Do NOT call or wrap cc/gcc/clang/tcc.
+Do NOT call or wrap cc/gcc/clang/tcc to compile C source code for you.
 Do NOT use saltwater or ANY existing C compiler implementation.
 Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
 Target Linux x86_64 (x86-64). Do NOT generate AArch64/ARM64 assembly.
@@ -22,6 +22,14 @@ Interface: `./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o 
 The evaluation harness may pass multiple C translation units for one program.
 Treat `./cc` as a compiler-plus-linker driver: compile the inputs, link them,
 and produce one runnable executable.
+
+Boundary of responsibility:
+- Your job: lexing, parsing, semantic analysis, and x86_64 code generation from C source.
+- OK to delegate: calling `as` to assemble your own `.s` files into `.o`, and calling `gcc` or `ld` to link `.o` files into the final executable.
+- NOT OK: using gcc/clang/tcc to compile C into assembly or object code for you.
+
+Read `/workspace/reference/wacct-chapter-map.md` before you start. The full
+reference bundle lives in `/workspace/reference/`.
 
 Your goal is to pass ALL test suites. Work methodically. Start small, build up.
 
@@ -45,13 +53,34 @@ Your tests accumulate. By the end, you should have a large collection of small C
 
 Do NOT try to implement multiple features in parallel. Do NOT do a big refactor while also adding a new feature. Do NOT move to the next thing when the current thing is broken.
 
-The sequence matters:
-- Get the simplest possible program working first: `int main() { return 0; }`
-- Then arithmetic: `return 1 + 2;`
-- Then variables, then control flow, then functions, then pointers, then strings, etc.
-- Each feature builds on the previous ones. If you skip ahead, you will waste time debugging interactions between features that are all broken at once.
+The sequence matters. Build in the same order as the wacct chapters:
+
+| Phase | wacct Chapters | Feature | Do not proceed until... |
+| --- | --- | --- | --- |
+| 1 | Ch 1 | Return statements | `int main() { return 42; }` produces the correct exit code |
+| 2 | Ch 2-3 | Unary + binary operators | Arithmetic expressions evaluate correctly |
+| 3 | Ch 4 | Logical + relational operators | Comparisons produce correct `0`/`1` values |
+| 4 | Ch 5 | Local variables | Variables can be declared, assigned, and read back correctly |
+| 5 | Ch 6-7 | `if`/`else`, blocks, scoping | Branching works and block scope is correct |
+| 6 | Ch 8 | Loops | `while`, `for`, `do-while`, `break`, and `continue` all work |
+| 7 | Ch 9 | Functions | Multi-argument calls and recursion work reliably |
+| 8 | Ch 10 | Globals, `static`, `extern` | File-scope state and symbol visibility work |
+| 9 | Ch 11-13 | `long`, unsigned, float | Type handling beyond plain `int` works |
+| 10 | Ch 14-18 | Pointers, arrays, strings, structs | Memory layout and addressing work correctly |
+
+After each phase, run your full local suite and the basics suite again. If basics regresses, stop and fix the regression before moving on.
 
 When you fix a bug, write a test that reproduces it FIRST, then fix it. That test stays in your suite forever.
+
+## Common Failure Modes (DO NOT DO THESE)
+
+1. Implementing without testing. Example: you write `if`-statement parsing, it "looks right," and you move on. Later you discover it was broken the entire time and everything built on top of it is now suspect. Do not trust code that has not been exercised by a real test.
+2. Trying to fix everything at once. Example: five tests fail after a refactor and you try to patch all five in one edit. Then you do not know which change fixed which bug. Fix ONE failing test at a time. Get green. Then move to the next.
+3. Moving on from partial implementations. Example: function calls work for 2 arguments but fail for 6, and you tell yourself you will "come back later" after starting pointers. You will not come back later. Stay on the feature until it fully works.
+4. Weakening tests to make them pass. Example: a test expects `42`, your compiler prints `43`, and you change the expected output to `43`. This is the worst possible move. The test is right. The compiler is wrong. Fix the compiler.
+5. Big refactors while tests are red. Example: "I need to redesign the AST before I can fix this bug." No. Get back to green first, even with ugly code. Refactor only after the failing test is fixed.
+6. Declaring something impossible. Example: you hit a codegen bug and decide that x86_64 function calls "cannot work" without a full register allocator. That is false. Read the reference material, study the codegen examples, and think harder.
+7. Silent scope reduction. Example: you stop running some suites, keep only the easy ones green, and then report "all tests pass." Never do that. Report scores for ALL suites you evaluate every time, including suites where you currently score `0`.
 
 ## Testing Mechanics
 
@@ -63,7 +92,11 @@ PASS=0; FAIL=0
 for f in tests/*.c; do
     name=$(basename "$f")
     # Compile with gcc (reference)
-    gcc -std=c2x -pedantic-errors "$f" -o /tmp/ref 2>/dev/null
+    if ! gcc -std=c2x -pedantic-errors "$f" -o /tmp/ref 2>/tmp/gcc_stderr; then
+        echo "SKIP $name: gcc cannot compile this (your test may be invalid C)"
+        cat /tmp/gcc_stderr
+        continue
+    fi
     ref_out=$(/tmp/ref 2>/dev/null)
     ref_exit=$?
     # Compile with your compiler
@@ -90,6 +123,16 @@ echo "$PASS passed, $FAIL failed out of $((PASS + FAIL))"
 
 Run this after every change. No exceptions.
 
+## Reference Material
+
+Read `/workspace/reference/` before you guess:
+- `wacct-chapter-map.md` — exact implementation order and chapter coverage
+- `sysv-abi-summary.md` — calling convention and stack alignment rules
+- `x86-64-instructions.md` — the small instruction set you actually need
+- `codegen-examples/` — gcc `-S -O0` patterns for simple programs
+- `c-language-traps.md` — C23 edge cases that break parsers and type systems
+- `x86-64-codegen-traps.md` — common assembly-generation mistakes
+
 ## Recommended Architecture
 
 Only `src/main.rs` is required. Beyond that, organize however you see fit. A common starting point:
@@ -99,19 +142,6 @@ Only `src/main.rs` is required. Beyond that, organize however you see fit. A com
 - `src/codegen.rs` — x86_64 assembly generation
 
 Add as many modules as you need. When a file gets hard to navigate, split it.
-
-## Debug Artifacts (REQUIRED)
-
-Your compiler MUST write intermediate representations to `./debug_artifacts/`
-during every compilation. This directory is cleared before each test case and
-captured automatically on failure.
-
-Required artifacts:
-- `tokens.txt` — lexer output (one token per line: `<type> <value> <line>:<col>`)
-- `ast.json` — parsed AST as JSON
-- `asm.s` — generated x86_64 assembly
-
-Without these, you must guess where bugs are, which wastes turns.
 
 ## Progress Tracking (REQUIRED)
 

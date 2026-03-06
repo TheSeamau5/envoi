@@ -1,0 +1,5 @@
+{
+  "compile_inputs": ["main.c", "state.c"],
+  "expected_stdout": "6",
+  "expected_exit_code": 0
+}

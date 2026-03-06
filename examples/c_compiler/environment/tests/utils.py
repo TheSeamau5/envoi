@@ -2,8 +2,8 @@
 Shared types and test runner used by all test suites.
 
 CaseResult / TestResult are the structured output models returned by every
-@envoi.test route. run_case() compiles a single .c file with the submitted
-compiler, benchmarks it against gcc, and returns a CaseResult.
+@envoi.test route. run_case() compiles one or more source inputs with the
+submitted compiler, benchmarks them against gcc, and returns a CaseResult.
 """
 
 from __future__ import annotations
@@ -14,22 +14,13 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
 
 import envoi
-from pydantic import BaseModel, Field
-
-
-class DebugArtifact(BaseModel):
-    path: str
-    kind: str
-    size_bytes: int
-    sha256: str
-    line_count: int | None = None
-    text_chunks: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
+from pydantic import BaseModel
 
 
 class CaseResult(BaseModel):
@@ -47,8 +38,14 @@ class CaseResult(BaseModel):
     gcc_binary_size_bytes: int | None = None
     run_time_ms: float | None = None
     gcc_run_time_ms: float | None = None
+    failure_type: str | None = None
+    signal_name: str | None = None
+    stdout_diff_summary: str | None = None
+    compiler_warnings: str | None = None
+    gcc_warnings: str | None = None
+    runtime_stderr: str | None = None
+    timed_out: bool = False
     stderr: str | None = None
-    debug_artifacts: list[DebugArtifact] = Field(default_factory=list)
 
 
 class TestResult(BaseModel):
@@ -56,6 +53,8 @@ class TestResult(BaseModel):
     failed: int
     total: int
     cases: list[CaseResult]
+
+
 arch_verified = False
 arch_lock: asyncio.Lock | None = None
 case_run_semaphore: asyncio.Semaphore | None = None
@@ -156,55 +155,6 @@ def select_cases(
         return cases[offset : offset + n_tests]
 
     return cases[offset:]
-
-
-def reset_debug_artifacts_dir(root: Path) -> Path:
-    debug_dir = root / "debug_artifacts"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    return debug_dir
-
-
-def split_text_chunks(text: str, max_chars: int = 12_000) -> list[str]:
-    if not text:
-        return []
-
-    chunks: list[str] = []
-    current: list[str] = []
-    current_size = 0
-
-    for line in text.splitlines(keepends=True):
-        line_parts = [line[i : i + max_chars] for i in range(0, len(line), max_chars)]
-        if not line_parts:
-            line_parts = [line]
-
-        for part in line_parts:
-            if current and current_size + len(part) > max_chars:
-                chunks.append("".join(current))
-                current = [part]
-                current_size = len(part)
-                continue
-            current.append(part)
-            current_size += len(part)
-
-    if current:
-        chunks.append("".join(current))
-
-    return chunks
-
-
-def artifact_kind(path: Path, is_text: bool) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".json":
-        return "json"
-    if suffix in {".s", ".asm"}:
-        return "assembly"
-    if suffix in {".ast", ".parse", ".tree"}:
-        return "ast"
-    if suffix in {".ir", ".ll"}:
-        return "ir"
-    if suffix in {".txt", ".log", ".trace", ".stderr", ".stdout"}:
-        return "log"
-    return "text" if is_text else "binary"
 
 
 def max_test_concurrency() -> int:
@@ -369,55 +319,135 @@ async def maybe_verify_arch(out_file: Path) -> str | None:
 
         expected_arch_label, expected_machine_values = expected_target_arch()
         if machine is not None and machine not in expected_machine_values:
-            return (
-                f"wrong target architecture: expected {expected_arch_label}, got {machine}"
-            )
+            return f"wrong target architecture: expected {expected_arch_label}, got {machine}"
 
         arch_verified = True
         return None
 
 
-def collect_debug_artifacts(debug_dir: Path) -> list[DebugArtifact]:
-    if not debug_dir.exists():
-        return []
+def command_timed_out(result: envoi.RunResult) -> bool:
+    return result.exit_code == -1 and result.stderr.strip().lower() == "timeout"
 
-    artifacts: list[DebugArtifact] = []
-    for file_path in sorted(
-        (path for path in debug_dir.rglob("*") if path.is_file()),
-        key=lambda path: str(path.relative_to(debug_dir)),
+
+def decode_signal_name(exit_code: int) -> str | None:
+    if exit_code <= 128:
+        return None
+    try:
+        return signal.Signals(exit_code - 128).name
+    except ValueError:
+        return None
+
+
+def raw_stdout_text(result: envoi.RunResult) -> str:
+    if result.stdout_bytes:
+        return result.stdout_bytes.decode(errors="replace")
+    return result.stdout
+
+
+def summarize_stdout_difference(expected: str, actual: str) -> str | None:
+    if expected == actual:
+        return None
+    if expected.rstrip() == actual.rstrip():
+        return "outputs match except trailing whitespace/newlines"
+
+    expected_lines = expected.splitlines()
+    actual_lines = actual.splitlines()
+    for line_no, (expected_line, actual_line) in enumerate(
+        zip(expected_lines, actual_lines, strict=False),
+        start=1,
     ):
-        payload = file_path.read_bytes()
-        notes: list[str] = []
-
-        is_binary = b"\x00" in payload
-        text_chunks: list[str] = []
-        line_count: int | None = None
-
-        if not is_binary:
-            text = payload.decode("utf-8", errors="replace")
-            if text.encode("utf-8", errors="replace") != payload:
-                notes.append("Decoded as UTF-8 with replacement.")
-
-            text_chunks = split_text_chunks(text)
-            line_count = text.count("\n")
-            if text and not text.endswith("\n"):
-                line_count += 1
-        else:
-            notes.append("Binary content omitted from payload.")
-
-        artifacts.append(
-            DebugArtifact(
-                path=str(file_path.relative_to(debug_dir)),
-                kind=artifact_kind(file_path, not is_binary),
-                size_bytes=len(payload),
-                sha256=hashlib.sha256(payload).hexdigest(),
-                line_count=line_count,
-                text_chunks=text_chunks,
-                notes=notes,
+        if expected_line != actual_line:
+            return (
+                f"first difference at line {line_no}: "
+                f"expected {expected_line!r}, got {actual_line!r}"
             )
-        )
 
-    return artifacts
+    if len(expected_lines) != len(actual_lines):
+        return f"expected {len(expected_lines)} lines, got {len(actual_lines)} lines"
+
+    return f"stdout differs: expected {len(expected)} chars, got {len(actual)} chars"
+
+
+def render_case_sources(source_files: list[tuple[str, str]]) -> str:
+    if not source_files:
+        return ""
+    if len(source_files) == 1:
+        return source_files[0][1]
+    return "\n\n".join(f"// file: {filename}\n{content}" for filename, content in source_files)
+
+
+def default_inline_compile_inputs(
+    source_files: list[tuple[str, Path]],
+) -> list[Path]:
+    compile_inputs = [
+        path for filename, path in source_files if Path(filename).suffix.lower() in {".c", ".s"}
+    ]
+    if not compile_inputs:
+        raise RuntimeError("Inline multi-file case has no .c or .s compile inputs")
+    return compile_inputs
+
+
+def prepare_case_files(
+    *,
+    case: dict,
+    case_dir: Path,
+    file_stem: str,
+) -> tuple[list[Path], str]:
+    inline_sources_value = case.get("sources")
+    input_path_values = case.get("input_paths")
+
+    if isinstance(inline_sources_value, dict):
+        inline_source_files: list[tuple[str, Path]] = []
+        rendered_sources: list[tuple[str, str]] = []
+        for raw_name, raw_content in inline_sources_value.items():
+            filename = str(raw_name)
+            content = str(raw_content)
+            target = case_dir / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            inline_source_files.append((filename, target))
+            rendered_sources.append((filename, content))
+
+        raw_compile_inputs = case.get("compile_inputs")
+        if raw_compile_inputs is None:
+            compile_inputs = default_inline_compile_inputs(inline_source_files)
+        else:
+            compile_inputs = []
+            for raw_name in list(raw_compile_inputs):
+                compile_input = case_dir / str(raw_name)
+                if not compile_input.is_file():
+                    raise RuntimeError(
+                        "Missing inline compile input for case "
+                        f"{case['name']}: {compile_input.name}"
+                    )
+                compile_inputs.append(compile_input)
+            if not compile_inputs:
+                raise RuntimeError(f"Case {case['name']} has no compile inputs")
+
+        return compile_inputs, render_case_sources(rendered_sources)
+
+    if input_path_values is None:
+        source_path_value = case.get("source_path")
+        if source_path_value is None:
+            src = str(case["source"])
+            c_file = case_dir / f"{file_stem}.c"
+            c_file.write_text(src, encoding="utf-8")
+        else:
+            c_file = Path(str(source_path_value)).expanduser().resolve()
+            if not c_file.is_file():
+                raise RuntimeError(f"Missing case source file: {c_file}")
+            src = str(case["source"])
+        return [c_file], src
+
+    compile_inputs = []
+    for raw_path in list(input_path_values):
+        compile_input = Path(str(raw_path)).expanduser().resolve()
+        if not compile_input.is_file():
+            raise RuntimeError(f"Missing case compile input: {compile_input}")
+        compile_inputs.append(compile_input)
+    if not compile_inputs:
+        raise RuntimeError(f"Case {case['name']} has no compile inputs")
+    return compile_inputs, str(case["source"])
 
 
 async def run_case(
@@ -426,7 +456,6 @@ async def run_case(
     case_root: Path | None = None,
 ) -> CaseResult:
     name = str(case["name"])
-    src = str(case["source"])
     expected_stdout = str(case["expected_stdout"])
     expected_exit = int(case["expected_exit_code"])
     expect_compile_success = bool(case.get("expect_compile_success", True))
@@ -435,31 +464,15 @@ async def run_case(
     case_dir = create_case_dir(case_parent, name)
 
     file_stem = sanitize_fragment(f"test-{name}", fallback="test", max_length=64)
-    source_path_value = case.get("source_path")
-    input_path_values = case.get("input_paths")
-    if input_path_values is None:
-        if source_path_value is None:
-            c_file = case_dir / f"{file_stem}.c"
-            c_file.write_text(src, encoding="utf-8")
-        else:
-            c_file = Path(str(source_path_value)).expanduser().resolve()
-            if not c_file.is_file():
-                raise RuntimeError(f"Missing case source file: {c_file}")
-        compile_inputs = [c_file]
-    else:
-        compile_inputs = []
-        for raw_path in list(input_path_values):
-            compile_input = Path(str(raw_path)).expanduser().resolve()
-            if not compile_input.is_file():
-                raise RuntimeError(f"Missing case compile input: {compile_input}")
-            compile_inputs.append(compile_input)
-        if not compile_inputs:
-            raise RuntimeError(f"Case {name} has no compile inputs")
+    compile_inputs, c_source = prepare_case_files(
+        case=case,
+        case_dir=case_dir,
+        file_stem=file_stem,
+    )
 
     extra_link_args = [str(arg) for arg in list(case.get("link_args", []))]
     out_file = case_dir / file_stem
     gcc_out_file = case_dir / f"{file_stem}_gcc"
-    debug_dir = reset_debug_artifacts_dir(case_dir)
     cc_binary = (session_root / "cc").resolve()
 
     cc_command_parts = [
@@ -505,16 +518,44 @@ async def run_case(
     if should_benchmark_with_gcc:
         gcc, gcc_compile_time_ms = compile_results[1]
 
+    compiler_warnings = cc.stderr.strip() or None if cc.exit_code == 0 else None
+    gcc_warnings = gcc.stderr.strip() or None if gcc is not None else None
+    compile_timed_out = command_timed_out(cc)
     binary_size_bytes = file_size(out_file)
     gcc_binary_size_bytes = file_size(gcc_out_file)
 
+    if should_benchmark_with_gcc and gcc is not None and gcc.exit_code != 0:
+        reference_error = gcc.stderr or gcc.stdout or "gcc failed to compile the reference case"
+        return CaseResult(
+            name=name,
+            phase="compile",
+            passed=False,
+            c_source=c_source,
+            expected_stdout=expected_stdout,
+            actual_stdout="",
+            expected_exit_code=expected_exit,
+            actual_exit_code=cc.exit_code,
+            compile_time_ms=compile_time_ms,
+            gcc_compile_time_ms=gcc_compile_time_ms,
+            binary_size_bytes=binary_size_bytes,
+            gcc_binary_size_bytes=gcc_binary_size_bytes,
+            failure_type="compile_error",
+            compiler_warnings=compiler_warnings,
+            gcc_warnings=gcc_warnings,
+            timed_out=compile_timed_out,
+            stderr=(
+                "reference gcc could not compile this case "
+                "(the test inputs may be invalid C)\n" + reference_error
+            ),
+        )
+
     if not expect_compile_success:
-        passed = cc.exit_code != 0
+        passed = cc.exit_code != 0 and not compile_timed_out
         return CaseResult(
             name=name,
             phase="compile",
             passed=passed,
-            c_source=src,
+            c_source=c_source,
             expected_stdout="",
             actual_stdout="",
             expected_exit_code=expected_exit,
@@ -523,8 +564,19 @@ async def run_case(
             gcc_compile_time_ms=gcc_compile_time_ms,
             binary_size_bytes=None,
             gcc_binary_size_bytes=gcc_binary_size_bytes,
-            stderr=None if passed else "expected compilation to fail but it succeeded",
-            debug_artifacts=collect_debug_artifacts(debug_dir) if not passed else [],
+            failure_type=None if passed else ("timeout" if compile_timed_out else "compile_error"),
+            compiler_warnings=compiler_warnings,
+            gcc_warnings=gcc_warnings,
+            timed_out=compile_timed_out,
+            stderr=(
+                None
+                if passed
+                else (
+                    "compilation timed out"
+                    if compile_timed_out
+                    else "expected compilation to fail but it succeeded"
+                )
+            ),
         )
 
     if cc.exit_code != 0:
@@ -532,7 +584,7 @@ async def run_case(
             name=name,
             phase="compile",
             passed=False,
-            c_source=src,
+            c_source=c_source,
             expected_stdout=expected_stdout,
             actual_stdout="",
             expected_exit_code=expected_exit,
@@ -541,8 +593,11 @@ async def run_case(
             gcc_compile_time_ms=gcc_compile_time_ms,
             binary_size_bytes=None,
             gcc_binary_size_bytes=gcc_binary_size_bytes,
+            failure_type="timeout" if compile_timed_out else "compile_error",
+            compiler_warnings=compiler_warnings,
+            gcc_warnings=gcc_warnings,
+            timed_out=compile_timed_out,
             stderr=(cc.stderr or cc.stdout or "compilation failed"),
-            debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
     arch_error = await maybe_verify_arch(out_file)
@@ -551,7 +606,7 @@ async def run_case(
             name=name,
             phase="verify",
             passed=False,
-            c_source=src,
+            c_source=c_source,
             expected_stdout=expected_stdout,
             actual_stdout="",
             expected_exit_code=expected_exit,
@@ -562,8 +617,10 @@ async def run_case(
             gcc_binary_size_bytes=gcc_binary_size_bytes,
             run_time_ms=None,
             gcc_run_time_ms=None,
+            failure_type="wrong_arch",
+            compiler_warnings=compiler_warnings,
+            gcc_warnings=gcc_warnings,
             stderr=arch_error,
-            debug_artifacts=collect_debug_artifacts(debug_dir),
         )
 
     run_tasks = [
@@ -589,24 +646,45 @@ async def run_case(
     if should_run_gcc_binary:
         _, gcc_run_time_ms = run_results[1]
 
-    passed = (
-        run.stdout.strip() == expected_stdout.strip()
-        and run.exit_code == expected_exit
+    actual_stdout = raw_stdout_text(run)
+    normalized_actual_stdout = actual_stdout.strip()
+    normalized_expected_stdout = expected_stdout.strip()
+    run_timed_out = command_timed_out(run)
+    stdout_mismatch = normalized_actual_stdout != normalized_expected_stdout
+    exit_code_mismatch = run.exit_code != expected_exit
+    passed = not stdout_mismatch and not exit_code_mismatch
+    signal_name = decode_signal_name(run.exit_code)
+    stdout_diff_summary = (
+        summarize_stdout_difference(expected_stdout, actual_stdout) if stdout_mismatch else None
     )
+    runtime_stderr = run.stderr or None
+
+    failure_type: str | None = None
+    if not passed:
+        if run_timed_out:
+            failure_type = "timeout"
+        elif signal_name is not None:
+            failure_type = "crash"
+        elif stdout_mismatch:
+            failure_type = "wrong_output"
+        elif exit_code_mismatch:
+            failure_type = "wrong_exit_code"
 
     stderr = None
     if not passed:
         parts: list[str] = []
-        if run.stdout.strip() != expected_stdout.strip():
+        if failure_type == "timeout":
+            parts.append("execution timed out")
+        if signal_name is not None:
+            parts.append(f"process crashed with {signal_name}")
+        if stdout_mismatch:
+            if stdout_diff_summary is not None:
+                parts.append(stdout_diff_summary)
             parts.append(
-                "stdout mismatch:\n"
-                f"  expected: {expected_stdout!r}\n"
-                f"  actual:   {run.stdout.strip()!r}"
+                f"stdout mismatch:\n  expected: {expected_stdout!r}\n  actual:   {actual_stdout!r}"
             )
-        if run.exit_code != expected_exit:
-            parts.append(
-                f"exit code mismatch: expected {expected_exit}, got {run.exit_code}"
-            )
+        if exit_code_mismatch:
+            parts.append(f"exit code mismatch: expected {expected_exit}, got {run.exit_code}")
         if run.stderr:
             parts.append(f"stderr:\n  {run.stderr.strip()}")
         stderr = "\n".join(parts)
@@ -615,9 +693,9 @@ async def run_case(
         name=name,
         phase="verify",
         passed=passed,
-        c_source=src,
+        c_source=c_source,
         expected_stdout=expected_stdout,
-        actual_stdout=run.stdout,
+        actual_stdout=actual_stdout,
         expected_exit_code=expected_exit,
         actual_exit_code=run.exit_code,
         compile_time_ms=compile_time_ms,
@@ -626,8 +704,14 @@ async def run_case(
         gcc_binary_size_bytes=gcc_binary_size_bytes,
         run_time_ms=run_time_ms,
         gcc_run_time_ms=gcc_run_time_ms,
+        failure_type=failure_type,
+        signal_name=signal_name,
+        stdout_diff_summary=stdout_diff_summary,
+        compiler_warnings=compiler_warnings,
+        gcc_warnings=gcc_warnings,
+        runtime_stderr=runtime_stderr,
+        timed_out=run_timed_out,
         stderr=stderr,
-        debug_artifacts=collect_debug_artifacts(debug_dir) if not passed else [],
     )
 
 

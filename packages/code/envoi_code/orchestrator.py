@@ -27,6 +27,7 @@ import copy
 import inspect
 import json
 import os
+import re
 import shlex
 import time
 import traceback
@@ -129,31 +130,14 @@ DEFAULT_AGENT = "codex"
 MESSAGE_TIMEOUT_SECONDS = int(
     os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
 )  # hard cap per message turn
-RESUME_FROM_S3 = (
-    os.environ.get("RESUME_FROM_S3", "1").strip().lower()
-    not in {"0", "false", "no"}
-)
-TURN_RECOVERY_RETRIES = max(
-    0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3"))
-)
-MAX_INLINE_TEST_MESSAGE_CHARS = max(
-    80, int(os.environ.get("MAX_INLINE_TEST_MESSAGE_CHARS", "220"))
-)
-FAILED_TEST_FEEDBACK_LIMIT = max(
-    1, int(os.environ.get("FAILED_TEST_FEEDBACK_LIMIT", "50"))
-)
-ADVISOR_TIMEOUT_SECONDS = max(
-    0, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "0"))
-)
-LOGS_FLUSH_INTERVAL_SECONDS = max(
-    1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SECONDS", "5"))
-)
-LOGS_FLUSH_BATCH_SIZE = max(
-    1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50"))
-)
-SHUTDOWN_GRACE_SECONDS = max(
-    0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "300"))
-)
+RESUME_FROM_S3 = os.environ.get("RESUME_FROM_S3", "1").strip().lower() not in {"0", "false", "no"}
+TURN_RECOVERY_RETRIES = max(0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3")))
+MAX_INLINE_TEST_MESSAGE_CHARS = max(80, int(os.environ.get("MAX_INLINE_TEST_MESSAGE_CHARS", "220")))
+FAILED_TEST_FEEDBACK_LIMIT = max(1, int(os.environ.get("FAILED_TEST_FEEDBACK_LIMIT", "50")))
+ADVISOR_TIMEOUT_SECONDS = max(0, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "0")))
+LOGS_FLUSH_INTERVAL_SECONDS = max(1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SECONDS", "5")))
+LOGS_FLUSH_BATCH_SIZE = max(1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50")))
+SHUTDOWN_GRACE_SECONDS = max(0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "300")))
 EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
     0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "30"))
 )
@@ -193,11 +177,16 @@ async def dump_sandbox_logs(
     """Print the tail of agent + envoi logs from the sandbox."""
     for log_file in agent.log_files:
         try:
-            _, stdout, _ = (await sandbox.run(
-                f"[ -f {shlex.quote(log_file)} ] && tail -n {tail} {shlex.quote(log_file)} || true",
-                timeout=10,
-                quiet=True,
-            )).unpack()
+            _, stdout, _ = (
+                await sandbox.run(
+                    "[ -f "
+                    f"{shlex.quote(log_file)}"
+                    " ] && tail -n "
+                    f"{tail} {shlex.quote(log_file)} || true",
+                    timeout=10,
+                    quiet=True,
+                )
+            ).unpack()
             if stdout.strip():
                 label = log_file.split("/")[-1]
                 print(f"[logs] === {label} (last {tail} lines) ===")
@@ -340,10 +329,7 @@ def is_winning_evaluation(evaluation: EvaluationRecord) -> bool:
         evaluation.status == "completed"
         and evaluation.total > 0
         and evaluation.passed == evaluation.total
-        and not (
-            isinstance(evaluation.error, str)
-            and evaluation.error.strip()
-        )
+        and not (isinstance(evaluation.error, str) and evaluation.error.strip())
     )
 
 
@@ -359,9 +345,7 @@ def first_winning_commit(
             continue
         _, best = winner
         best_part = best.part if isinstance(best.part, int) else 10**9
-        candidate_part = (
-            evaluation.part if isinstance(evaluation.part, int) else 10**9
-        )
+        candidate_part = evaluation.part if isinstance(evaluation.part, int) else 10**9
         if candidate_part < best_part:
             winner = (commit, evaluation)
     return winner
@@ -390,22 +374,16 @@ def trim_trace_after_part(
     trace.parts = [
         record
         for record in trace.parts
-        if isinstance(record.part, int)
-        and record.part <= max_part_inclusive
+        if isinstance(record.part, int) and record.part <= max_part_inclusive
     ]
-    kept_parts = {
-        record.part
-        for record in trace.parts
-        if isinstance(record.part, int)
-    }
+    kept_parts = {record.part for record in trace.parts if isinstance(record.part, int)}
 
     trimmed_turns: list[TurnRecord] = []
     for turn in trace.turns:
         filtered_turn_parts = [
             record
             for record in turn.parts
-            if isinstance(record.part, int)
-            and record.part in kept_parts
+            if isinstance(record.part, int) and record.part in kept_parts
         ]
         if filtered_turn_parts:
             turn.parts = filtered_turn_parts
@@ -431,10 +409,7 @@ def trim_trace_after_part(
     trace.evaluations = {
         commit: evaluation
         for commit, evaluation in trace.evaluations.items()
-        if (
-            not isinstance(evaluation.part, int)
-            or evaluation.part <= max_part_inclusive
-        )
+        if (not isinstance(evaluation.part, int) or evaluation.part <= max_part_inclusive)
     }
 
 
@@ -585,11 +560,7 @@ async def collect_sandbox_structured_logs(
         return []
 
     records: list[dict[str, Any]] = []
-    for path in sorted(
-        line.strip()
-        for line in listing.stdout.splitlines()
-        if line.strip()
-    ):
+    for path in sorted(line.strip() for line in listing.stdout.splitlines() if line.strip()):
         content_result = await sandbox.run(
             f"cat {shlex.quote(path)}",
             quiet=True,
@@ -612,9 +583,7 @@ async def collect_sandbox_structured_logs(
                 }
             )
             continue
-        source_name = (
-            "runtime" if "runtime" in Path(path).name else "session_worker"
-        )
+        source_name = "runtime" if "runtime" in Path(path).name else "session_worker"
         records.extend(
             parse_jsonl_log_records(
                 content_result.stdout,
@@ -681,16 +650,16 @@ async def restore_workspace_from_bundle(
         "git config user.email 'agent@example.com'\n"
         "git config user.name 'Agent'\n"
     )
-    exit_code, _, stderr = (await sandbox.run(
-        restore_cmd,
-        timeout=300,
-        quiet=True,
-    )).unpack()
+    exit_code, _, stderr = (
+        await sandbox.run(
+            restore_cmd,
+            timeout=300,
+            quiet=True,
+        )
+    ).unpack()
     if exit_code != 0:
         stderr_summary = truncate_text(stderr or "(no stderr)", limit=600)
-        print(
-            f"[resume] workspace restore failed: {stderr_summary}"
-        )
+        print(f"[resume] workspace restore failed: {stderr_summary}")
         return False
     print(f"[resume] restored workspace from bundle at commit {commit}")
     return True
@@ -726,10 +695,7 @@ async def end_session(
         if isinstance(commit_from_sandbox, str) and commit_from_sandbox:
             final_commit = commit_from_sandbox
     except Exception as commit_error:
-        print(
-            "[end] failed to read final git commit from sandbox: "
-            f"{commit_error}"
-        )
+        print(f"[end] failed to read final git commit from sandbox: {commit_error}")
     winner = first_winning_commit(agent_trace.evaluations)
     bundle_export_commit = final_commit
     if winner is not None:
@@ -762,8 +728,10 @@ async def end_session(
     # Persist session_end before any sandbox-dependent export steps.
     if environment:
         save_trace_parquet(
-            agent_trace.trajectory_id, agent_trace,
-            environment=environment, task_params=task_params,
+            agent_trace.trajectory_id,
+            agent_trace,
+            environment=environment,
+            task_params=task_params,
             project=project,
         )
 
@@ -771,8 +739,7 @@ async def end_session(
     try:
         bundle_target = (
             bundle_export_commit.strip()
-            if isinstance(bundle_export_commit, str)
-            and bundle_export_commit.strip()
+            if isinstance(bundle_export_commit, str) and bundle_export_commit.strip()
             else "HEAD"
         )
         bundle_ref = "__envoi_bundle_export__"
@@ -787,15 +754,19 @@ async def end_session(
             f"git bundle create /tmp/repo.bundle "
             f"refs/heads/{bundle_ref}\n"
         )
-        exit_code, _, _ = (await sandbox.run(
-            bundle_cmd,
-            quiet=True,
-            cwd="/workspace",
-        )).unpack()
-        _, size_out, _ = (await sandbox.run(
-            "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
-            quiet=True,
-        )).unpack()
+        exit_code, _, _ = (
+            await sandbox.run(
+                bundle_cmd,
+                quiet=True,
+                cwd="/workspace",
+            )
+        ).unpack()
+        _, size_out, _ = (
+            await sandbox.run(
+                "stat -c %s /tmp/repo.bundle 2>/dev/null || echo 0",
+                quiet=True,
+            )
+        ).unpack()
         bundle_size = int(size_out.strip() or "0")
         print(f"[bundle] size={bundle_size} bytes")
 
@@ -819,14 +790,14 @@ async def end_session(
     }
     if environment:
         save_trace_parquet(
-            agent_trace.trajectory_id, agent_trace,
-            environment=environment, task_params=task_params,
+            agent_trace.trajectory_id,
+            agent_trace,
+            environment=environment,
+            task_params=task_params,
             project=project,
         )
 
-    print(
-        f"[end] session ended: {reason}, {part_count} parts, commit={final_commit}"
-    )
+    print(f"[end] session ended: {reason}, {part_count} parts, commit={final_commit}")
 
 
 # ---------------------------------------------------------------------------
@@ -849,10 +820,7 @@ class EvaluationScheduler:
         test_paths: list[str] | None = None,
         test_timeout_seconds: int | None = None,
         should_stop: Callable[[], bool] | None = None,
-        on_winner: (
-            Callable[[str, EvaluationRecord], Awaitable[None] | None]
-            | None
-        ) = None,
+        on_winner: (Callable[[str, EvaluationRecord], Awaitable[None] | None] | None) = None,
     ) -> None:
         self.sandbox = sandbox
         self.agent_trace = agent_trace
@@ -881,7 +849,8 @@ class EvaluationScheduler:
 
     def save(self) -> None:
         save_trace_parquet(
-            self.trajectory_id, self.agent_trace,
+            self.trajectory_id,
+            self.agent_trace,
             environment=self.environment,
             task_params=self.task_params,
             project=self.project,
@@ -957,15 +926,9 @@ class EvaluationScheduler:
             run_payload.get("stderr"),
         )
 
-        if (
-            isinstance(evaluation.exit_code, int)
-            and evaluation.exit_code != 0
-        ):
+        if isinstance(evaluation.exit_code, int) and evaluation.exit_code != 0:
             evaluation.status = "failed"
-            evaluation.error = (
-                "Evaluation command failed with exit code "
-                f"{evaluation.exit_code}"
-            )
+            evaluation.error = f"Evaluation command failed with exit code {evaluation.exit_code}"
             evaluation.passed = 0
             evaluation.failed = 0
             evaluation.total = 0
@@ -974,9 +937,7 @@ class EvaluationScheduler:
             evaluation.tests = []
         elif not isinstance(payload, dict):
             evaluation.status = "failed"
-            evaluation.error = (
-                "Missing evaluation payload in command output"
-            )
+            evaluation.error = "Missing evaluation payload in command output"
             evaluation.passed = 0
             evaluation.failed = 0
             evaluation.total = 0
@@ -986,9 +947,7 @@ class EvaluationScheduler:
         else:
             evaluation.status = "completed"
             evaluation.error = (
-                payload.get("error")
-                if isinstance(payload.get("error"), str)
-                else None
+                payload.get("error") if isinstance(payload.get("error"), str) else None
             )
             evaluation.duration_ms = int(
                 payload.get("duration_ms", 0) or 0,
@@ -998,22 +957,14 @@ class EvaluationScheduler:
             evaluation.total = int(payload.get("total", 0) or 0)
             evaluation.payload = payload
             suite_results = payload.get("suite_results")
-            evaluation.suite_results = (
-                suite_results if isinstance(suite_results, dict) else {}
-            )
+            evaluation.suite_results = suite_results if isinstance(suite_results, dict) else {}
             evaluation.tests = EvaluationScheduler.normalize_tests(
                 payload.get("tests"),
             )
-            if (
-                evaluation.total == 0
-                and evaluation.passed == 0
-                and evaluation.failed == 0
-            ):
+            if evaluation.total == 0 and evaluation.passed == 0 and evaluation.failed == 0:
                 evaluation.status = "failed"
                 if not evaluation.error:
-                    evaluation.error = (
-                        "Evaluation returned zero tests"
-                    )
+                    evaluation.error = "Evaluation returned zero tests"
 
     @staticmethod
     def apply_failure(
@@ -1108,7 +1059,9 @@ class EvaluationScheduler:
                 self.apply_result(evaluation, run_payload)
             except Exception as eval_error:
                 self.apply_failure(
-                    evaluation, eval_error, run_payload,
+                    evaluation,
+                    eval_error,
+                    run_payload,
                 )
             finally:
                 if evaluation.duration_ms is None:
@@ -1129,12 +1082,10 @@ class EvaluationScheduler:
                         f"passed={evaluation.passed}/{evaluation.total}"
                     )
                 self.emit_event(evaluation)
-                if (
-                    is_winning_evaluation(evaluation)
-                    and self.on_winner is not None
-                ):
+                if is_winning_evaluation(evaluation) and self.on_winner is not None:
                     callback_result = self.on_winner(
-                        commit, evaluation,
+                        commit,
+                        evaluation,
                     )
                     if inspect.isawaitable(callback_result):
                         await callback_result
@@ -1236,22 +1187,25 @@ def build_followup_prompt(
         )
 
     if evaluation_feedback:
-        sections.append(
-            "End-of-turn evaluation feedback:\n"
-            + evaluation_feedback
-        )
+        sections.append("End-of-turn evaluation feedback:\n" + evaluation_feedback)
     if include_mcp_status:
         status = build_unsolved_status_lines(tracker)
         if status:
-            sections.append(
-                "Current test status:\n" + "\n".join(status)
-            )
+            sections.append("Current test status:\n" + "\n".join(status))
     return "\n\n".join(section for section in sections if section)
 
 
 SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = ()
-CURRENT_SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = (
-    SUITE_FEEDBACK_PRIORITY
+CURRENT_SUITE_FEEDBACK_PRIORITY: tuple[str, ...] = SUITE_FEEDBACK_PRIORITY
+PROGRESS_MD_PATTERNS = (
+    re.compile(
+        r"tests\s+passing\s*:\s*(?P<passed>\d+)\s*/\s*(?P<total>\d+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?P<passed>\d+)\s*/\s*(?P<total>\d+)",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -1330,14 +1284,11 @@ def build_cluster_summary_section(
         count_value = cluster.get("count")
         count = count_value if isinstance(count_value, int) else 0
         suffix = f" code={code}" if code else ""
-        lines.append(
-            f"- {kind}{suffix}: count={count} key={key}"
-        )
+        lines.append(f"- {kind}{suffix}: count={count} key={key}")
         samples = cluster.get("sample_tests")
         if isinstance(samples, list) and samples:
             rendered_samples = ", ".join(
-                sample for sample in samples
-                if isinstance(sample, str) and sample
+                sample for sample in samples if isinstance(sample, str) and sample
             )
             if rendered_samples:
                 lines.append(f"  samples: {rendered_samples}")
@@ -1480,8 +1431,7 @@ def build_advisor_user_prompt(
     diagnostic_clusters: list[dict[str, Any]],
     code_snapshot: dict[str, Any],
     user_prompt_prefix: str = (
-        "You are reviewing a Rust C-compiler implementation "
-        "after an evaluation run."
+        "You are reviewing a Rust C-compiler implementation after an evaluation run."
     ),
 ) -> str:
     lines: list[str] = [
@@ -1508,10 +1458,12 @@ def build_advisor_user_prompt(
     else:
         lines.append("- none")
 
-    lines.extend([
-        "",
-        "Selected failing tests (with full source):",
-    ])
+    lines.extend(
+        [
+            "",
+            "Selected failing tests (with full source):",
+        ]
+    )
     for idx, test in enumerate(selected_failed_tests, start=1):
         lines.append("")
         lines.append(format_single_failed_test(idx, test))
@@ -1524,13 +1476,15 @@ def build_advisor_user_prompt(
                 continue
             path = string_or_none(file_info.get("path")) or "unknown"
             source = string_or_none(file_info.get("source")) or ""
-            lines.extend([
-                "",
-                f"file: {path}",
-                "```",
-                source,
-                "```",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"file: {path}",
+                    "```",
+                    source,
+                    "```",
+                ]
+            )
     return "\n".join(lines).strip()
 
 
@@ -1562,11 +1516,7 @@ async def build_advisor_assessment(
         commit=commit,
     )
     clusters = payload_for_feedback.get("diagnostic_clusters")
-    diagnostic_clusters = (
-        clusters
-        if isinstance(clusters, list)
-        else []
-    )
+    diagnostic_clusters = clusters if isinstance(clusters, list) else []
     snapshot_files = code_snapshot.get("files")
     snapshot_file_count = len(snapshot_files) if isinstance(snapshot_files, list) else 0
     snapshot_total_chars = code_snapshot.get("total_chars")
@@ -1586,9 +1536,7 @@ async def build_advisor_assessment(
         code_snapshot=code_snapshot,
     )
     if advisor_user_prompt_prefix is not None:
-        advisor_user_kwargs["user_prompt_prefix"] = (
-            advisor_user_prompt_prefix
-        )
+        advisor_user_kwargs["user_prompt_prefix"] = advisor_user_prompt_prefix
     user_prompt = build_advisor_user_prompt(**advisor_user_kwargs)
     system_prompt = advisor_system_prompt or (
         "You are a strict compiler engineering reviewer. "
@@ -1604,34 +1552,47 @@ async def build_advisor_assessment(
         timeout_seconds=ADVISOR_TIMEOUT_SECONDS,
         max_output_tokens=advisor_max_output_tokens,
     )
-    print(
-        "[advisor] assessment_ready "
-        f"commit={(commit or 'unknown')[:12]} "
-        f"chars={len(assessment)}"
-    )
+    print(f"[advisor] assessment_ready commit={(commit or 'unknown')[:12]} chars={len(assessment)}")
     return (
         "External assessment "
-        f"({advisor_model}, thinking={advisor_model_thinking_level}):\n"
-        + assessment.strip()
+        f"({advisor_model}, thinking={advisor_model_thinking_level}):\n" + assessment.strip()
     )
 
 
-def build_turn_regression_feedback_section(
+def build_turn_regression_summary(
     *,
     current_tests: list[EvalTestResult],
     previous_tests: list[EvalTestResult] | None,
     limit: int = 10,
-) -> str:
+) -> dict[str, Any]:
     if previous_tests is None:
-        return (
-            "regressions_vs_previous_turn_end: unavailable "
-            "(no previous turn-end snapshot)"
-        )
+        return {
+            "available": False,
+            "reason": "no_previous_turn_end_snapshot",
+            "regressions": 0,
+            "newly_fixed": 0,
+            "currently_failing": 0,
+            "passed_delta": 0,
+            "previous_passed": 0,
+            "current_passed": 0,
+            "baseline_tests": 0,
+            "current_tests": 0,
+            "regression_tests": [],
+        }
     if not current_tests:
-        return (
-            "regressions_vs_previous_turn_end: unavailable "
-            "(current turn-end test details missing)"
-        )
+        return {
+            "available": False,
+            "reason": "current_turn_end_test_details_missing",
+            "regressions": 0,
+            "newly_fixed": 0,
+            "currently_failing": 0,
+            "passed_delta": 0,
+            "previous_passed": 0,
+            "current_passed": 0,
+            "baseline_tests": 0,
+            "current_tests": 0,
+            "regression_tests": [],
+        }
 
     prev_by_key: dict[tuple[str, str], EvalTestResult] = {
         eval_result_key(test): test for test in previous_tests
@@ -1640,14 +1601,8 @@ def build_turn_regression_feedback_section(
         eval_result_key(test): test for test in current_tests
     }
 
-    prev_passed = sum(
-        1 for test in prev_by_key.values()
-        if eval_result_is_passed(test)
-    )
-    cur_passed = sum(
-        1 for test in cur_by_key.values()
-        if eval_result_is_passed(test)
-    )
+    prev_passed = sum(1 for test in prev_by_key.values() if eval_result_is_passed(test))
+    cur_passed = sum(1 for test in cur_by_key.values() if eval_result_is_passed(test))
 
     newly_broken = [
         cur_by_key[key]
@@ -1663,44 +1618,82 @@ def build_turn_regression_feedback_section(
         and not eval_result_is_passed(prev)
         and eval_result_is_passed(cur_by_key[key])
     ]
-    still_failing = sum(
-        1 for test in cur_by_key.values()
-        if not eval_result_is_passed(test)
-    )
+    still_failing = sum(1 for test in cur_by_key.values() if not eval_result_is_passed(test))
     total_delta = cur_passed - prev_passed
 
+    sorted_broken = sorted(
+        newly_broken,
+        key=lambda test: eval_result_sort_key(
+            test,
+            CURRENT_SUITE_FEEDBACK_PRIORITY,
+        ),
+    )
+    regression_tests: list[dict[str, Any]] = []
+    for test in sorted_broken[: max(1, limit)]:
+        regression_tests.append(
+            {
+                "ref": eval_result_ref(test),
+                "status": test.status,
+                "failure_type": string_or_none(test.failure_type),
+                "message": eval_result_message(test),
+            }
+        )
+
+    return {
+        "available": True,
+        "reason": None,
+        "baseline_tests": len(prev_by_key),
+        "current_tests": len(cur_by_key),
+        "previous_passed": prev_passed,
+        "current_passed": cur_passed,
+        "passed_delta": total_delta,
+        "regressions": len(newly_broken),
+        "newly_fixed": len(newly_fixed),
+        "currently_failing": still_failing,
+        "regression_tests": regression_tests,
+    }
+
+
+def build_turn_regression_feedback_section(
+    regression_summary: dict[str, Any],
+) -> str:
+    if not bool(regression_summary.get("available")):
+        reason = string_or_none(regression_summary.get("reason"))
+        if reason == "no_previous_turn_end_snapshot":
+            return "REGRESSIONS: unavailable (no previous turn-end snapshot)"
+        return "REGRESSIONS: unavailable (current turn-end test details missing)"
+
+    regressions = int(regression_summary.get("regressions", 0) or 0)
+    previous_passed = int(regression_summary.get("previous_passed", 0) or 0)
+    current_passed = int(regression_summary.get("current_passed", 0) or 0)
+    passed_delta = int(regression_summary.get("passed_delta", 0) or 0)
     lines = [
-        "regressions_vs_previous_turn_end:",
-        f"- baseline_tests: {len(prev_by_key)}",
-        f"- current_tests: {len(cur_by_key)}",
-        f"- passed_delta: {total_delta} ({prev_passed}->{cur_passed})",
-        f"- newly_broken: {len(newly_broken)}",
-        f"- newly_fixed: {len(newly_fixed)}",
-        f"- currently_failing: {still_failing}",
+        (
+            "REGRESSIONS: these tests were passing and now fail. "
+            "Fix regressions before adding new features."
+            if regressions > 0
+            else "REGRESSIONS: none"
+        ),
+        f"- baseline_tests: {int(regression_summary.get('baseline_tests', 0) or 0)}",
+        f"- current_tests: {int(regression_summary.get('current_tests', 0) or 0)}",
+        f"- passed_delta: {passed_delta} ({previous_passed}->{current_passed})",
+        f"- regressions: {regressions}",
+        f"- newly_fixed: {int(regression_summary.get('newly_fixed', 0) or 0)}",
+        f"- currently_failing: {int(regression_summary.get('currently_failing', 0) or 0)}",
     ]
 
-    if newly_broken:
-        lines.append("- newly_broken_top:")
-        sorted_broken = sorted(
-            newly_broken,
-            key=lambda test: eval_result_sort_key(
-                test,
-                CURRENT_SUITE_FEEDBACK_PRIORITY,
-            ),
-        )
-        for index, test in enumerate(
-            sorted_broken[: max(1, limit)],
-            start=1,
-        ):
-            failure_type = string_or_none(test.failure_type)
-            status_suffix = (
-                f"/{failure_type}" if failure_type else ""
-            )
-            lines.append(
-                f"  {index}. {eval_result_ref(test)}: "
-                f"passed -> {test.status}{status_suffix}"
-            )
-            message = eval_result_message(test)
+    regression_tests = regression_summary.get("regression_tests")
+    if isinstance(regression_tests, list) and regression_tests:
+        lines.append("- regression_tests:")
+        for index, item in enumerate(regression_tests, start=1):
+            if not isinstance(item, dict):
+                continue
+            ref = string_or_none(item.get("ref")) or "unknown_test"
+            status = string_or_none(item.get("status")) or "failed"
+            failure_type = string_or_none(item.get("failure_type"))
+            status_suffix = f"/{failure_type}" if failure_type else ""
+            lines.append(f"  {index}. {ref}: passed -> {status}{status_suffix}")
+            message = string_or_none(item.get("message"))
             if message is not None:
                 lines.append(
                     "     error: "
@@ -1710,6 +1703,108 @@ def build_turn_regression_feedback_section(
                     )
                 )
     return "\n".join(lines)
+
+
+def parse_progress_md_claim(content: str) -> dict[str, int] | None:
+    scan_text = "\n".join(content.splitlines()[:40])
+    for pattern in PROGRESS_MD_PATTERNS:
+        match = pattern.search(scan_text)
+        if match is None:
+            continue
+        return {
+            "claimed_passed": int(match.group("passed")),
+            "claimed_total": int(match.group("total")),
+        }
+    return None
+
+
+async def validate_progress_md(
+    sandbox: Sandbox,
+    *,
+    actual_passed: int,
+    actual_total: int,
+) -> dict[str, Any]:
+    command = (
+        "python3 - <<'PY'\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "path = Path('PROGRESS.md')\n"
+        "payload = {\n"
+        "    'exists': path.is_file(),\n"
+        "    'content': (\n"
+        "        path.read_text(encoding='utf-8', errors='replace')\n"
+        "        if path.is_file()\n"
+        "        else ''\n"
+        "    ),\n"
+        "}\n"
+        "print(json.dumps(payload, ensure_ascii=False))\n"
+        "PY\n"
+    )
+    output = await sandbox.run(
+        command,
+        timeout=10,
+        quiet=True,
+    )
+
+    result: dict[str, Any] = {
+        "exists": False,
+        "claim_found": False,
+        "claimed_passed": None,
+        "claimed_total": None,
+        "actual_passed": actual_passed,
+        "actual_total": actual_total,
+        "discrepancy": None,
+        "warning": None,
+    }
+    if output.exit_code != 0:
+        return result
+
+    try:
+        payload = json.loads(output.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return result
+    if not isinstance(payload, dict):
+        return result
+
+    exists = bool(payload.get("exists"))
+    result["exists"] = exists
+    if not exists:
+        return result
+
+    claim = parse_progress_md_claim(string_or_none(payload.get("content")) or "")
+    if claim is None:
+        return result
+
+    claimed_passed = int(claim["claimed_passed"])
+    claimed_total = int(claim["claimed_total"])
+    discrepancy = abs(claimed_passed - actual_passed)
+    result.update(
+        {
+            "claim_found": True,
+            "claimed_passed": claimed_passed,
+            "claimed_total": claimed_total,
+            "discrepancy": discrepancy,
+        }
+    )
+    if discrepancy > 2:
+        result["warning"] = (
+            "Your PROGRESS.md claims "
+            f"{claimed_passed}/{claimed_total} tests passing, "
+            f"but evaluation shows {actual_passed}/{actual_total}. "
+            "Update PROGRESS.md to reflect reality."
+        )
+    return result
+
+
+def build_progress_md_feedback_section(
+    validation: dict[str, Any] | None,
+) -> str | None:
+    if not isinstance(validation, dict):
+        return None
+    warning = string_or_none(validation.get("warning"))
+    if warning is None:
+        return None
+    return "PROGRESS.md check:\n- " + warning
 
 
 def format_turn_end_evaluation_feedback(
@@ -1722,9 +1817,7 @@ def format_turn_end_evaluation_feedback(
     """Render compact, actionable turn-end evaluation feedback."""
     payload = run_payload.get("payload")
     feedback_payload = (
-        enrich_evaluation_payload(copy.deepcopy(payload))
-        if isinstance(payload, dict)
-        else None
+        enrich_evaluation_payload(copy.deepcopy(payload)) if isinstance(payload, dict) else None
     )
     exit_code = run_payload.get("exit_code")
 
@@ -1746,9 +1839,7 @@ def format_turn_end_evaluation_feedback(
         duration_ms = int(payload.get("duration_ms", 0) or 0)
         current_tests = normalize_eval_tests(payload)
         lines.append(
-            "summary: "
-            f"passed={passed} failed={failed} total={total} "
-            f"duration_ms={duration_ms}"
+            f"summary: passed={passed} failed={failed} total={total} duration_ms={duration_ms}"
         )
         suite_results = payload.get("suite_results")
         if isinstance(suite_results, dict) and suite_results:
@@ -1759,21 +1850,21 @@ def format_turn_end_evaluation_feedback(
                     continue
                 suite_passed = int(suite_payload.get("passed", 0) or 0)
                 suite_total = int(suite_payload.get("total", 0) or 0)
-                lines.append(
-                    f"- {suite_name}: {suite_passed}/{suite_total}"
-                )
-        lines.append(
-            build_turn_regression_feedback_section(
+                lines.append(f"- {suite_name}: {suite_passed}/{suite_total}")
+        regression_summary = payload.get("regression_summary")
+        if not isinstance(regression_summary, dict):
+            regression_summary = build_turn_regression_summary(
                 current_tests=current_tests,
                 previous_tests=previous_turn_end_tests,
             )
+        lines.append(build_turn_regression_feedback_section(regression_summary))
+        progress_md_section = build_progress_md_feedback_section(
+            payload.get("progress_md_validation"),
         )
+        if progress_md_section is not None:
+            lines.append(progress_md_section)
 
-        cluster_payload = (
-            feedback_payload
-            if isinstance(feedback_payload, dict)
-            else payload
-        )
+        cluster_payload = feedback_payload if isinstance(feedback_payload, dict) else payload
         lines.append(build_cluster_summary_section(cluster_payload))
 
         failed_section, selected_failed_tests = build_failed_tests_feedback_section(
@@ -1781,39 +1872,38 @@ def format_turn_end_evaluation_feedback(
             limit=failed_tests_limit,
         )
         lines.append(failed_section)
-        lines.append(
-            "failed_tests_selected: "
-            f"{len(selected_failed_tests)}"
-        )
+        lines.append(f"failed_tests_selected: {len(selected_failed_tests)}")
 
         payload_error = string_or_none(payload.get("error"))
         if payload_error is not None:
             lines.append(f"error: {payload_error}")
 
         if advisor_assessment:
-            lines.extend([
-                "",
-                advisor_assessment.strip(),
-            ])
+            lines.extend(
+                [
+                    "",
+                    advisor_assessment.strip(),
+                ]
+            )
     else:
         lines.append("payload: null")
         stdout = string_or_none(run_payload.get("stdout"))
         stderr = string_or_none(run_payload.get("stderr"))
         if stdout is not None:
             lines.append(
-                "stdout: "
-                + (truncate_optional(stdout, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+                "stdout: " + (truncate_optional(stdout, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
             )
         if stderr is not None:
             lines.append(
-                "stderr: "
-                + (truncate_optional(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
+                "stderr: " + (truncate_optional(stderr, MAX_INLINE_TEST_MESSAGE_CHARS) or "")
             )
         if advisor_assessment:
-            lines.extend([
-                "",
-                advisor_assessment.strip(),
-            ])
+            lines.extend(
+                [
+                    "",
+                    advisor_assessment.strip(),
+                ]
+            )
 
     return "\n".join(lines).strip()
 
@@ -1841,20 +1931,13 @@ def build_turn_end_eval_event(
     run_payload: dict[str, Any] | None,
     error: str | None = None,
 ) -> EvalEvent:
-    payload = (
-        run_payload.get("payload")
-        if isinstance(run_payload, dict)
-        else None
-    )
-    exit_code = (
-        run_payload.get("exit_code")
-        if isinstance(run_payload, dict)
-        else None
-    )
+    payload = run_payload.get("payload") if isinstance(run_payload, dict) else None
+    exit_code = run_payload.get("exit_code") if isinstance(run_payload, dict) else None
     status = "failed"
     passed = 0
     failed = 0
     total = 0
+    regressions = 0
     event_payload: dict[str, Any] = {}
     suite_results: dict[str, Any] = {}
     tests: list[EvalTestResult] = []
@@ -1867,21 +1950,17 @@ def build_turn_end_eval_event(
         suite_payload = payload.get("suite_results")
         if isinstance(suite_payload, dict):
             suite_results = suite_payload
+        regression_summary = payload.get("regression_summary")
+        if isinstance(regression_summary, dict):
+            regressions = int(regression_summary.get("regressions", 0) or 0)
         tests = normalize_eval_tests(payload)
         payload_error = payload.get("error")
-        if (
-            event_error is None
-            and isinstance(payload_error, str)
-            and payload_error.strip()
-        ):
+        if event_error is None and isinstance(payload_error, str) and payload_error.strip():
             event_error = payload_error.strip()
         status = "completed"
     if isinstance(exit_code, int) and exit_code != 0:
         if event_error is None:
-            event_error = (
-                "Turn-end evaluation command failed "
-                f"with exit code {exit_code}"
-            )
+            event_error = f"Turn-end evaluation command failed with exit code {exit_code}"
         status = "failed"
     if event_error is not None:
         status = "failed"
@@ -1899,6 +1978,7 @@ def build_turn_end_eval_event(
         passed=passed,
         failed=failed,
         total=total,
+        regressions=regressions,
         payload=event_payload,
         suite_results=suite_results,
         tests=tests,
@@ -1943,15 +2023,9 @@ def start_logs_runtime(
                 return
             new_records = total_count - last_logs_flush_count
             elapsed = time.monotonic() - last_logs_flush_mono
-            if (
-                not force
-                and (
-                    new_records <= 0
-                    or (
-                        new_records < LOGS_FLUSH_BATCH_SIZE
-                        and elapsed < LOGS_FLUSH_INTERVAL_SECONDS
-                    )
-                )
+            if not force and (
+                new_records <= 0
+                or (new_records < LOGS_FLUSH_BATCH_SIZE and elapsed < LOGS_FLUSH_INTERVAL_SECONDS)
             ):
                 return
             snapshot = list(records)
@@ -1971,11 +2045,7 @@ def start_logs_runtime(
         normalized.setdefault("source", "orchestrator")
         records.append(normalized)
         level_value = normalized.get("level")
-        level = (
-            level_value.lower()
-            if isinstance(level_value, str)
-            else ""
-        )
+        level = level_value.lower() if isinstance(level_value, str) else ""
         new_records = len(records) - last_logs_flush_count
         if level in {"error", "warning"} or new_records >= LOGS_FLUSH_BATCH_SIZE:
             wakeup.set()
@@ -1996,17 +2066,11 @@ def start_logs_runtime(
             try:
                 await flush(force=False)
             except Exception as log_flush_error:
-                print(
-                    "[logs] periodic flush failed: "
-                    f"{log_flush_error}"
-                )
+                print(f"[logs] periodic flush failed: {log_flush_error}")
         try:
             await flush(force=True)
         except Exception as log_flush_error:
-            print(
-                "[logs] final periodic flush failed: "
-                f"{log_flush_error}"
-            )
+            print(f"[logs] final periodic flush failed: {log_flush_error}")
 
     task = asyncio.create_task(periodic_loop())
     return LogsRuntime(
@@ -2135,20 +2199,14 @@ async def prepare_trajectory_context(
     effective_resolved_env_params = resolved_env_params or ResolvedParams()
     resolved_docker_plan = effective_resolved_env_params.docker
     dockerfile_rel_path = (
-        resolved_docker_plan.dockerfile_path
-        if resolved_docker_plan is not None
-        else "Dockerfile"
+        resolved_docker_plan.dockerfile_path if resolved_docker_plan is not None else "Dockerfile"
     )
     docker_build_args = (
-        dict(resolved_docker_plan.build_args)
-        if resolved_docker_plan is not None
-        else {}
+        dict(resolved_docker_plan.build_args) if resolved_docker_plan is not None else {}
     )
 
     sandbox_min_cpu = effective_resolved_env_params.sandbox_requirements.min_cpu
-    sandbox_min_memory_mb = (
-        effective_resolved_env_params.sandbox_requirements.min_memory_mb
-    )
+    sandbox_min_memory_mb = effective_resolved_env_params.sandbox_requirements.min_memory_mb
 
     run_metadata: dict[str, Any] = {
         "project": project_name,
@@ -2169,11 +2227,7 @@ async def prepare_trajectory_context(
     }
     env_files = load_environment_files(env_path)
 
-    existing_trace = (
-        load_trace_snapshot(trajectory_id, project=project_name)
-        if resume
-        else None
-    )
+    existing_trace = load_trace_snapshot(trajectory_id, project=project_name) if resume else None
     if existing_trace is not None and existing_trace.agent != agent_name:
         print(
             f"[resume] existing trajectory agent={existing_trace.agent} "
@@ -2247,27 +2301,18 @@ async def discover_required_test_paths(
             schema = json.loads(schema_result.stdout)
             required_test_paths = extract_leaf_paths(schema)
             schema_available = True
-            print(
-                f"[schema] discovered {len(required_test_paths)} test paths"
-            )
+            print(f"[schema] discovered {len(required_test_paths)} test paths")
         except (json.JSONDecodeError, KeyError) as parse_error:
             print(f"[schema] parse error: {parse_error}")
     else:
-        print(
-            "[schema] /schema not available; "
-            "cannot verify test inventory"
-        )
+        print("[schema] /schema not available; cannot verify test inventory")
 
     if not schema_available:
         raise RuntimeError(
-            "Environment schema is unavailable. "
-            "Aborting because test inventory cannot be verified."
+            "Environment schema is unavailable. Aborting because test inventory cannot be verified."
         )
     if not required_test_paths:
-        raise RuntimeError(
-            "Environment schema reported zero tests. "
-            "Aborting run."
-        )
+        raise RuntimeError("Environment schema reported zero tests. Aborting run.")
 
     if selected_test_paths and required_test_paths:
         discovered = set(required_test_paths)
@@ -2275,10 +2320,7 @@ async def discover_required_test_paths(
         for path in selected_test_paths:
             if path in discovered:
                 continue
-            has_child = any(
-                candidate.startswith(path + "/")
-                for candidate in required_test_paths
-            )
+            has_child = any(candidate.startswith(path + "/") for candidate in required_test_paths)
             if not has_child:
                 invalid_paths.append(path)
         if invalid_paths:
@@ -2302,17 +2344,10 @@ def resolve_turn_start_stop_reason(
     elapsed_seconds: float,
     timeout_seconds: int,
 ) -> RunStopReason | None:
-    if (
-        isinstance(max_parts, int)
-        and max_parts > 0
-        and part_count >= max_parts
-    ):
+    if isinstance(max_parts, int) and max_parts > 0 and part_count >= max_parts:
         return "part_limit"
     if max_turns is not None and turn_count >= max_turns:
-        print(
-            "[progress] reached turn limit "
-            f"({turn_count}/{max_turns})"
-        )
+        print(f"[progress] reached turn limit ({turn_count}/{max_turns})")
         return "part_limit"
     if elapsed_seconds > timeout_seconds:
         return "timeout"
@@ -2354,26 +2389,23 @@ async def run_turn_end_evaluation_cycle(
             turn_end_eval_payload_body = payload
             turn_end_passed = int(payload.get("passed", 0) or 0)
             turn_end_total = int(payload.get("total", 0) or 0)
+            payload["regression_summary"] = build_turn_regression_summary(
+                current_tests=normalize_eval_tests(payload),
+                previous_tests=previous_turn_end_tests,
+            )
+            payload["progress_md_validation"] = await validate_progress_md(
+                sandbox,
+                actual_passed=turn_end_passed,
+                actual_total=turn_end_total,
+            )
             turn_end_error = payload.get("error")
-            turn_end_has_error = bool(
-                isinstance(turn_end_error, str)
-                and turn_end_error.strip()
-            )
-            turn_end_no_tests_detected = (
-                turn_end_total == 0
-                and turn_end_passed == 0
-            )
+            turn_end_has_error = bool(isinstance(turn_end_error, str) and turn_end_error.strip())
+            turn_end_no_tests_detected = turn_end_total == 0 and turn_end_passed == 0
             if turn_end_no_tests_detected:
                 if not turn_end_has_error:
                     turn_end_has_error = True
-                    payload["error"] = (
-                        "Turn-end evaluation returned zero tests; "
-                        "aborting run."
-                    )
-                print(
-                    "[eval] turn_end status=no_tests "
-                    f"status_error={turn_end_has_error}"
-                )
+                    payload["error"] = "Turn-end evaluation returned zero tests; aborting run."
+                print(f"[eval] turn_end status=no_tests status_error={turn_end_has_error}")
             else:
                 print(
                     "[eval] turn_end "
@@ -2412,9 +2444,7 @@ async def run_turn_end_evaluation_cycle(
                     commit=git_commit,
                     payload=turn_end_eval_payload_body,
                     advisor_model=normalized_advisor_model,
-                    advisor_model_thinking_level=(
-                        normalized_advisor_thinking_level
-                    ),
+                    advisor_model_thinking_level=(normalized_advisor_thinking_level),
                     advisor_max_output_tokens=advisor_max_output_tokens,
                     failed_tests_limit=failed_tests_feedback_limit,
                     advisor_system_prompt=advisor_system_prompt_override,
@@ -2427,20 +2457,14 @@ async def run_turn_end_evaluation_cycle(
                 )
             except Exception as advisor_error:
                 error_message = str(advisor_error).strip() or repr(advisor_error)
-                advisor_assessment = (
-                    "External assessment unavailable: "
-                    + error_message
-                )
+                advisor_assessment = "External assessment unavailable: " + error_message
                 print(
                     "[advisor] failed: "
                     f"type={type(advisor_error).__name__} "
                     f"elapsed_ms={int((time.monotonic() - advisor_started_at) * 1000)} "
                     f"error={error_message}"
                 )
-                print(
-                    "[advisor] failed_traceback:\n"
-                    + traceback.format_exc().strip()
-                )
+                print("[advisor] failed_traceback:\n" + traceback.format_exc().strip())
         elif normalized_advisor_model is not None:
             if not isinstance(turn_end_eval_payload_body, dict):
                 print("[advisor] skipped reason=turn_end_payload_missing")
@@ -2460,15 +2484,9 @@ async def run_turn_end_evaluation_cycle(
             previous_turn_end_tests=previous_turn_end_tests,
         )
     except Exception as turn_end_eval_error:
-        turn_end_feedback = (
-            "Turn-end full evaluation failed:\n"
-            + str(turn_end_eval_error)
-        )
+        turn_end_feedback = "Turn-end full evaluation failed:\n" + str(turn_end_eval_error)
         turn_end_has_error = True
-        print(
-            "[eval] turn_end failed: "
-            f"{turn_end_eval_error}"
-        )
+        print(f"[eval] turn_end failed: {turn_end_eval_error}")
 
     return TurnEndEvaluationOutcome(
         feedback=turn_end_feedback,
@@ -2493,10 +2511,7 @@ def append_turn_end_event(
 ) -> tuple[EvalEvent | None, list[EvalTestResult] | None]:
     turn_eval_part = (
         turn_record.part_end
-        if (
-            isinstance(turn_record.part_end, int)
-            and turn_record.part_end > 0
-        )
+        if (isinstance(turn_record.part_end, int) and turn_record.part_end > 0)
         else part_count
     )
     if turn_eval_part <= 0:
@@ -2507,11 +2522,7 @@ def append_turn_end_event(
         part=turn_eval_part,
         commit=git_commit,
         run_payload=eval_payload,
-        error=(
-            eval_feedback
-            if eval_payload is None
-            else None
-        ),
+        error=(eval_feedback if eval_payload is None else None),
     )
     append_eval_event_delta(agent_trace, turn_end_event)
     updated_previous_tests = previous_turn_end_tests
@@ -2551,11 +2562,7 @@ def print_turn_end_summary(
         current=turn_count,
         limit=max_turns,
     )
-    commit_label = (
-        git_commit[:10]
-        if isinstance(git_commit, str) and git_commit
-        else "none"
-    )
+    commit_label = git_commit[:10] if isinstance(git_commit, str) and git_commit else "none"
     print(
         f"[turn] end "
         f"{turn_counter_label} "
@@ -2661,10 +2668,7 @@ async def run_turn_loop(
                 timeout=10,
             )
         except Exception as kill_error:
-            print(
-                "[eval] winner interrupt failed: "
-                f"{kill_error}"
-            )
+            print(f"[eval] winner interrupt failed: {kill_error}")
 
     evaluator = EvaluationScheduler(
         sandbox=sandbox,
@@ -2731,10 +2735,7 @@ async def run_turn_loop(
         end_reason = "solved"
         return True
 
-    prompt_text = (
-        prompt if part_count == 0
-        else build_followup_prompt(tracker)
-    )
+    prompt_text = prompt if part_count == 0 else build_followup_prompt(tracker)
     next_turn_feedback_eval_id: str | None = None
     consecutive_turn_failures = 0
     previous_best_passed = 0
@@ -2762,10 +2763,7 @@ async def run_turn_loop(
 
         remaining_run_seconds = timeout_seconds - elapsed
         remaining_parts_budget = (
-            max(1, max_parts - part_count)
-            if isinstance(max_parts, int)
-            and max_parts > 0
-            else 0
+            max(1, max_parts - part_count) if isinstance(max_parts, int) and max_parts > 0 else 0
         )
         remaining_parts_for_timeout = (
             remaining_parts_budget
@@ -2784,9 +2782,7 @@ async def run_turn_loop(
             limit=max_parts,
         )
         elapsed_label = format_compact_duration(elapsed)
-        remaining_label = format_compact_duration(
-            max(0, remaining_run_seconds)
-        )
+        remaining_label = format_compact_duration(max(0, remaining_run_seconds))
         builtins.print(
             "\n"
             f"[turn] start "
@@ -2863,10 +2859,7 @@ async def run_turn_loop(
             stop_reason = normalize_run_stop_reason(
                 fatal_error.stop_reason,
             )
-            print(
-                "[run] fatal agent stop: "
-                f"{fatal_error} reason={stop_reason}"
-            )
+            print(f"[run] fatal agent stop: {fatal_error} reason={stop_reason}")
             end_reason = stop_reason
             break
 
@@ -2912,9 +2905,7 @@ async def run_turn_loop(
                         tracker,
                         elapsed_seconds=time.monotonic() - start_time,
                         timeout_seconds=timeout_seconds,
-                        consecutive_no_progress_turns=(
-                            consecutive_no_progress_turns
-                        ),
+                        consecutive_no_progress_turns=(consecutive_no_progress_turns),
                     )
                     continue
             end_reason = "agent_error"
@@ -2932,11 +2923,7 @@ async def run_turn_loop(
         info = response.get("info", {})
         parts = response.get("parts", [])
         response_message_id = info.get("id")
-        print(
-            f"[progress] response "
-            f"id={response_message_id} "
-            f"parts={len(parts)}"
-        )
+        print(f"[progress] response id={response_message_id} parts={len(parts)}")
 
         session_ids = turn_outcome.session_ids
         session_objects = turn_outcome.session_objects
@@ -2960,16 +2947,8 @@ async def run_turn_loop(
 
         tracker.update(new_envoi_calls)
 
-        stream_meta = (
-            response.get("_stream", {})
-            if isinstance(response, dict)
-            else {}
-        )
-        stream_meta_obj = (
-            stream_meta
-            if isinstance(stream_meta, dict)
-            else {}
-        )
+        stream_meta = response.get("_stream", {}) if isinstance(response, dict) else {}
+        stream_meta_obj = stream_meta if isinstance(stream_meta, dict) else {}
         streamed_parts = int(
             stream_meta_obj.get(
                 "meaningful_parts_seen",
@@ -2984,10 +2963,7 @@ async def run_turn_loop(
             record.session_id = session_id
         if turn_record.parts:
             last_part_record = turn_record.parts[-1]
-            existing_keys = {
-                tracker.call_key(call)
-                for call in last_part_record.envoi_calls
-            }
+            existing_keys = {tracker.call_key(call) for call in last_part_record.envoi_calls}
             for call in new_envoi_calls:
                 key = tracker.call_key(call)
                 if key not in existing_keys:
@@ -3074,9 +3050,7 @@ async def run_turn_loop(
         await flush_logs(force=True)
 
         if turn_end_result.no_tests_detected:
-            print(
-                "[run] stopping: evaluation returned zero tests"
-            )
+            print("[run] stopping: evaluation returned zero tests")
             end_reason = "envoi_error"
             break
         if (
@@ -3088,19 +3062,11 @@ async def run_turn_loop(
         ):
             end_reason = "solved"
             break
-        if (
-            isinstance(max_parts, int)
-            and max_parts > 0
-            and part_count >= max_parts
-        ):
+        if isinstance(max_parts, int) and max_parts > 0 and part_count >= max_parts:
             end_reason = "part_limit"
             break
 
-        next_turn_feedback_eval_id = (
-            turn_end_event.eval_id
-            if turn_end_event is not None
-            else None
-        )
+        next_turn_feedback_eval_id = turn_end_event.eval_id if turn_end_event is not None else None
         prompt_text = build_followup_prompt(
             tracker,
             evaluation_feedback=turn_end_result.feedback,
@@ -3177,9 +3143,7 @@ async def execute_trajectory_main(
     sandbox = launch_result.sandbox
     resolution = launch_result.resolution
     for warning in resolution.warnings:
-        print(
-            f"[sandbox][{resolution.provider}] {warning}"
-        )
+        print(f"[sandbox][{resolution.provider}] {warning}")
     run_metadata["sandbox_resolution"] = {
         "provider": resolution.provider,
         "capabilities": resolution.capabilities.model_dump(mode="json"),
@@ -3187,14 +3151,10 @@ async def execute_trajectory_main(
         "warnings": list(resolution.warnings),
         "applied_cpu": resolution.applied_config.cpu,
         "applied_memory_mb": resolution.applied_config.memory_mb,
-        "provider_supports_runtime_resources": (
-            resolution.capabilities.supports_runtime_resources
-        ),
+        "provider_supports_runtime_resources": (resolution.capabilities.supports_runtime_resources),
         "applied": {
             "timeout": resolution.applied_config.timeout,
-            "environment_dockerfile": (
-                resolution.applied_config.environment_dockerfile
-            ),
+            "environment_dockerfile": (resolution.applied_config.environment_dockerfile),
             "environment_docker_build_args": (
                 dict(resolution.applied_config.environment_docker_build_args)
             ),
@@ -3226,16 +3186,8 @@ async def execute_trajectory_main(
     await agent_backend.setup(sandbox, setup_context)
 
     latest_git_commit: str | None = None
-    resume_commit = (
-        get_trace_latest_commit(existing_trace)
-        if existing_trace
-        else None
-    )
-    if (
-        existing_trace is not None
-        and isinstance(resume_commit, str)
-        and resume_commit
-    ):
+    resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
+    if existing_trace is not None and isinstance(resume_commit, str) and resume_commit:
         await restore_workspace_from_bundle(
             sandbox=sandbox,
             trajectory_id=trajectory_id,
@@ -3265,10 +3217,7 @@ async def execute_trajectory_main(
         trace_latest_commit = get_trace_latest_commit(agent_trace)
         if isinstance(trace_latest_commit, str) and trace_latest_commit:
             latest_git_commit = trace_latest_commit
-        print(
-            f"[resume] continuing from part={initial_part_count} "
-            f"turn={initial_turn_count}"
-        )
+        print(f"[resume] continuing from part={initial_part_count} turn={initial_turn_count}")
     else:
         initial_part_count = 0
         initial_turn_count = 0
@@ -3368,10 +3317,7 @@ async def handle_trajectory_exception(
 
     error_text = str(error).lower()
     end_reason: RunStopReason
-    if (
-        "schema" in error_text
-        and ("test" in error_text or "zero tests" in error_text)
-    ):
+    if "schema" in error_text and ("test" in error_text or "zero tests" in error_text):
         end_reason = "envoi_error"
     elif "zero tests" in error_text:
         end_reason = "envoi_error"
@@ -3379,11 +3325,7 @@ async def handle_trajectory_exception(
         end_reason = "agent_error"
 
     try:
-        if (
-            agent_trace is not None
-            and agent_backend is not None
-            and session_id
-        ):
+        if agent_trace is not None and agent_backend is not None and session_id:
             crash_messages = await agent_backend.collect_crash_messages(
                 session_id,
             )
@@ -3398,11 +3340,7 @@ async def handle_trajectory_exception(
                     timestamp=datetime.now(UTC).isoformat(),
                     agent_model=resolved_model,
                     prompt=prompt_text or "",
-                    git_commit=(
-                        await get_git_commit(sandbox)
-                        if sandbox
-                        else None
-                    ),
+                    git_commit=(await get_git_commit(sandbox) if sandbox else None),
                     parts=[],
                 )
                 agent_trace.turns.append(crash_record)
@@ -3413,10 +3351,7 @@ async def handle_trajectory_exception(
                     task_params=task_params_loaded,
                     project=project,
                 )
-                print(
-                    f"[error] saved {len(crash_messages)} "
-                    "new messages before crash"
-                )
+                print(f"[error] saved {len(crash_messages)} new messages before crash")
     except Exception:
         print("[error] could not save crash messages")
     return end_reason
@@ -3482,10 +3417,7 @@ async def finalize_trajectory_run(
             )
             try:
                 await evaluator.cancel_pending(
-                    reason=(
-                        "Cancelled during shutdown: "
-                        "evaluation drain timed out"
-                    ),
+                    reason=("Cancelled during shutdown: evaluation drain timed out"),
                 )
             except Exception:
                 pass
@@ -3493,10 +3425,7 @@ async def finalize_trajectory_run(
             print(f"[eval] shutdown drain failed: {drain_error}")
             try:
                 await evaluator.cancel_pending(
-                    reason=(
-                        "Cancelled during shutdown: "
-                        "evaluation drain failed"
-                    ),
+                    reason=("Cancelled during shutdown: evaluation drain failed"),
                 )
             except Exception:
                 pass
@@ -3540,10 +3469,7 @@ async def finalize_trajectory_run(
                     )
                     end_reason = "solved"
         except Exception as winner_finalize_error:
-            print(
-                "[eval] final winner projection failed: "
-                f"{winner_finalize_error}"
-            )
+            print(f"[eval] final winner projection failed: {winner_finalize_error}")
 
         try:
             sandbox_logs = await collect_sandbox_structured_logs(sandbox)
@@ -3571,10 +3497,7 @@ async def finalize_trajectory_run(
                 project=project,
             )
         except Exception as end_err:
-            print(
-                "[error] failed to finalize session: "
-                f"{end_err}"
-            )
+            print(f"[error] failed to finalize session: {end_err}")
 
     if sandbox is not None:
         try:
@@ -3654,25 +3577,13 @@ async def run_trajectory(
         trajectory_id=trajectory_id,
         source="orchestrator",
     )
-    part_limit_label = (
-        str(prepared.max_parts)
-        if prepared.max_parts is not None
-        else "none"
-    )
-    turn_limit_label = (
-        str(prepared.max_turns)
-        if prepared.max_turns is not None
-        else "none"
-    )
+    part_limit_label = str(prepared.max_parts) if prepared.max_parts is not None else "none"
+    turn_limit_label = str(prepared.max_turns) if prepared.max_turns is not None else "none"
     test_selector = (
-        ",".join(prepared.selected_test_paths)
-        if prepared.selected_test_paths
-        else "all"
+        ",".join(prepared.selected_test_paths) if prepared.selected_test_paths else "all"
     )
     test_timeout_label = (
-        f"{test_timeout_seconds}s"
-        if isinstance(test_timeout_seconds, int)
-        else "default"
+        f"{test_timeout_seconds}s" if isinstance(test_timeout_seconds, int) else "default"
     )
     print(
         "[run] start "
@@ -3789,10 +3700,7 @@ async def run_trajectory(
         stop_reason = normalize_run_stop_reason(
             fatal_error.stop_reason,
         )
-        print(
-            "[run] fatal agent stop: "
-            f"{fatal_error} reason={stop_reason}"
-        )
+        print(f"[run] fatal agent stop: {fatal_error} reason={stop_reason}")
         end_reason = stop_reason
 
     except Exception as exc:
@@ -3893,7 +3801,8 @@ if __name__ == "__main__":
         default=MESSAGE_TIMEOUT_SECONDS,
     )
     parser.add_argument(
-        "--codex-auth-file", default="~/.codex/auth.json",
+        "--codex-auth-file",
+        default="~/.codex/auth.json",
     )
     parser.add_argument("--task-dir", required=True)
     parser.add_argument("--environment-dir", required=True)
@@ -3909,11 +3818,7 @@ if __name__ == "__main__":
     codex_auth_b64: str | None = None
     agent_name_raw = (args.agent or DEFAULT_AGENT).strip().lower()
     cls = AGENT_BACKENDS.get(agent_name_raw)
-    if (
-        cls is not None
-        and hasattr(cls, "load_local_auth_b64")
-        and args.codex_auth_file
-    ):
+    if cls is not None and hasattr(cls, "load_local_auth_b64") and args.codex_auth_file:
         codex_auth_b64 = cls.load_local_auth_b64(
             args.codex_auth_file.strip(),
         )

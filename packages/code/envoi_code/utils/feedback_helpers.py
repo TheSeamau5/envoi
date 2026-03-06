@@ -99,12 +99,20 @@ def format_single_failed_test(
         message = string_or_none(test.get("stderr_tail"))
     if message is None:
         message = string_or_none(test.get("stdout_tail"))
+    signal_name = string_or_none(test.get("signal_name"))
+    stdout_diff_summary = string_or_none(
+        test.get("stdout_diff_summary"),
+    )
     source = string_or_none(test.get("source"))
 
     lines = [
         f"{index}. {suite}/{test_id}",
         f"status: {label}",
     ]
+    if signal_name is not None:
+        lines.append(f"signal: {signal_name}")
+    if stdout_diff_summary is not None:
+        lines.append(f"stdout_diff: {stdout_diff_summary}")
     if message is not None:
         lines.append("error:")
         lines.append(message)
@@ -112,19 +120,23 @@ def format_single_failed_test(
         test.get("rendered_diagnostic"),
     )
     if rendered_diagnostic is not None:
-        lines.extend([
-            "diagnostic:",
-            "```text",
-            rendered_diagnostic,
-            "```",
-        ])
+        lines.extend(
+            [
+                "diagnostic:",
+                "```text",
+                rendered_diagnostic,
+                "```",
+            ]
+        )
     if source is not None:
-        lines.extend([
-            "source:",
-            "```c",
-            source,
-            "```",
-        ])
+        lines.extend(
+            [
+                "source:",
+                "```c",
+                source,
+                "```",
+            ]
+        )
     else:
         lines.append("source: (missing)")
     return "\n".join(lines)
