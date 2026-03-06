@@ -93,6 +93,7 @@ function sanitizeColorMap(
 
 type CompareContextValue = {
   allTraces: Trajectory[];
+  isLoadingAll: boolean;
   selectedTraces: Trajectory[];
   colorIndices: number[];
   selectedSuites: Suite[];
@@ -164,7 +165,7 @@ export function CompareProvider({
       const data: unknown = await response.json();
       return normalizeTrajectories(data);
     },
-    initialData: serverAllTraces,
+    initialData: serverAllTraces.length > 0 ? serverAllTraces : undefined,
     staleTime: 0,
     refetchOnMount: true,
   });
@@ -172,6 +173,7 @@ export function CompareProvider({
     () => normalizeTrajectories(allTracesQuery.data ?? serverAllTraces),
     [allTracesQuery.data, serverAllTraces],
   );
+  const isLoadingAll = allTraces.length === 0 && allTracesQuery.isPending;
   const validTraceIds = useMemo(
     () => new Set(allTraces.map((trace) => trace.id)),
     [allTraces],
@@ -407,6 +409,7 @@ export function CompareProvider({
   const value = useMemo<CompareContextValue>(
     () => ({
       allTraces,
+      isLoadingAll,
       selectedTraces,
       colorIndices,
       selectedSuites,
@@ -431,6 +434,7 @@ export function CompareProvider({
     }),
     [
       allTraces,
+      isLoadingAll,
       selectedTraces,
       colorIndices,
       selectedSuites,

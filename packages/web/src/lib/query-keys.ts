@@ -24,7 +24,19 @@ export const queryKeys = {
     byIds: (project: string, ids: string[]) =>
       ["compare", project, ...[...ids].sort()] as const,
   },
+  environments: {
+    all: (project: string) => ["environments", project] as const,
+  },
+  difficulty: {
+    all: (project: string) => ["difficulty", project] as const,
+  },
+  portfolio: {
+    all: (project: string) => ["portfolio", project] as const,
+  },
   revision: {
     status: (project: string) => ["revision", project] as const,
+  },
+  schema: {
+    all: (project: string) => ["schema", project] as const,
   },
 } as const;

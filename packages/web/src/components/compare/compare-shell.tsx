@@ -39,6 +39,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ShellRow } from "@/components/page-shell";
 import { useCompare } from "./compare-context";
 
 type CompareShellProps = {
@@ -68,6 +69,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
   ] as const;
   const {
     allTraces,
+    isLoadingAll,
     selectedTraces,
     selectedIds,
     sortBy,
@@ -151,7 +153,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
           onKeyDown={handleSidebarKeyDown}
         >
           {/* Sidebar header */}
-          <div className="flex items-center justify-between border-b border-envoi-border bg-envoi-surface px-3.5 py-2">
+          <ShellRow className="justify-between">
             <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
               Trajectories ({flatSortedTraces.length})
             </span>
@@ -163,10 +165,10 @@ export function CompareShell({ children, project }: CompareShellProps) {
                 Deselect all
               </button>
             )}
-          </div>
+          </ShellRow>
 
           {/* Filter + sort row */}
-          <div className="flex items-center gap-2 px-3.5 py-1.5">
+          <ShellRow tone="plain" className="gap-2">
             {/* Model filter */}
             <Select value={modelFilter} onValueChange={setModelFilter}>
               <SelectTrigger
@@ -233,46 +235,63 @@ export function CompareShell({ children, project }: CompareShellProps) {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
+          </ShellRow>
 
           {/* Trace list grouped by environment */}
           <div className="flex-1 overflow-y-auto">
-            {[...sidebarGroups.entries()].map(([environment, traces]) => (
-              <div key={environment}>
-                {/* Environment section header */}
-                <div className="border-b border-envoi-border bg-envoi-bg px-3.5 py-1.5">
-                  <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
-                    {environment}
-                  </span>
+            {isLoadingAll && allTraces.length === 0 ? (
+              Array.from({ length: 8 }).map((_, index) => (
+                <div
+                  key={index}
+                  className="flex items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5"
+                >
+                  <div className="h-4 w-4 animate-pulse rounded-[3px] bg-envoi-surface" />
+                  <div className="min-w-0 flex-1">
+                    <div className="h-3 w-32 animate-pulse rounded bg-envoi-surface" />
+                    <div className="mt-1 h-3 w-24 animate-pulse rounded bg-envoi-surface" />
+                  </div>
                 </div>
+              ))
+            ) : (
+              [...sidebarGroups.entries()].map(([environment, traces]) => (
+                <div key={environment}>
+                  {/* Environment section header */}
+                  <div className="border-b border-envoi-border bg-envoi-bg px-3.5 py-1.5">
+                    <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
+                      {environment}
+                    </span>
+                  </div>
 
-                {traces.map((trace) => {
-                  const currentFlatIndex = flatIndex;
-                  flatIndex++;
-                  return (
-                    <TraceRow
-                      key={trace.id}
-                      trace={trace}
-                      project={project}
-                      flatIndex={currentFlatIndex}
-                      focusedIndex={focusedIndex}
-                      focusedRowRef={focusedRowRef}
-                      getColorIndex={getColorIndex}
-                      toggleTrace={toggleTrace}
-                      setFocusedIndex={setFocusedIndex}
-                      computeTraceTotal={computeTraceTotal}
-                      showYear={showYear}
-                    />
-                  );
-                })}
-              </div>
-            ))}
+                  {traces.map((trace) => {
+                    const currentFlatIndex = flatIndex;
+                    flatIndex++;
+                    return (
+                      <TraceRow
+                        key={trace.id}
+                        trace={trace}
+                        project={project}
+                        flatIndex={currentFlatIndex}
+                        focusedIndex={focusedIndex}
+                        focusedRowRef={focusedRowRef}
+                        getColorIndex={getColorIndex}
+                        toggleTrace={toggleTrace}
+                        setFocusedIndex={setFocusedIndex}
+                        computeTraceTotal={computeTraceTotal}
+                        showYear={showYear}
+                      />
+                    );
+                  })}
+                </div>
+              ))
+            )}
           </div>
         </div>
 
         {/* Main content area */}
         <div className="flex-1 overflow-y-auto p-4">
-          {selectedTraces.length === 0 ? (
+          {isLoadingAll && allTraces.length === 0 ? (
+            <div className="h-full animate-pulse rounded border border-envoi-border bg-envoi-surface/40" />
+          ) : selectedTraces.length === 0 ? (
             <div className="flex h-full items-center justify-center">
               <div className="flex flex-col items-center gap-2">
                 <GitCompareArrows size={24} className="text-envoi-text-dim" />

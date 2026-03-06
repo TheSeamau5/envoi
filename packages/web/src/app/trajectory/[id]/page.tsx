@@ -1,14 +1,7 @@
-/**
- * Trajectory Detail page — server component.
- * Resolves trajectory by ID from data layer (S3 or mock fallback).
- */
+/** Trajectory Detail page — cache-first client shell. */
 
-import { Suspense } from "react";
-import { notFound } from "next/navigation";
-import { getTrajectoryById } from "@/lib/server/data";
 import { readLayoutCookies } from "@/lib/cookies";
-import { TrajectoryDetail } from "@/components/trajectory/trajectory-detail";
-import { TrajectoryDetailSkeleton } from "@/components/trajectory/trajectory-detail-skeleton";
+import { TrajectoryDetailPageClient } from "@/components/trajectory/trajectory-detail-page-client";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 type TrajectoryPageProps = {
@@ -18,35 +11,12 @@ type TrajectoryPageProps = {
 export default async function TrajectoryPage({ params }: TrajectoryPageProps) {
   const project = await requireActiveProject();
   const { id } = await params;
+  const { rightPanelOpen, dividerPct, groupByTurn } = await readLayoutCookies();
 
   return (
-    <Suspense fallback={<TrajectoryDetailSkeleton />}>
-      <TrajectoryContent project={project} id={id} />
-    </Suspense>
-  );
-}
-
-async function TrajectoryContent({
-  project,
-  id,
-}: {
-  project: string;
-  id: string;
-}) {
-  const [trajectory, { rightPanelOpen, dividerPct, groupByTurn }] =
-    await Promise.all([
-      getTrajectoryById(id, { project }),
-      readLayoutCookies(),
-    ]);
-
-  if (!trajectory) {
-    notFound();
-  }
-
-  return (
-    <TrajectoryDetail
-      trajectory={trajectory}
+    <TrajectoryDetailPageClient
       project={project}
+      trajectoryId={id}
       initialRightPanelOpen={rightPanelOpen}
       initialDividerPct={dividerPct}
       initialGroupByTurn={groupByTurn}

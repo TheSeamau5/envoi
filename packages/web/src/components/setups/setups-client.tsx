@@ -9,6 +9,8 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
 import { SetupCompare } from "@/components/compare/setup-compare";
+import { PageHeader } from "@/components/page-shell";
+import { SetupsPageSkeleton } from "@/components/page-skeletons";
 import { queryKeys } from "@/lib/query-keys";
 import { isTrajectoryActive } from "@/lib/trajectory-state";
 import { useProjectRevision } from "@/lib/use-project-revision";
@@ -21,7 +23,7 @@ type SetupsClientProps = {
 
 export function SetupsClient({ allTraces, project }: SetupsClientProps) {
   useProjectRevision(project, {
-    invalidatePrefixes: [queryKeys.compare.all(project)],
+    invalidatePrefixes: [queryKeys.compare.full(project)],
   });
 
   const compareQuery = useQuery({
@@ -36,33 +38,36 @@ export function SetupsClient({ allTraces, project }: SetupsClientProps) {
       const data: Trajectory[] = await response.json();
       return data.filter((trace) => isTrajectoryActive(trace));
     },
+    initialData: allTraces.length > 0 ? allTraces : undefined,
   });
-
-  if (compareQuery.isLoading) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <span className="text-[12px] text-envoi-text-muted">
-          Loading trajectory data...
-        </span>
-      </div>
-    );
-  }
 
   if (compareQuery.isError) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <span className="text-[12px] text-red-500">
-          Failed to load trajectory data
-        </span>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <PageHeader title="Setup Compare" />
+        <div className="flex flex-1 items-center justify-center">
+          <span className="text-[12px] text-red-500">
+            Failed to load trajectory data
+          </span>
+        </div>
       </div>
     );
   }
 
   const traces = compareQuery.data;
+  const showSkeleton =
+    (traces === undefined || traces.length === 0) && compareQuery.isPending;
 
   return (
-    <SetupCompare
-      allTraces={traces && traces.length > 0 ? traces : allTraces}
-    />
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <PageHeader title="Setup Compare" />
+      {showSkeleton ? (
+        <SetupsPageSkeleton />
+      ) : (
+        <SetupCompare
+          allTraces={traces && traces.length > 0 ? traces : allTraces}
+        />
+      )}
+    </div>
   );
 }

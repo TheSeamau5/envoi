@@ -1,16 +1,11 @@
 /**
- * Trajectory list — client component with active/failed tabs.
- * Groups trajectories by environment (first level) then model (second level),
- * sorted in reverse chronological order within each group.
- * Failed runs (best score = 0) are shown in a separate tab.
- *
- * Uses TanStack Query with refetchInterval for polling instead of
- * manual setTimeout chains.
+ * Trajectory list — grouped trajectory table with inline live state.
+ * Uses client cache first so recent revisits render immediately.
  */
 
 "use client";
 
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -18,7 +13,8 @@ import type { Trajectory } from "@/lib/types";
 import { isPossiblyLive } from "@/lib/use-live-trajectory";
 import { useProjectRevision } from "@/lib/use-project-revision";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
-import { isTrajectoryActive } from "@/lib/trajectory-state";
+import { PageHeader } from "@/components/page-shell";
+import { TrajectoryListSkeleton } from "@/components/page-skeletons";
 import { formatPercent, formatDate, needsYear } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 
@@ -26,8 +22,6 @@ type TrajectoryListProps = {
   trajectories: Trajectory[];
   project: string;
 };
-
-type Tab = "active" | "failed";
 
 type TrajectoryListQueryData = {
   trajectories: Trajectory[];
@@ -147,8 +141,6 @@ export function TrajectoryList({
   trajectories: initialTrajectories,
   project,
 }: TrajectoryListProps) {
-  const [activeTab, setActiveTab] = useState<Tab>("active");
-
   useProjectRevision(project, {
     invalidatePrefixes: [queryKeys.trajectories.all(project)],
   });
@@ -166,10 +158,13 @@ export function TrajectoryList({
       const data: Trajectory[] = await response.json();
       return { trajectories: data, liveIds: new Set<string>() };
     },
-    initialData: {
-      trajectories: initialTrajectories,
-      liveIds: new Set<string>(),
-    },
+    initialData:
+      initialTrajectories.length > 0
+        ? {
+            trajectories: initialTrajectories,
+            liveIds: new Set<string>(),
+          }
+        : undefined,
     staleTime: 0,
   });
 
@@ -199,58 +194,27 @@ export function TrajectoryList({
   });
 
   const liveIds = liveIdsQuery.data ?? normalizedQueryData.liveIds;
-
-  const { activeTraces, failedTraces } = useMemo(() => {
-    const active: Trajectory[] = [];
-    const failed: Trajectory[] = [];
-    for (const trace of trajectories) {
-      const live = liveIds.has(trace.id);
-      if (isTrajectoryActive(trace, { live })) {
-        active.push(trace);
-      } else {
-        failed.push(trace);
-      }
-    }
-    return { activeTraces: active, failedTraces: failed };
-  }, [trajectories, liveIds]);
-
-  const currentTraces = activeTab === "active" ? activeTraces : failedTraces;
   const grouped = useMemo(
-    () => groupByEnvironmentThenModel(currentTraces),
-    [currentTraces],
+    () => groupByEnvironmentThenModel(trajectories),
+    [trajectories],
   );
   const showYear = useMemo(
-    () => needsYear(currentTraces.map((trace) => trace.startedAt)),
-    [currentTraces],
+    () => needsYear(trajectories.map((trace) => trace.startedAt)),
+    [trajectories],
   );
+  const showSkeleton =
+    trajectories.length === 0 && trajectoriesQuery.isPending;
+
+  if (showSkeleton) {
+    return <TrajectoryListSkeleton />;
+  }
 
   return (
     <div className="flex w-full min-w-0 flex-1 flex-col overflow-hidden">
-      {/* Header with tabs */}
-      <div className="flex h-10.25 shrink-0 items-center gap-4 border-b border-envoi-border bg-envoi-bg px-4">
-        <button
-          type="button"
-          onClick={() => setActiveTab("active")}
-          className={`text-[12px] font-semibold uppercase tracking-[0.08em] transition-colors ${
-            activeTab === "active"
-              ? "text-envoi-text"
-              : "text-envoi-text-dim hover:text-envoi-text-muted"
-          }`}
-        >
-          Active ({activeTraces.length})
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("failed")}
-          className={`text-[12px] font-semibold uppercase tracking-[0.08em] transition-colors ${
-            activeTab === "failed"
-              ? "text-envoi-text"
-              : "text-envoi-text-dim hover:text-envoi-text-muted"
-          }`}
-        >
-          Failed ({failedTraces.length})
-        </button>
-      </div>
+      <PageHeader
+        title="Trajectories"
+        right={<span>{trajectories.length} total</span>}
+      />
 
       {/* Column header */}
       <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5">
@@ -281,11 +245,9 @@ export function TrajectoryList({
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto">
-        {currentTraces.length === 0 ? (
+        {trajectories.length === 0 ? (
           <div className="flex items-center justify-center py-12 text-[13px] text-envoi-text-dim">
-            {activeTab === "active"
-              ? "No active trajectories"
-              : "No failed trajectories"}
+            No trajectories
           </div>
         ) : (
           [...grouped.entries()].map(([environment, modelMap]) => (
