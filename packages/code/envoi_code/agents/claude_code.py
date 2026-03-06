@@ -674,9 +674,9 @@ try:
         def compute_turn_timeout(
             self,
             *,
-            remaining_parts: int,
+            remaining_parts: int | None,
             remaining_run_seconds: float,
-            message_timeout_seconds: int,
+            message_timeout_seconds: int | None,
         ) -> int:
             return compute_turn_timeout_seconds(
                 remaining_parts=remaining_parts,

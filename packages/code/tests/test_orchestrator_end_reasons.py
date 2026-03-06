@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import envoi_code.orchestrator as orchestrator
+import pytest
 from envoi_code.agents.base import AgentFatalError
 from envoi_code.models import AgentTrace
 
@@ -22,12 +23,12 @@ class NullTurnAgent:
     def compute_turn_timeout(
         self,
         *,
-        remaining_parts: int,
+        remaining_parts: int | None,
         remaining_run_seconds: float,
-        message_timeout_seconds: int,
+        message_timeout_seconds: int | None,
     ) -> int:
         del remaining_parts, remaining_run_seconds
-        return message_timeout_seconds
+        return message_timeout_seconds or 60
 
     async def run_turn(self, **kwargs):
         del kwargs
@@ -49,6 +50,50 @@ class FatalStopAgent(NullTurnAgent):
     async def run_turn(self, **kwargs):
         del kwargs
         raise AgentFatalError("stopped", stop_reason="part_limit")
+
+
+class UsageLimitAgent(NullTurnAgent):
+    async def run_turn(self, **kwargs):
+        del kwargs
+        raise AgentFatalError("Codex usage limit reached", stop_reason="agent_error")
+
+
+class RecoveringNullTurnAgent(NullTurnAgent):
+    def __init__(self) -> None:
+        self.recovery_attempts: list[int] = []
+
+    async def recover_session(
+        self,
+        trajectory_id: str,
+        attempt: int,
+    ) -> str | None:
+        del trajectory_id
+        self.recovery_attempts.append(attempt)
+        return f"recovery-{attempt}"
+
+
+class RecordingTimeoutAgent(NullTurnAgent):
+    def __init__(self) -> None:
+        self.remaining_parts: int | None = None
+        self.remaining_run_seconds: float | None = None
+        self.message_timeout_seconds: int | None = None
+        self.seen_timeout: int | None = None
+
+    def compute_turn_timeout(
+        self,
+        *,
+        remaining_parts: int | None,
+        remaining_run_seconds: float,
+        message_timeout_seconds: int | None,
+    ) -> int:
+        self.remaining_parts = remaining_parts
+        self.remaining_run_seconds = remaining_run_seconds
+        self.message_timeout_seconds = message_timeout_seconds
+        return max(1, int(remaining_run_seconds))
+
+    async def run_turn(self, **kwargs):
+        self.seen_timeout = kwargs["timeout"]
+        return None
 
 
 async def noop_flush_logs(**kwargs) -> None:
@@ -149,3 +194,117 @@ def test_run_turn_loop_preserves_agent_error_after_recovery_exhaustion(
 def test_run_turn_loop_preserves_explicit_fatal_part_limit(monkeypatch) -> None:
     result = run_turn_loop_with_agent(FatalStopAgent(), monkeypatch)
     assert result.end_reason == "part_limit"
+
+
+def test_run_turn_loop_preserves_usage_limit_as_agent_error(monkeypatch) -> None:
+    result = run_turn_loop_with_agent(UsageLimitAgent(), monkeypatch)
+    assert result.end_reason == "agent_error"
+
+
+def test_run_turn_loop_allows_unbounded_recovery_until_timeout(monkeypatch) -> None:
+    agent = RecoveringNullTurnAgent()
+    patch_turn_loop_dependencies(monkeypatch)
+    monkeypatch.setattr(orchestrator, "TURN_RECOVERY_RETRIES", None)
+    stop_reasons = [None, None, None, None, "timeout"]
+
+    def fake_resolve_turn_start_stop_reason(**kwargs):
+        del kwargs
+        return stop_reasons.pop(0)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "resolve_turn_start_stop_reason",
+        fake_resolve_turn_start_stop_reason,
+    )
+
+    result = asyncio.run(
+        orchestrator.run_turn_loop(
+            sandbox=FakeSandbox(),
+            agent_backend=agent,
+            agent_trace=make_trace(),
+            trajectory_id="traj-001",
+            project="default",
+            session_id="sess-001",
+            agent_name="codex",
+            resolved_model="gpt-5",
+            environment="c_compiler",
+            task_params_loaded={},
+            prompt="solve it",
+            required_test_paths=[],
+            selected_test_paths=[],
+            test_timeout_seconds=None,
+            max_parts=None,
+            max_turns=None,
+            timeout_seconds=3_600,
+            message_timeout_seconds=None,
+            start_time=time.monotonic(),
+            initial_turn_count=0,
+            initial_part_count=0,
+            initial_git_commit=None,
+            failed_tests_feedback_limit=50,
+            normalized_advisor_model=None,
+            normalized_advisor_thinking_level="low",
+            advisor_max_output_tokens=None,
+            advisor_system_prompt_override=None,
+            advisor_user_prompt_prefix_override=None,
+            flush_logs=noop_flush_logs,
+        ),
+    )
+
+    assert result.end_reason == "timeout"
+    assert agent.recovery_attempts == [1, 2, 3, 4]
+
+
+def test_run_turn_loop_uses_run_budget_when_message_timeout_is_unset(monkeypatch) -> None:
+    agent = RecordingTimeoutAgent()
+    patch_turn_loop_dependencies(monkeypatch)
+
+    result = asyncio.run(
+        orchestrator.run_turn_loop(
+            sandbox=FakeSandbox(),
+            agent_backend=agent,
+            agent_trace=make_trace(),
+            trajectory_id="traj-001",
+            project="default",
+            session_id="sess-001",
+            agent_name="codex",
+            resolved_model="gpt-5",
+            environment="c_compiler",
+            task_params_loaded={},
+            prompt="solve it",
+            required_test_paths=[],
+            selected_test_paths=[],
+            test_timeout_seconds=None,
+            max_parts=None,
+            max_turns=None,
+            timeout_seconds=5_000,
+            message_timeout_seconds=None,
+            start_time=time.monotonic(),
+            initial_turn_count=0,
+            initial_part_count=0,
+            initial_git_commit=None,
+            failed_tests_feedback_limit=50,
+            normalized_advisor_model=None,
+            normalized_advisor_thinking_level="low",
+            advisor_max_output_tokens=None,
+            advisor_system_prompt_override=None,
+            advisor_user_prompt_prefix_override=None,
+            flush_logs=noop_flush_logs,
+        ),
+    )
+
+    assert result.end_reason == "agent_error"
+    assert agent.remaining_parts is None
+    assert agent.message_timeout_seconds is None
+    assert isinstance(agent.seen_timeout, int)
+    assert agent.seen_timeout > 600
+
+
+def test_run_trajectory_rejects_modal_timeout_above_function_ceiling() -> None:
+    with pytest.raises(ValueError, match="Modal function ceiling"):
+        asyncio.run(
+            orchestrator.run_trajectory(
+                project="c-compiler",
+                timeout_seconds=orchestrator.MODAL_FUNCTION_TIMEOUT_SECONDS,
+            )
+        )

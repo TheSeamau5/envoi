@@ -201,29 +201,26 @@ def merge_usage_maps(
 
 def compute_turn_timeout_seconds(
     *,
-    remaining_parts: int,
+    remaining_parts: int | None,
     remaining_run_seconds: float,
-    message_timeout_seconds: int,
+    message_timeout_seconds: int | None,
 ) -> int:
     """Derive an adaptive per-turn timeout based on remaining budget.
 
-    Takes the minimum of: the hard cap (message_timeout_seconds), the
-    parts-based estimate (remaining_parts * SECONDS_PER_REMAINING_PART),
-    and the wall-clock budget remaining. Ensures at least 1 second.
+    When message_timeout_seconds is omitted, the remaining run budget becomes
+    the only wall-clock cap unless an explicit part budget is active.
     """
-    timeout_from_parts = max(
-        MIN_TURN_TIMEOUT_SECONDS,
-        remaining_parts * SECONDS_PER_REMAINING_PART,
-    )
-    timeout_from_run_budget = max(1, int(remaining_run_seconds))
-    return max(
-        1,
-        min(
-            message_timeout_seconds,
-            timeout_from_parts,
-            timeout_from_run_budget,
-        ),
-    )
+    timeout_candidates = [max(1, int(remaining_run_seconds))]
+    if isinstance(message_timeout_seconds, int) and message_timeout_seconds > 0:
+        timeout_candidates.append(message_timeout_seconds)
+    if isinstance(remaining_parts, int) and remaining_parts > 0:
+        timeout_candidates.append(
+            max(
+                MIN_TURN_TIMEOUT_SECONDS,
+                remaining_parts * SECONDS_PER_REMAINING_PART,
+            )
+        )
+    return max(1, min(timeout_candidates))
 
 
 # ---------------------------------------------------------------------------

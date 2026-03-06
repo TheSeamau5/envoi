@@ -1901,9 +1901,9 @@ echo "[setup] codex install complete"
         def compute_turn_timeout(
             self,
             *,
-            remaining_parts: int,
+            remaining_parts: int | None,
             remaining_run_seconds: float,
-            message_timeout_seconds: int,
+            message_timeout_seconds: int | None,
         ) -> int:
             return compute_turn_timeout_seconds(
                 remaining_parts=remaining_parts,
@@ -2113,9 +2113,13 @@ echo "[setup] codex install complete"
             )
             if response is None:
                 if usage_limit_detected:
+                    builtins.print(
+                        "[codex] stopping: provider_usage_limit",
+                        flush=True,
+                    )
                     raise AgentFatalError(
                         "Codex usage limit reached",
-                        stop_reason="part_limit",
+                        stop_reason="agent_error",
                     )
                 return None
             if not response.get("ok"):
@@ -2129,9 +2133,13 @@ echo "[setup] codex install complete"
                     flush=True,
                 )
                 if usage_limit_detected or is_usage_limit_message(error_text):
+                    builtins.print(
+                        "[codex] stopping: provider_usage_limit",
+                        flush=True,
+                    )
                     raise AgentFatalError(
                         "Codex usage limit reached",
-                        stop_reason="part_limit",
+                        stop_reason="agent_error",
                     )
                 return None
             body = response.get("body")

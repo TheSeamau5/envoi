@@ -127,11 +127,46 @@ from envoi_code.utils.storage import (
 from envoi_code.utils.stream import make_stream_part_callback
 
 DEFAULT_AGENT = "codex"
-MESSAGE_TIMEOUT_SECONDS = int(
-    os.environ.get("MESSAGE_TIMEOUT_SECONDS", "600")
-)  # hard cap per message turn
+
+
+def read_optional_positive_int_env(name: str) -> int | None:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return None
+    value = int(raw_value)
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+def read_non_negative_int_env(
+    name: str,
+    *,
+    default: int | None = None,
+) -> int | None:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    value = int(raw_value)
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return value
+
+
+def read_positive_int_env(name: str, default: int) -> int:
+    value = read_optional_positive_int_env(name)
+    return value if isinstance(value, int) else default
+
+
+MESSAGE_TIMEOUT_SECONDS = read_optional_positive_int_env(
+    "MESSAGE_TIMEOUT_SECONDS"
+)  # optional hard cap per message turn
 RESUME_FROM_S3 = os.environ.get("RESUME_FROM_S3", "1").strip().lower() not in {"0", "false", "no"}
-TURN_RECOVERY_RETRIES = max(0, int(os.environ.get("TURN_RECOVERY_RETRIES", "3")))
+TURN_RECOVERY_RETRIES = read_non_negative_int_env("TURN_RECOVERY_RETRIES")
+MODAL_FUNCTION_TIMEOUT_SECONDS = read_positive_int_env(
+    "MODAL_FUNCTION_TIMEOUT_SECONDS",
+    43200,
+)
 MAX_INLINE_TEST_MESSAGE_CHARS = max(80, int(os.environ.get("MAX_INLINE_TEST_MESSAGE_CHARS", "220")))
 FAILED_TEST_FEEDBACK_LIMIT = max(1, int(os.environ.get("FAILED_TEST_FEEDBACK_LIMIT", "50")))
 ADVISOR_TIMEOUT_SECONDS = max(0, int(os.environ.get("ADVISOR_TIMEOUT_SECONDS", "0")))
@@ -2596,7 +2631,7 @@ async def run_turn_loop(
     max_parts: int | None,
     max_turns: int | None,
     timeout_seconds: int,
-    message_timeout_seconds: int,
+    message_timeout_seconds: int | None,
     start_time: float,
     initial_turn_count: int,
     initial_part_count: int,
@@ -2758,6 +2793,10 @@ async def run_turn_loop(
             timeout_seconds=timeout_seconds,
         )
         if turn_start_stop_reason is not None:
+            if turn_start_stop_reason == "timeout":
+                print("[progress] stopping: run_timeout_exhausted")
+            elif turn_start_stop_reason == "part_limit":
+                print("[progress] stopping: explicit_budget_exhausted")
             end_reason = turn_start_stop_reason
             break
 
@@ -2766,9 +2805,7 @@ async def run_turn_loop(
             max(1, max_parts - part_count) if isinstance(max_parts, int) and max_parts > 0 else 0
         )
         remaining_parts_for_timeout = (
-            remaining_parts_budget
-            if remaining_parts_budget > 0
-            else max(1, int(remaining_run_seconds // 60))
+            remaining_parts_budget if remaining_parts_budget > 0 else None
         )
         turn_timeout_seconds = agent_backend.compute_turn_timeout(
             remaining_parts=remaining_parts_for_timeout,
@@ -2877,37 +2914,49 @@ async def run_turn_loop(
             if not turn_record.parts:
                 agent_trace.turns.pop()
             consecutive_turn_failures += 1
+            recovery_limit_label = (
+                str(TURN_RECOVERY_RETRIES)
+                if isinstance(TURN_RECOVERY_RETRIES, int)
+                else "unbounded"
+            )
             print(
                 "[progress] no response from agent "
                 f"(recovery {consecutive_turn_failures}"
-                f"/{TURN_RECOVERY_RETRIES})"
+                f"/{recovery_limit_label})"
             )
             await dump_sandbox_logs(
                 sandbox,
                 agent=agent_backend,
             )
-            if consecutive_turn_failures <= TURN_RECOVERY_RETRIES:
-                recovered_session_id = await agent_backend.recover_session(
+            if (
+                isinstance(TURN_RECOVERY_RETRIES, int)
+                and consecutive_turn_failures > TURN_RECOVERY_RETRIES
+            ):
+                print("[progress] stopping: recovery_exhausted")
+                end_reason = "agent_error"
+                break
+            recovered_session_id = await agent_backend.recover_session(
+                trajectory_id,
+                consecutive_turn_failures,
+            )
+            if recovered_session_id:
+                session_id = recovered_session_id
+                agent_trace.session_id = recovered_session_id
+                save_trace_parquet(
                     trajectory_id,
-                    consecutive_turn_failures,
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
+                    project=project,
                 )
-                if recovered_session_id:
-                    session_id = recovered_session_id
-                    agent_trace.session_id = recovered_session_id
-                    save_trace_parquet(
-                        trajectory_id,
-                        agent_trace,
-                        environment=environment,
-                        task_params=task_params_loaded,
-                        project=project,
-                    )
-                    prompt_text = build_followup_prompt(
-                        tracker,
-                        elapsed_seconds=time.monotonic() - start_time,
-                        timeout_seconds=timeout_seconds,
-                        consecutive_no_progress_turns=(consecutive_no_progress_turns),
-                    )
-                    continue
+                prompt_text = build_followup_prompt(
+                    tracker,
+                    elapsed_seconds=time.monotonic() - start_time,
+                    timeout_seconds=timeout_seconds,
+                    consecutive_no_progress_turns=(consecutive_no_progress_turns),
+                )
+                continue
+            print("[progress] stopping: recovery_unavailable")
             end_reason = "agent_error"
             break
 
@@ -3063,6 +3112,7 @@ async def run_turn_loop(
             end_reason = "solved"
             break
         if isinstance(max_parts, int) and max_parts > 0 and part_count >= max_parts:
+            print("[progress] stopping: explicit_budget_exhausted")
             end_reason = "part_limit"
             break
 
@@ -3115,7 +3165,7 @@ async def execute_trajectory_main(
     test_timeout_seconds: int | None,
     max_parts: int | None,
     max_turns: int | None,
-    message_timeout_seconds: int,
+    message_timeout_seconds: int | None,
     failed_tests_feedback_limit: int,
     normalized_advisor_model: str | None,
     normalized_advisor_thinking_level: str,
@@ -3529,7 +3579,7 @@ async def run_trajectory(
     max_turns: int | None = None,
     test: list[str] | None = None,
     test_timeout_seconds: int | None = None,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    message_timeout_seconds: int | None = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 7200,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
@@ -3547,6 +3597,16 @@ async def run_trajectory(
     project_name = (project or "").strip()
     if not project_name:
         raise ValueError("project is required")
+    if (
+        sandbox_provider == "modal"
+        and timeout_seconds + SHUTDOWN_GRACE_SECONDS > MODAL_FUNCTION_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            "Requested timeout exceeds the Modal function ceiling: "
+            f"requested={timeout_seconds}s "
+            f"grace={SHUTDOWN_GRACE_SECONDS}s "
+            f"function_timeout={MODAL_FUNCTION_TIMEOUT_SECONDS}s"
+        )
     os.environ["ENVOI_PROJECT"] = project_name
     prepared = await prepare_trajectory_context(
         trajectory_id=trajectory_id,
@@ -3582,6 +3642,11 @@ async def run_trajectory(
     test_timeout_label = (
         f"{test_timeout_seconds}s" if isinstance(test_timeout_seconds, int) else "default"
     )
+    message_timeout_label = (
+        f"{message_timeout_seconds}s"
+        if isinstance(message_timeout_seconds, int)
+        else "none"
+    )
     print(
         "[run] start "
         f"trajectory_id={trajectory_id} "
@@ -3594,7 +3659,7 @@ async def run_trajectory(
         "[run] limits "
         f"part_limit={part_limit_label} turn_limit={turn_limit_label} "
         f"timeout={timeout_seconds}s "
-        f"message_timeout={message_timeout_seconds}s"
+        f"message_timeout={message_timeout_label}"
     )
     print(
         "[run] eval "

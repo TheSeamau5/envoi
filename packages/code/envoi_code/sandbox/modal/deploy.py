@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import traceback
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from envoi_code.orchestrator import (
     AGENT_BACKENDS,
     DEFAULT_AGENT,
     MESSAGE_TIMEOUT_SECONDS,
+    MODAL_FUNCTION_TIMEOUT_SECONDS,
     RESUME_FROM_S3,
     run_trajectory,
 )
@@ -31,6 +33,11 @@ from envoi_code.sandbox.modal.backend import ModalSandbox
 from envoi_code.utils.helpers import tprint
 
 print = tprint
+
+MODAL_FUNCTION_TIMEOUT = max(
+    MODAL_FUNCTION_TIMEOUT_SECONDS,
+    int(os.environ.get("MODAL_FUNCTION_TIMEOUT_SECONDS", str(MODAL_FUNCTION_TIMEOUT_SECONDS))),
+)
 
 ROOT = Path(__file__).parent.parent.parent
 WORKSPACE_ROOT = ROOT.parent.parent.parent
@@ -69,7 +76,7 @@ def parse_raw_params_json(raw_params_json: str | None) -> dict[str, Any] | None:
 
 
 @app.function(
-    timeout=14400,
+    timeout=MODAL_FUNCTION_TIMEOUT,
     secrets=[modal.Secret.from_dotenv()],
     image=function_image,
 )
@@ -80,7 +87,7 @@ async def modal_run_trajectory(
     max_turns: int | None = None,
     test: Any = None,
     test_timeout_seconds: int | None = None,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    message_timeout_seconds: int | None = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 7200,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
@@ -119,7 +126,7 @@ async def modal_run_trajectory(
 
 
 @app.function(
-    timeout=14400,
+    timeout=MODAL_FUNCTION_TIMEOUT,
     secrets=[modal.Secret.from_dotenv()],
     image=function_image,
     nonpreemptible=True,
@@ -132,7 +139,7 @@ async def modal_run_trajectory_non_preemptible(
     max_turns: int | None = None,
     test: Any = None,
     test_timeout_seconds: int | None = None,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    message_timeout_seconds: int | None = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 7200,
     trajectory_id: str | None = None,
     codex_auth_json_b64: str | None = None,
@@ -182,7 +189,7 @@ async def main(
     test: str | None = None,
     test_json: str | None = None,
     test_timeout_seconds: int | None = None,
-    message_timeout_seconds: int = MESSAGE_TIMEOUT_SECONDS,
+    message_timeout_seconds: int | None = MESSAGE_TIMEOUT_SECONDS,
     timeout_seconds: int = 7200,
     non_preemptible: bool = True,
     trajectory_id: str | None = None,

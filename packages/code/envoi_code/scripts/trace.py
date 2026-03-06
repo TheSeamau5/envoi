@@ -387,7 +387,7 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
         "--max-turns",
         type=int,
         default=None,
-        help="Optional turn budget. Stops after this many turns.",
+        help="Optional turn budget. If omitted, turns are unbounded.",
     )
     parser.add_argument(
         "--test",
@@ -410,7 +410,12 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--task", default=None, help="Path to task directory.")
     parser.add_argument("--env", default=None, help="Path to environment directory.")
-    parser.add_argument("--message-timeout-seconds", type=int, default=None)
+    parser.add_argument(
+        "--message-timeout-seconds",
+        type=int,
+        default=None,
+        help="Optional per-turn timeout. If omitted, turns may use the remaining run budget.",
+    )
     parser.add_argument("--sandbox-cpu", type=float, default=None)
     parser.add_argument("--sandbox-memory-mb", type=int, default=None)
     parser.add_argument(
