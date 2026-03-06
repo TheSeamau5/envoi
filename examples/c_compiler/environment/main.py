@@ -5,7 +5,7 @@ Evaluates a submitted Rust project that compiles C source code to the
 container architecture (x86_64 in this environment). The submission must
 produce a ./cc binary via build.sh.
 
-Usage:  ./cc input.c -o output
+Usage:  ./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o output
 
 Test suites (run in order):
   1. basics

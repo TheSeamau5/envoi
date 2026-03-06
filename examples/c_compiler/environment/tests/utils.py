@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -59,6 +60,7 @@ arch_verified = False
 arch_lock: asyncio.Lock | None = None
 case_run_semaphore: asyncio.Semaphore | None = None
 case_run_semaphore_limit: int | None = None
+reference_gcc_standard_flag_cache: str | None = None
 
 
 def session_path() -> Path:
@@ -219,6 +221,54 @@ def skip_gcc_benchmark() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def reference_c_standard() -> str:
+    raw = os.environ.get("ENVOI_REFERENCE_C_STANDARD", "").strip().lower()
+    return raw or "c23"
+
+
+def detect_reference_gcc_standard_flag() -> str:
+    global reference_gcc_standard_flag_cache
+
+    if reference_gcc_standard_flag_cache is not None:
+        return reference_gcc_standard_flag_cache
+
+    preferred = reference_c_standard()
+    candidates = [preferred]
+    if preferred == "c23":
+        candidates.append("c2x")
+    elif preferred == "c2x":
+        candidates.append("c23")
+
+    for candidate in dict.fromkeys(candidates):
+        try:
+            probe = subprocess.run(
+                ["gcc", f"-std={candidate}", "-pedantic-errors", "-x", "c", "-", "-fsyntax-only"],
+                input="int main(void) { return 0; }\n",
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        if probe.returncode == 0:
+            reference_gcc_standard_flag_cache = candidate
+            return candidate
+
+    reference_gcc_standard_flag_cache = "c2x"
+    return reference_gcc_standard_flag_cache
+
+
+def reference_gcc_compile_args() -> list[str]:
+    standard_flag = detect_reference_gcc_standard_flag()
+    return [f"-std={standard_flag}", "-pedantic-errors"]
+
+
+def shell_join(parts: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
 def sanitize_fragment(value: str, *, fallback: str = "item", max_length: int = 80) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
     if not cleaned:
@@ -263,11 +313,13 @@ def get_arch_lock() -> asyncio.Lock:
 
 def reset_runner_state() -> None:
     global arch_verified, arch_lock, case_run_semaphore, case_run_semaphore_limit
+    global reference_gcc_standard_flag_cache
 
     arch_verified = False
     arch_lock = None
     case_run_semaphore = None
     case_run_semaphore_limit = None
+    reference_gcc_standard_flag_cache = None
 
 
 async def detect_elf_machine(path: Path) -> str | None:
@@ -384,24 +436,49 @@ async def run_case(
 
     file_stem = sanitize_fragment(f"test-{name}", fallback="test", max_length=64)
     source_path_value = case.get("source_path")
-    if source_path_value is None:
-        c_file = case_dir / f"{file_stem}.c"
-        c_file.write_text(src, encoding="utf-8")
+    input_path_values = case.get("input_paths")
+    if input_path_values is None:
+        if source_path_value is None:
+            c_file = case_dir / f"{file_stem}.c"
+            c_file.write_text(src, encoding="utf-8")
+        else:
+            c_file = Path(str(source_path_value)).expanduser().resolve()
+            if not c_file.is_file():
+                raise RuntimeError(f"Missing case source file: {c_file}")
+        compile_inputs = [c_file]
     else:
-        c_file = Path(str(source_path_value)).expanduser().resolve()
-        if not c_file.is_file():
-            raise RuntimeError(f"Missing case source file: {c_file}")
+        compile_inputs = []
+        for raw_path in list(input_path_values):
+            compile_input = Path(str(raw_path)).expanduser().resolve()
+            if not compile_input.is_file():
+                raise RuntimeError(f"Missing case compile input: {compile_input}")
+            compile_inputs.append(compile_input)
+        if not compile_inputs:
+            raise RuntimeError(f"Case {name} has no compile inputs")
+
+    extra_link_args = [str(arg) for arg in list(case.get("link_args", []))]
     out_file = case_dir / file_stem
     gcc_out_file = case_dir / f"{file_stem}_gcc"
     debug_dir = reset_debug_artifacts_dir(case_dir)
     cc_binary = (session_root / "cc").resolve()
 
-    cc_command = (
-        f"{shlex.quote(str(cc_binary))} {shlex.quote(str(c_file))} "
-        f"-o {shlex.quote(str(out_file))}"
-    )
-    gcc_command = (
-        f"gcc {shlex.quote(str(c_file))} -o {shlex.quote(str(gcc_out_file))}"
+    cc_command_parts = [
+        str(cc_binary),
+        *(str(path) for path in compile_inputs),
+        *extra_link_args,
+        "-o",
+        str(out_file),
+    ]
+    cc_command = shell_join(cc_command_parts)
+    gcc_command = shell_join(
+        [
+            "gcc",
+            *reference_gcc_compile_args(),
+            *(str(path) for path in compile_inputs),
+            *extra_link_args,
+            "-o",
+            str(gcc_out_file),
+        ]
     )
 
     compile_tasks = [

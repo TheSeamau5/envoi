@@ -106,6 +106,7 @@ async def resolve_params(context: ParamsResolveContext) -> ResolvedParams:
             "ENVOI_IMPL_LANG": variant.impl_lang,
             "ENVOI_TASK_LANG": variant.lang,
             "ENVOI_MILESTONE": variant.milestone,
+            "ENVOI_REFERENCE_C_STANDARD": "c23",
             "ENVOI_TEST_CONCURRENCY": "8",
             "ENVOI_SKIP_GCC_BENCHMARK": "1",
         },

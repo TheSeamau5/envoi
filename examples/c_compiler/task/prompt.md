@@ -7,13 +7,21 @@ Do NOT call or wrap cc/gcc/clang/tcc.
 Do NOT use saltwater or ANY existing C compiler implementation.
 Write all core compiler components yourself in Rust: lexer, parser, codegen, etc.
 Target Linux x86_64 (x86-64). Do NOT generate AArch64/ARM64 assembly.
+Language baseline: ISO C23. Programs that are valid C23 should compile; programs
+that are invalid under C23 should be rejected. In this sandbox, GCC 13 uses the
+`-std=c2x` spelling for C23 mode. Some GCC torture fixtures still exercise
+GCC-compatible behavior beyond the pure ISO C23 baseline.
 
 Your submission must include:
 - Cargo.toml
 - build.sh (must produce ./cc binary when run)
 - src/ (your Rust source code)
 
-Interface: ./cc input.c -o output
+Interface: `./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o output`
+
+The evaluation harness may pass multiple C translation units for one program.
+Treat `./cc` as a compiler-plus-linker driver: compile the inputs, link them,
+and produce one runnable executable.
 
 Your goal is to pass ALL test suites. Work methodically. Start small, build up.
 
@@ -55,7 +63,7 @@ PASS=0; FAIL=0
 for f in tests/*.c; do
     name=$(basename "$f")
     # Compile with gcc (reference)
-    gcc "$f" -o /tmp/ref 2>/dev/null
+    gcc -std=c2x -pedantic-errors "$f" -o /tmp/ref 2>/dev/null
     ref_out=$(/tmp/ref 2>/dev/null)
     ref_exit=$?
     # Compile with your compiler

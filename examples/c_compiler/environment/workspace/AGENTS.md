@@ -5,6 +5,7 @@
 - Test: `./run_tests.sh` (runs all your accumulated tests against `./cc` and `gcc`)
 - Debug artifacts: write to `./debug_artifacts/` (auto-captured on test failure)
 - Progress notes: maintain `PROGRESS.md`
+- Interface: `./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o output`
 
 ## Workflow
 

@@ -1,0 +1,13 @@
+# WACCT invalid fixtures that are valid or intentionally permitted under a
+# strict ISO C23 baseline. Keep these out of the invalid-program bucket so
+# the environment's language contract stays coherent.
+
+chapter_6/invalid_parse/extra_credit/label_declaration.c
+chapter_6/invalid_parse/extra_credit/label_without_statement.c
+chapter_8/invalid_parse/extra_credit/switch_case_declaration.c
+chapter_15/invalid_parse/empty_initializer_list.c
+chapter_17/invalid_types/void/void_fun_params.c
+chapter_18/invalid_parse/empty_initializer_list.c
+chapter_18/invalid_parse/extra_credit/case_struct_decl.c
+chapter_18/invalid_parse/extra_credit/labeled_struct_decl.c
+chapter_18/invalid_parse/extra_credit/union_empty_initializer.c
