@@ -32,6 +32,16 @@ RUN mkdir -p /workspace /environment /sandbox /tmp/upload /opt/tests
 COPY workspace/AGENTS.md /workspace/AGENTS.md
 COPY workspace/reference/ /workspace/reference/
 
+# Reference PDFs — fetched at build time so /workspace/reference/ contains
+# real deep-reference material in addition to the checked-in markdown summaries.
+RUN set -eux; \
+    curl -fsSL -o /workspace/reference/c23-n3220.pdf \
+        "https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3220.pdf"; \
+    head -c 5 /workspace/reference/c23-n3220.pdf | grep -q '^%PDF-'; \
+    curl -fsSL -o /workspace/reference/x86_64-SysV-psABI.pdf \
+        "https://refspecs.linuxbase.org/elf/x86_64-SysV-psABI.pdf"; \
+    head -c 5 /workspace/reference/x86_64-SysV-psABI.pdf | grep -q '^%PDF-'
+
 # Bake fixtures into the image to avoid per-run sync costs.
 RUN set -eux; \
     git clone --depth 1 https://github.com/c-testsuite/c-testsuite.git /opt/tests/c-testsuite; \

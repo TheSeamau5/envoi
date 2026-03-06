@@ -6,6 +6,8 @@
 - Progress notes: maintain `PROGRESS.md`
 - Interface: `./cc input.c [more_input.c ...] [helper.s ...] [linker_flag ...] -o output`
 - Reference docs: `/workspace/reference/` — READ BEFORE STARTING
+  - `c23-n3220.pdf` — public WG14 working-draft PDF for ISO/IEC 9899:2024
+  - `x86_64-SysV-psABI.pdf` — authoritative System V AMD64 ABI PDF
   - `sysv-abi-summary.md` — calling convention and stack alignment
   - `x86-64-instructions.md` — instruction reference for codegen
   - `codegen-examples/` — gcc output for simple C programs
@@ -25,6 +27,8 @@ Red-green-refactor. One feature at a time.
 
 Never leave a failing test behind. If something breaks, fix it before moving on.
 Before writing assembly generation code, read the examples in `reference/codegen-examples/`. Study how gcc compiles simple programs and match those patterns.
+Use the PDFs when you need the full standard or full ABI wording; use the
+markdown summaries for quick refreshers.
 
 ## File Structure
 ```

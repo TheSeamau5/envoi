@@ -126,12 +126,17 @@ Run this after every change. No exceptions.
 ## Reference Material
 
 Read `/workspace/reference/` before you guess:
+- `c23-n3220.pdf` — full C23 reference PDF (public WG14 draft of ISO/IEC 9899:2024)
+- `x86_64-SysV-psABI.pdf` — System V AMD64 ABI PDF
 - `wacct-chapter-map.md` — exact implementation order and chapter coverage
 - `sysv-abi-summary.md` — calling convention and stack alignment rules
 - `x86-64-instructions.md` — the small instruction set you actually need
 - `codegen-examples/` — gcc `-S -O0` patterns for simple programs
 - `c-language-traps.md` — C23 edge cases that break parsers and type systems
 - `x86-64-codegen-traps.md` — common assembly-generation mistakes
+
+Use the PDFs for authoritative deep reference and the markdown files for faster
+task-oriented summaries.
 
 ## Recommended Architecture
 
