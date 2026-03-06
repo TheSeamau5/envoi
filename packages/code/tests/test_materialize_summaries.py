@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import tempfile
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+import envoi_code.scripts.materialize_summaries as materialize_summaries
 import pyarrow.parquet as pq
-from envoi_code.models import AgentTrace, EvalEvent, PartRecord, SessionEnd, TurnRecord
+from envoi_code.models import (
+    AgentTrace,
+    EvalEvent,
+    PartRecord,
+    SessionEnd,
+    TurnRecord,
+)
 from envoi_code.scripts.materialize_summaries import (
+    EVALUATION_SUMMARY_FILENAME,
+    SUMMARY_MANIFEST_FILENAME,
+    TRAJECTORY_SUMMARY_FILENAME,
     compute_added_lines,
     materialize_command,
     process_trajectory,
@@ -23,6 +34,33 @@ class TraceMeta(TypedDict):
     task_params: dict[str, Any]
     suites: dict[str, Any]
     bundle_uri: str
+
+
+class PutObjectCall(TypedDict):
+    Bucket: str
+    Key: str
+    Body: bytes
+    ContentType: str
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.calls: list[PutObjectCall] = []
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+    ) -> None:
+        self.calls.append({
+            "Bucket": Bucket,
+            "Key": Key,
+            "Body": Body,
+            "ContentType": ContentType,
+        })
 
 
 def make_trace(
@@ -113,6 +151,27 @@ def write_test_trace(
     trace_path = traj_dir / "trace.parquet"
     write_trace_parquet(rows, str(trace_path))
     return trace_path
+
+
+def make_materialize_args(
+    *,
+    source: Path,
+    dest: Path,
+    extract_code: bool = False,
+    incremental: bool = False,
+    project: str | None = None,
+    publish: bool = False,
+    publish_prefix: str | None = None,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        source=str(source),
+        dest=str(dest),
+        extract_code=extract_code,
+        incremental=incremental,
+        project=project,
+        publish=publish,
+        publish_prefix=publish_prefix,
+    )
 
 
 def test_process_trajectory_with_evaluations() -> None:
@@ -228,12 +287,7 @@ def test_materialize_command_full_pipeline() -> None:
         write_test_trace(source_dir, trace2, meta2)
 
         # Run materialization
-        args = argparse.Namespace(
-            source=str(source_dir),
-            dest=str(dest_dir),
-            extract_code=False,
-            incremental=False,
-        )
+        args = make_materialize_args(source=source_dir, dest=dest_dir)
         materialize_command(args)
 
         # Verify trajectory summary
@@ -251,6 +305,98 @@ def test_materialize_command_full_pipeline() -> None:
         assert eval_row["passed"] == 10
 
 
+def test_materialize_command_writes_manifest_with_artifact_identities() -> None:
+    """Test manifest.json tracks the emitted parquet artifacts."""
+    with tempfile.TemporaryDirectory() as tmp:
+        source_dir = Path(tmp) / "source"
+        dest_dir = Path(tmp) / "dest"
+        source_dir.mkdir()
+
+        trace, meta = make_trace(trajectory_id="traj-manifest", num_parts=4)
+        write_test_trace(source_dir, trace, meta)
+
+        args = make_materialize_args(source=source_dir, dest=dest_dir)
+        materialize_command(args)
+
+        manifest_path = dest_dir / SUMMARY_MANIFEST_FILENAME
+        manifest = json.loads(manifest_path.read_text())
+        identities = manifest["identities"]
+
+        trajectory_data = (dest_dir / TRAJECTORY_SUMMARY_FILENAME).read_bytes()
+        evaluation_data = (dest_dir / EVALUATION_SUMMARY_FILENAME).read_bytes()
+
+        assert set(identities) == {
+            TRAJECTORY_SUMMARY_FILENAME,
+            EVALUATION_SUMMARY_FILENAME,
+        }
+        assert identities[TRAJECTORY_SUMMARY_FILENAME] == {
+            "sha256": hashlib.sha256(trajectory_data).hexdigest(),
+            "size_bytes": len(trajectory_data),
+        }
+        assert identities[EVALUATION_SUMMARY_FILENAME] == {
+            "sha256": hashlib.sha256(evaluation_data).hexdigest(),
+            "size_bytes": len(evaluation_data),
+        }
+        expected_revision = hashlib.sha256(
+            json.dumps(
+                identities,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+        assert manifest["revision"] == expected_revision
+        assert manifest["published_at"].endswith("Z")
+
+
+def test_materialize_command_publishes_manifest_last(monkeypatch: Any) -> None:
+    """Test S3 publishing uploads parquet files before manifest.json."""
+    fake_s3 = FakeS3Client()
+    monkeypatch.setattr(materialize_summaries, "get_s3_client", lambda: fake_s3)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        project = "proj-123"
+        source_root = Path(tmp) / "source"
+        dest_root = Path(tmp) / "dest"
+        source_dir = source_root / "project" / project / "trajectories"
+        source_dir.mkdir(parents=True, exist_ok=True)
+
+        trace, meta = make_trace(trajectory_id="traj-publish", num_parts=3)
+        write_test_trace(source_dir, trace, meta)
+
+        args = make_materialize_args(
+            source=source_root,
+            dest=dest_root,
+            project=project,
+            publish=True,
+            publish_prefix="test-bucket",
+        )
+        materialize_command(args)
+
+        dest_dir = dest_root / "project" / project / "trajectories" / "summaries"
+        expected_keys = [
+            f"project/{project}/trajectories/summaries/{TRAJECTORY_SUMMARY_FILENAME}",
+            f"project/{project}/trajectories/summaries/{EVALUATION_SUMMARY_FILENAME}",
+            f"project/{project}/trajectories/summaries/{SUMMARY_MANIFEST_FILENAME}",
+        ]
+
+        assert [call["Bucket"] for call in fake_s3.calls] == ["test-bucket"] * 3
+        assert [call["Key"] for call in fake_s3.calls] == expected_keys
+        assert [call["ContentType"] for call in fake_s3.calls] == [
+            "application/octet-stream",
+            "application/octet-stream",
+            "application/json",
+        ]
+        assert fake_s3.calls[0]["Body"] == (
+            dest_dir / TRAJECTORY_SUMMARY_FILENAME
+        ).read_bytes()
+        assert fake_s3.calls[1]["Body"] == (
+            dest_dir / EVALUATION_SUMMARY_FILENAME
+        ).read_bytes()
+        assert fake_s3.calls[2]["Body"] == (
+            dest_dir / SUMMARY_MANIFEST_FILENAME
+        ).read_bytes()
+
+
 def test_materialize_command_incremental() -> None:
     """Test incremental mode skips already-processed trajectories."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -262,12 +408,7 @@ def test_materialize_command_incremental() -> None:
         trace1, meta1 = make_trace(trajectory_id="traj-first", num_parts=2)
         write_test_trace(source_dir, trace1, meta1)
 
-        args = argparse.Namespace(
-            source=str(source_dir),
-            dest=str(dest_dir),
-            extract_code=False,
-            incremental=False,
-        )
+        args = make_materialize_args(source=source_dir, dest=dest_dir)
         materialize_command(args)
 
         traj_table = pq.read_table(str(dest_dir / "trajectory_summary.parquet"))
@@ -277,10 +418,9 @@ def test_materialize_command_incremental() -> None:
         trace2, meta2 = make_trace(trajectory_id="traj-second", num_parts=3)
         write_test_trace(source_dir, trace2, meta2)
 
-        args_inc = argparse.Namespace(
-            source=str(source_dir),
-            dest=str(dest_dir),
-            extract_code=False,
+        args_inc = make_materialize_args(
+            source=source_dir,
+            dest=dest_dir,
             incremental=True,
         )
         materialize_command(args_inc)
@@ -298,12 +438,7 @@ def test_materialize_command_empty_source() -> None:
         dest_dir = Path(tmp) / "dest"
         source_dir.mkdir()
 
-        args = argparse.Namespace(
-            source=str(source_dir),
-            dest=str(dest_dir),
-            extract_code=False,
-            incremental=False,
-        )
+        args = make_materialize_args(source=source_dir, dest=dest_dir)
         materialize_command(args)
 
         traj_table = pq.read_table(str(dest_dir / "trajectory_summary.parquet"))

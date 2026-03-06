@@ -10,13 +10,15 @@
 
 "use client";
 
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
 import { isPossiblyLive } from "@/lib/use-live-trajectory";
+import { useProjectRevision } from "@/lib/use-project-revision";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
+import { isTrajectoryActive } from "@/lib/trajectory-state";
 import { formatPercent, formatDate, needsYear } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 
@@ -147,49 +149,26 @@ export function TrajectoryList({
 }: TrajectoryListProps) {
   const [activeTab, setActiveTab] = useState<Tab>("active");
 
-  /** Track IDs confirmed dead to avoid re-checking sandbox status */
-  const confirmedDeadRef = useRef<Set<string>>(new Set());
+  useProjectRevision(project, {
+    invalidatePrefixes: [queryKeys.trajectories.all(project)],
+  });
 
   /** Fetch trajectory list with polling */
   const trajectoriesQuery = useQuery({
     queryKey: queryKeys.trajectories.all(project),
     queryFn: async () => {
       const response = await fetch(
-        `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
+        `/api/trajectories?project=${encodeURIComponent(project)}`,
       );
       if (!response.ok) {
         throw new Error("Failed to fetch trajectories");
       }
       const data: Trajectory[] = await response.json();
-
-      /** Check liveness for candidates not already confirmed dead */
-      const candidates = data
-        .filter((trace) => isPossiblyLive(trace))
-        .map((trace) => trace.id)
-        .filter((traceId) => !confirmedDeadRef.current.has(traceId));
-
-      let liveIds = new Set<string>();
-      if (candidates.length > 0) {
-        liveIds = await checkLiveTrajectories(candidates, project);
-        for (const traceId of candidates) {
-          if (!liveIds.has(traceId)) {
-            confirmedDeadRef.current.add(traceId);
-          }
-        }
-      }
-
-      return { trajectories: data, liveIds };
+      return { trajectories: data, liveIds: new Set<string>() };
     },
     initialData: {
       trajectories: initialTrajectories,
       liveIds: new Set<string>(),
-    },
-    refetchInterval: (query) => {
-      const data = normalizeTrajectoryListData(query.state.data);
-      const hasLiveCandidates = data.trajectories.some((trace) =>
-        isPossiblyLive(trace),
-      );
-      return hasLiveCandidates ? LIST_POLL_MS : false;
     },
     staleTime: 0,
   });
@@ -201,16 +180,32 @@ export function TrajectoryList({
     normalizedQueryData.trajectories.length > 0
       ? normalizedQueryData.trajectories
       : initialTrajectories;
-  const liveIds = normalizedQueryData.liveIds;
+  const candidateIds = useMemo(
+    () =>
+      trajectories
+        .filter((trace) => isPossiblyLive(trace))
+        .map((trace) => trace.id)
+        .sort(),
+    [trajectories],
+  );
+
+  const liveIdsQuery = useQuery({
+    queryKey: queryKeys.trajectories.live(project, candidateIds),
+    queryFn: () => checkLiveTrajectories(candidateIds, project),
+    initialData: new Set<string>(),
+    enabled: candidateIds.length > 0,
+    refetchInterval: candidateIds.length > 0 ? LIST_POLL_MS : false,
+    staleTime: 0,
+  });
+
+  const liveIds = liveIdsQuery.data ?? normalizedQueryData.liveIds;
 
   const { activeTraces, failedTraces } = useMemo(() => {
     const active: Trajectory[] = [];
     const failed: Trajectory[] = [];
     for (const trace of trajectories) {
-      const hasScore = trace.finalPassed > 0;
-      const hasSubstantialWork = trace.commits.length >= 3;
       const live = liveIds.has(trace.id);
-      if (hasScore || hasSubstantialWork || live) {
+      if (isTrajectoryActive(trace, { live })) {
         active.push(trace);
       } else {
         failed.push(trace);
@@ -321,19 +316,18 @@ export function TrajectoryList({
 
                   {/* Trace rows */}
                   {traces.map((trace) => {
-                    const lastCommit = trace.commits[trace.commits.length - 1];
-                    const finalPassed = lastCommit?.totalPassed ?? 0;
+                    const finalPassed = trace.finalPassed;
                     const totalTests = Math.max(
-                      trace.suites
-                        ? computeTotalTests(trace.suites)
-                        : TOTAL_TESTS,
+                      trace.totalTests > 0
+                        ? trace.totalTests
+                        : trace.suites
+                          ? computeTotalTests(trace.suites)
+                          : TOTAL_TESTS,
                       finalPassed,
                     );
                     const pct =
                       totalTests > 0 ? (finalPassed / totalTests) * 100 : 0;
-                    const evalCount = lastCommit?.evalId
-                      ? Number(lastCommit.evalId)
-                      : 0;
+                    const evalCount = trace.evalCount ?? 0;
                     const live = liveIds.has(trace.id);
 
                     return (

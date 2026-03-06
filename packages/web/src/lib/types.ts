@@ -168,6 +168,10 @@ export type Trajectory = {
   model: string;
   environment: string;
   commits: Commit[];
+  /** Canonical total number of recorded parts for the run */
+  totalParts?: number;
+  /** Number of completed evaluations observed for the run */
+  evalCount?: number;
   totalTests: number;
   startedAt: string;
   duration: string;

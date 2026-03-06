@@ -7,12 +7,14 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import {
   S3Client,
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { spawn } from "node:child_process";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { cookies } from "next/headers";
+import { clearCache } from "./cache";
 import { formatError, sqlLiteral } from "./utils";
 
 let warnedLegacyBucket = false;
@@ -23,9 +25,52 @@ const initPromises = new Map<string, Promise<DuckDBInstance>>();
 const syncInFlight = new Set<string>();
 const lastSyncTime = new Map<string, number>();
 const SYNC_MIN_INTERVAL_MS = 30_000;
+const SUMMARY_REVISION_POLL_MS = 5_000;
 
 const PROJECT_COOKIE = "envoi:project";
 const PROJECTS_JSON_KEY = "projects.json";
+const TRAJECTORY_SUMMARY_FILENAME = "trajectory_summary.parquet";
+const EVALUATION_SUMMARY_FILENAME = "evaluation_summary.parquet";
+const SUMMARY_MANIFEST_FILE = "manifest.json";
+
+export type SummaryManifestFile = {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+};
+
+export type SummaryManifest = {
+  revision: string;
+  publishedAt: string;
+  trajectorySummary: SummaryManifestFile;
+  evaluationSummary: SummaryManifestFile;
+};
+
+export type SummaryRevisionStatus = {
+  hasManifest: boolean;
+  inSync: boolean;
+  s3Revision?: string;
+  loadedRevision?: string;
+  lastCheckedAt?: string;
+  lastLoadedAt?: string;
+  publishedAt?: string;
+  revisionLagMs: number;
+  refreshDurationMs?: number;
+};
+
+type SummaryRevisionState = {
+  hasManifest: boolean;
+  s3Revision?: string;
+  loadedRevision?: string;
+  manifest?: SummaryManifest;
+  manifestEtag?: string;
+  lastCheckedAtMs?: number;
+  lastLoadedAtMs?: number;
+  refreshDurationMs?: number;
+};
+
+const summaryRevisionStates = new Map<string, SummaryRevisionState>();
+const summaryRevisionInFlight = new Map<string, Promise<SummaryRevisionStatus>>();
 
 function dbPath(project: string): string {
   return path.resolve(process.cwd(), ".cache", "duckdb", `${project}.duckdb`);
@@ -81,6 +126,212 @@ function trajectorySummaryPath(project: string): string {
 
 function evaluationSummaryPath(project: string): string {
   return path.join(summaryDir(project), "evaluation_summary.parquet");
+}
+
+function summaryManifestPath(project: string): string {
+  return path.join(summaryDir(project), SUMMARY_MANIFEST_FILE);
+}
+
+function summaryObjectKey(project: string, filename: string): string {
+  return `project/${project}/trajectories/summaries/${filename}`;
+}
+
+function getSummaryRevisionState(project: string): SummaryRevisionState {
+  const existing = summaryRevisionStates.get(project);
+  if (existing) {
+    return existing;
+  }
+  const created: SummaryRevisionState = {
+    hasManifest: false,
+  };
+  summaryRevisionStates.set(project, created);
+  return created;
+}
+
+function formatRevisionTimestamp(value?: number): string | undefined {
+  if (!value || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return new Date(value).toISOString();
+}
+
+function readErrorName(error: unknown): string {
+  if (error instanceof Error) {
+    return error.name;
+  }
+  if (typeof error === "object" && error !== null && "name" in error) {
+    return typeof error.name === "string" ? error.name : "";
+  }
+  return "";
+}
+
+function readErrorStatusCode(error: unknown): number | undefined {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("$metadata" in error) ||
+    typeof error.$metadata !== "object" ||
+    error.$metadata === null ||
+    !("httpStatusCode" in error.$metadata)
+  ) {
+    return undefined;
+  }
+  return typeof error.$metadata.httpStatusCode === "number"
+    ? error.$metadata.httpStatusCode
+    : undefined;
+}
+
+function buildSummaryRevisionStatus(
+  project: string,
+): SummaryRevisionStatus {
+  const state = getSummaryRevisionState(project);
+  const inSync =
+    !!state.loadedRevision &&
+    !!state.s3Revision &&
+    state.loadedRevision === state.s3Revision;
+  let revisionLagMs = 0;
+  if (!inSync && state.manifest?.publishedAt) {
+    const publishedAtMs = new Date(state.manifest.publishedAt).getTime();
+    if (!Number.isNaN(publishedAtMs)) {
+      revisionLagMs = Math.max(0, Date.now() - publishedAtMs);
+    }
+  }
+  return {
+    hasManifest: state.hasManifest,
+    inSync,
+    s3Revision: state.s3Revision,
+    loadedRevision: state.loadedRevision,
+    lastCheckedAt: formatRevisionTimestamp(state.lastCheckedAtMs),
+    lastLoadedAt: formatRevisionTimestamp(state.lastLoadedAtMs),
+    publishedAt: state.manifest?.publishedAt,
+    revisionLagMs,
+    refreshDurationMs: state.refreshDurationMs,
+  };
+}
+
+function isSummaryManifestFile(
+  file: SummaryManifestFile | undefined,
+): file is SummaryManifestFile {
+  return (
+    !!file &&
+    typeof file.path === "string" &&
+    file.path.length > 0 &&
+    typeof file.sizeBytes === "number" &&
+    Number.isFinite(file.sizeBytes) &&
+    file.sizeBytes >= 0 &&
+    typeof file.sha256 === "string" &&
+    file.sha256.length > 0
+  );
+}
+
+function parseSummaryManifest(value: string): SummaryManifest | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    const revision =
+      "revision" in parsed && typeof parsed.revision === "string"
+        ? parsed.revision
+        : undefined;
+    const publishedAt =
+      "published_at" in parsed && typeof parsed.published_at === "string"
+        ? parsed.published_at
+        : undefined;
+    const identities =
+      "identities" in parsed &&
+      typeof parsed.identities === "object" &&
+      parsed.identities !== null
+        ? parsed.identities
+        : undefined;
+    const trajectorySource =
+      "trajectory_summary" in parsed &&
+      typeof parsed.trajectory_summary === "object" &&
+      parsed.trajectory_summary !== null
+        ? parsed.trajectory_summary
+        : identities &&
+            typeof identities === "object" &&
+            TRAJECTORY_SUMMARY_FILENAME in identities &&
+            typeof identities[TRAJECTORY_SUMMARY_FILENAME] === "object" &&
+            identities[TRAJECTORY_SUMMARY_FILENAME] !== null
+          ? identities[TRAJECTORY_SUMMARY_FILENAME]
+          : undefined;
+    const evaluationSource =
+      "evaluation_summary" in parsed &&
+      typeof parsed.evaluation_summary === "object" &&
+      parsed.evaluation_summary !== null
+        ? parsed.evaluation_summary
+        : identities &&
+            typeof identities === "object" &&
+            EVALUATION_SUMMARY_FILENAME in identities &&
+            typeof identities[EVALUATION_SUMMARY_FILENAME] === "object" &&
+            identities[EVALUATION_SUMMARY_FILENAME] !== null
+          ? identities[EVALUATION_SUMMARY_FILENAME]
+          : undefined;
+    const trajectorySummary =
+      trajectorySource && typeof trajectorySource === "object"
+        ? {
+            path:
+              "path" in trajectorySource &&
+              typeof trajectorySource.path === "string"
+                ? trajectorySource.path
+                : TRAJECTORY_SUMMARY_FILENAME,
+            sizeBytes:
+              "size_bytes" in trajectorySource &&
+              typeof trajectorySource.size_bytes === "number"
+                ? trajectorySource.size_bytes
+                : "sizeBytes" in trajectorySource &&
+                    typeof trajectorySource.sizeBytes === "number"
+                  ? trajectorySource.sizeBytes
+                  : -1,
+            sha256:
+              "sha256" in trajectorySource &&
+              typeof trajectorySource.sha256 === "string"
+                ? trajectorySource.sha256
+                : "",
+          }
+        : undefined;
+    const evaluationSummary =
+      evaluationSource && typeof evaluationSource === "object"
+        ? {
+            path:
+              "path" in evaluationSource &&
+              typeof evaluationSource.path === "string"
+                ? evaluationSource.path
+                : EVALUATION_SUMMARY_FILENAME,
+            sizeBytes:
+              "size_bytes" in evaluationSource &&
+              typeof evaluationSource.size_bytes === "number"
+                ? evaluationSource.size_bytes
+                : "sizeBytes" in evaluationSource &&
+                    typeof evaluationSource.sizeBytes === "number"
+                  ? evaluationSource.sizeBytes
+                  : -1,
+            sha256:
+              "sha256" in evaluationSource &&
+              typeof evaluationSource.sha256 === "string"
+                ? evaluationSource.sha256
+                : "",
+          }
+        : undefined;
+
+    if (
+      !revision ||
+      !publishedAt ||
+      !isSummaryManifestFile(trajectorySummary) ||
+      !isSummaryManifestFile(evaluationSummary)
+    ) {
+      return undefined;
+    }
+    return {
+      revision,
+      publishedAt,
+      trajectorySummary,
+      evaluationSummary,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function getPrefix(): string {
@@ -181,6 +432,176 @@ function awsEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function validateSummaryFilename(
+  file: SummaryManifestFile,
+  expectedName: string,
+): string {
+  const normalized = path.posix.basename(file.path);
+  if (normalized !== expectedName) {
+    throw new Error(
+      `[db] Invalid summary manifest path: expected ${expectedName}, got ${file.path}`,
+    );
+  }
+  return normalized;
+}
+
+async function fetchSummaryManifestFromS3(
+  project: string,
+): Promise<SummaryManifest | undefined> {
+  if (!isS3Configured()) {
+    return undefined;
+  }
+
+  const state = getSummaryRevisionState(project);
+  const key = summaryObjectKey(project, SUMMARY_MANIFEST_FILE);
+  const bucket = getPrefix();
+
+  try {
+    const head = await getS3Client().send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      }),
+    );
+    const nextEtag =
+      typeof head.ETag === "string" ? head.ETag.replaceAll('"', "") : undefined;
+    if (
+      state.manifest &&
+      nextEtag &&
+      state.manifestEtag &&
+      nextEtag === state.manifestEtag
+    ) {
+      state.hasManifest = true;
+      state.s3Revision = state.manifest.revision;
+      return state.manifest;
+    }
+
+    const response = await getS3Client().send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      }),
+    );
+    const body = await response.Body?.transformToString("utf-8");
+    const manifest = body ? parseSummaryManifest(body) : undefined;
+    if (!manifest) {
+      throw new Error(`[db] Invalid summary manifest for ${project}`);
+    }
+    state.hasManifest = true;
+    state.manifest = manifest;
+    state.manifestEtag = nextEtag;
+    state.s3Revision = manifest.revision;
+    return manifest;
+  } catch (error) {
+    const name = readErrorName(error);
+    const statusCode = readErrorStatusCode(error);
+    if (
+      name === "NoSuchKey" ||
+      name === "NotFound" ||
+      statusCode === 404
+    ) {
+      state.hasManifest = false;
+      state.manifest = undefined;
+      state.manifestEtag = undefined;
+      state.s3Revision = undefined;
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function writeS3ObjectToPath(
+  bucket: string,
+  key: string,
+  destPath: string,
+): Promise<void> {
+  const response = await getS3Client().send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    }),
+  );
+  const bytes = await response.Body?.transformToByteArray();
+  if (!bytes) {
+    throw new Error(`[db] Missing S3 object body: ${key}`);
+  }
+  await writeFile(destPath, Buffer.from(bytes));
+}
+
+async function syncSummaryFilesToLocal(
+  project: string,
+  manifest: SummaryManifest,
+): Promise<void> {
+  const bucket = getPrefix();
+  const summaryRoot = summaryDir(project);
+  await mkdir(summaryRoot, { recursive: true });
+
+  const trajectoryName = validateSummaryFilename(
+    manifest.trajectorySummary,
+    "trajectory_summary.parquet",
+  );
+  const evaluationName = validateSummaryFilename(
+    manifest.evaluationSummary,
+    "evaluation_summary.parquet",
+  );
+
+  const trajectoryDest = trajectorySummaryPath(project);
+  const evaluationDest = evaluationSummaryPath(project);
+  const manifestDest = summaryManifestPath(project);
+  const trajectoryTemp = `${trajectoryDest}.tmp-${manifest.revision}`;
+  const evaluationTemp = `${evaluationDest}.tmp-${manifest.revision}`;
+  const manifestTemp = `${manifestDest}.tmp-${manifest.revision}`;
+
+  await Promise.all([
+    writeS3ObjectToPath(
+      bucket,
+      summaryObjectKey(project, trajectoryName),
+      trajectoryTemp,
+    ),
+    writeS3ObjectToPath(
+      bucket,
+      summaryObjectKey(project, evaluationName),
+      evaluationTemp,
+    ),
+  ]);
+
+  await rename(trajectoryTemp, trajectoryDest);
+  await rename(evaluationTemp, evaluationDest);
+  await writeFile(
+    manifestTemp,
+    JSON.stringify(
+      {
+        revision: manifest.revision,
+        published_at: manifest.publishedAt,
+        trajectory_summary: {
+          path: manifest.trajectorySummary.path,
+          size_bytes: manifest.trajectorySummary.sizeBytes,
+          sha256: manifest.trajectorySummary.sha256,
+        },
+        evaluation_summary: {
+          path: manifest.evaluationSummary.path,
+          size_bytes: manifest.evaluationSummary.sizeBytes,
+          sha256: manifest.evaluationSummary.sha256,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  await rename(manifestTemp, manifestDest);
+}
+
+async function readLocalSummaryManifest(
+  project: string,
+): Promise<SummaryManifest | undefined> {
+  const manifestFile = summaryManifestPath(project);
+  if (!(await pathExists(manifestFile))) {
+    return undefined;
+  }
+  const body = await readFile(manifestFile, "utf-8");
+  return parseSummaryManifest(body);
+}
+
 /** Run a single `aws s3 sync` command as a child process, returning a promise. */
 function spawnS3Sync(
   source: string,
@@ -225,6 +646,7 @@ async function syncFromS3(
   }
   if (opts?.summaries !== false) {
     tasks.push(spawnS3Sync(source, dest, "summaries/*.parquet"));
+    tasks.push(spawnS3Sync(source, dest, `summaries/${SUMMARY_MANIFEST_FILE}`));
   }
   if (opts?.codeSnapshots !== false) {
     tasks.push(spawnS3Sync(source, dest, "*/code_snapshots.parquet"));
@@ -278,7 +700,9 @@ async function ensureSynced(project: string): Promise<void> {
       return;
     }
     syncInFlight.add(project);
-    syncFromS3(project)
+    syncFromS3(project, {
+      summaries: false,
+    })
       .then(async () => {
         lastSyncTime.set(project, Date.now());
         const inst = instances.get(project);
@@ -296,13 +720,26 @@ async function ensureSynced(project: string): Promise<void> {
   }
 
   // No local traces yet — sync summaries first for fast first paint.
-  await syncFromS3(project, {
-    traces: false,
-    summaries: true,
-    codeSnapshots: false,
-    logs: false,
-  });
-  const hasSummaries = await hasLocalSummaryCache(project);
+  let hasSummaries = false;
+  try {
+    const manifest = await fetchSummaryManifestFromS3(project);
+    if (manifest) {
+      await syncSummaryFilesToLocal(project, manifest);
+      hasSummaries = true;
+    }
+  } catch (error) {
+    console.warn("[db] Failed to hydrate summaries from manifest:", error);
+  }
+  if (!hasSummaries) {
+    await syncFromS3(project, {
+      traces: false,
+      summaries: true,
+      codeSnapshots: false,
+      logs: false,
+    });
+    hasSummaries = await hasLocalSummaryCache(project);
+  }
+
   if (!hasSummaries) {
     // Fallback for older projects without summary parquet files.
     await syncFromS3(project, {
@@ -316,7 +753,9 @@ async function ensureSynced(project: string): Promise<void> {
   // Continue full sync in background so detail views stay local and fast.
   if (!syncInFlight.has(project)) {
     syncInFlight.add(project);
-    syncFromS3(project)
+    syncFromS3(project, {
+      summaries: false,
+    })
       .then(async () => {
         lastSyncTime.set(project, Date.now());
         const inst = instances.get(project);
@@ -332,6 +771,97 @@ async function ensureSynced(project: string): Promise<void> {
       });
   }
   lastSyncTime.set(project, Date.now());
+}
+
+async function refreshSummaryRevision(
+  project: string,
+): Promise<SummaryRevisionStatus> {
+  const state = getSummaryRevisionState(project);
+  state.lastCheckedAtMs = Date.now();
+
+  const manifest = await fetchSummaryManifestFromS3(project);
+  if (!manifest) {
+    await syncFromS3(project, {
+      traces: false,
+      summaries: true,
+      codeSnapshots: false,
+      logs: false,
+    });
+    const inst = await getDb(project);
+    await refreshProjectTables(inst, project, { allowPartial: true });
+    state.lastLoadedAtMs = Date.now();
+    state.refreshDurationMs = undefined;
+    clearCache();
+    return buildSummaryRevisionStatus(project);
+  }
+
+  if (state.loadedRevision === manifest.revision) {
+    return buildSummaryRevisionStatus(project);
+  }
+
+  const startedAt = Date.now();
+  await syncSummaryFilesToLocal(project, manifest);
+  const inst = await getDb(project);
+  await refreshProjectTables(inst, project, { allowPartial: false });
+  clearCache();
+  state.loadedRevision = manifest.revision;
+  state.lastLoadedAtMs = Date.now();
+  state.refreshDurationMs = state.lastLoadedAtMs - startedAt;
+  return buildSummaryRevisionStatus(project);
+}
+
+async function ensureSummaryRevisionLoaded(
+  project: string,
+  opts?: { forceCheck?: boolean },
+): Promise<SummaryRevisionStatus> {
+  if (!isS3Configured()) {
+    return buildSummaryRevisionStatus(project);
+  }
+
+  const state = getSummaryRevisionState(project);
+  const now = Date.now();
+  if (
+    opts?.forceCheck !== true &&
+    typeof state.lastCheckedAtMs === "number" &&
+    now - state.lastCheckedAtMs < SUMMARY_REVISION_POLL_MS
+  ) {
+    return buildSummaryRevisionStatus(project);
+  }
+
+  const existing = summaryRevisionInFlight.get(project);
+  if (existing) {
+    return existing;
+  }
+
+  const next = refreshSummaryRevision(project)
+    .catch((error) => {
+      getSummaryRevisionState(project).lastCheckedAtMs = undefined;
+      throw error;
+    })
+    .finally(() => {
+      summaryRevisionInFlight.delete(project);
+    });
+  summaryRevisionInFlight.set(project, next);
+  return next;
+}
+
+export async function getSummaryRevisionStatus(
+  project?: string,
+  opts?: { forceCheck?: boolean },
+): Promise<SummaryRevisionStatus> {
+  const activeProject = await getActiveProject(project);
+  return ensureSummaryRevisionLoaded(activeProject, opts);
+}
+
+export function buildSummaryRevisionHeaders(
+  status: SummaryRevisionStatus,
+): Record<string, string> {
+  return {
+    "x-envoi-has-manifest": status.hasManifest ? "true" : "false",
+    "x-envoi-in-sync": status.inSync ? "true" : "false",
+    "x-envoi-s3-revision": status.s3Revision ?? "",
+    "x-envoi-loaded-revision": status.loadedRevision ?? "",
+  };
 }
 
 /** Glob for all trace parquet files — uses local cache if available, else S3. */
@@ -771,6 +1301,15 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
   }
 
   await refreshProjectTables(inst, project, { allowPartial: true });
+  const localManifest = await readLocalSummaryManifest(project);
+  if (localManifest) {
+    const state = getSummaryRevisionState(project);
+    state.hasManifest = true;
+    state.manifest = localManifest;
+    state.s3Revision = localManifest.revision;
+    state.loadedRevision = localManifest.revision;
+    state.lastLoadedAtMs = Date.now();
+  }
   return inst;
 }
 
@@ -866,11 +1405,11 @@ export async function refreshData(project?: string): Promise<void> {
   const activeProject = await getActiveProject(project);
   syncInFlight.delete(activeProject);
   lastSyncTime.delete(activeProject);
-  await ensureSynced(activeProject);
-  const inst = instances.get(activeProject);
-  if (inst) {
-    await refreshProjectTables(inst, activeProject, { allowPartial: true });
-  }
+  await syncFromS3(activeProject, {
+    summaries: false,
+  });
+  await ensureSummaryRevisionLoaded(activeProject, { forceCheck: true });
+  lastSyncTime.set(activeProject, Date.now());
 }
 
 /**

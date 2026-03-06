@@ -1272,6 +1272,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
 
   // Final passed from last completed evaluation (not running/queued)
   let finalPassed = 0;
+  const evalCount = deduped.filter(
+    (evalRec) =>
+      !!evalRec && evalRec.status === "completed" && evalRec.total > 0,
+  ).length;
   for (let index = deduped.length - 1; index >= 0; index--) {
     const evalRec = deduped[index];
     if (evalRec && evalRec.status === "completed" && evalRec.total > 0) {
@@ -1296,6 +1300,11 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
     model,
     environment: deriveEnvironment(first.environment, suites, first.task_params),
     commits: filteredCommits,
+    totalParts:
+      sortedRows.length > 0
+        ? Number(sortedRows[sortedRows.length - 1]?.part ?? 0) + 1
+        : 0,
+    evalCount,
     totalTests,
     startedAt: first.started_at ?? "",
     duration,
@@ -1455,8 +1464,6 @@ export function summaryRowToTrajectory(
     codeSnapshot: {},
     phase: totalTests > 0 ? passed / totalTests : 0,
     tokensUsed: toNumber(row.total_tokens),
-    /** Store eval count in evalId for the list view to read */
-    evalId: evalCount !== undefined ? String(evalCount) : undefined,
   };
 
   return {
@@ -1464,6 +1471,8 @@ export function summaryRowToTrajectory(
     model,
     environment,
     commits: [commit],
+    totalParts: toNumber(row.total_parts),
+    evalCount,
     totalTests,
     startedAt: row.started_at ?? "",
     duration: durationStr,
@@ -1503,6 +1512,10 @@ export type SummaryTableRow = {
   final_total: number;
   final_suite_results?: string;
   bundle_uri?: string;
+  best_passed?: number;
+  best_failed?: number;
+  best_total?: number;
+  eval_count?: number;
 };
 
 /**
@@ -1514,13 +1527,13 @@ export function summaryTableRowToTrajectory(
 ): Trajectory {
   const suites = parseSuites(row.suites);
   const params = parseTaskParams(row.task_params);
-  const passed = row.final_passed ?? 0;
-  const failed = row.final_failed ?? 0;
+  const passed = row.best_passed ?? row.final_passed ?? 0;
+  const failed = row.best_failed ?? row.final_failed ?? 0;
   // Safeguard: totalTests must be at least as large as passed count.
   // Old trajectories may have partial suite data from incomplete evals.
   const totalTests = Math.max(
     suites.length > 0 ? computeTotalTests(suites) : 0,
-    row.final_total ?? 0,
+    row.best_total ?? row.final_total ?? 0,
     passed,
   );
 
@@ -1578,6 +1591,8 @@ export function summaryTableRowToTrajectory(
     model,
     environment,
     commits: [commit],
+    totalParts: toNumber(row.total_parts),
+    evalCount: row.eval_count,
     totalTests,
     startedAt: row.started_at ?? "",
     duration,
@@ -1767,18 +1782,28 @@ export function buildCompareTrajectories(
       });
     }
 
+    const bestPassed = evals.reduce(
+      (best, evalRow) => Math.max(best, evalRow.passed),
+      0,
+    );
+
     trajectories.push({
       id: tableRow.trajectory_id,
       model,
       environment: tableRow.environment ?? "",
       commits,
+      totalParts: toNumber(tableRow.total_parts),
+      evalCount: evals.length,
       totalTests: mergedTotalTests,
       startedAt: tableRow.started_at ?? "",
       duration: "",
       totalTokens: toNumber(tableRow.total_tokens),
       cost: 0,
       params,
-      finalPassed: tableRow.final_passed ?? 0,
+      finalPassed:
+        bestPassed > 0
+          ? bestPassed
+          : (tableRow.best_passed ?? tableRow.final_passed ?? 0),
       suites: mergedSuites.length > 0 ? mergedSuites : undefined,
       agentHarness: agent || undefined,
       sessionEndReason: tableRow.session_end_reason ?? undefined,
@@ -1808,5 +1833,13 @@ export function toSummaryTableRow(row: Record<string, unknown>): SummaryTableRow
     final_total: Number(row.final_total ?? 0),
     final_suite_results: row.final_suite_results != undefined ? String(row.final_suite_results) : undefined,
     bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
+    best_passed:
+      row.best_passed != undefined ? Number(row.best_passed) : undefined,
+    best_failed:
+      row.best_failed != undefined ? Number(row.best_failed) : undefined,
+    best_total:
+      row.best_total != undefined ? Number(row.best_total) : undefined,
+    eval_count:
+      row.eval_count != undefined ? Number(row.eval_count) : undefined,
   };
 }

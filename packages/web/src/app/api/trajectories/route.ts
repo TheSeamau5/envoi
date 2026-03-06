@@ -7,6 +7,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAllTrajectories } from "@/lib/server/data";
+import {
+  buildSummaryRevisionHeaders,
+  getSummaryRevisionStatus,
+} from "@/lib/server/db";
 import { getProjectFromRequest } from "@/lib/server/project-context";
 
 export async function GET(request: NextRequest) {
@@ -38,8 +42,11 @@ export async function GET(request: NextRequest) {
       fresh,
       project,
     });
+    const revision = await getSummaryRevisionStatus(project);
 
-    return NextResponse.json(trajectories);
+    return NextResponse.json(trajectories, {
+      headers: buildSummaryRevisionHeaders(revision),
+    });
   } catch (error) {
     console.error("GET /api/trajectories error:", error);
     return NextResponse.json(

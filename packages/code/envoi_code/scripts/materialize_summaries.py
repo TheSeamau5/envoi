@@ -18,15 +18,19 @@ Usage (via CLI):
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -87,6 +91,15 @@ CODE_SNAPSHOTS_SCHEMA = pa.schema([
     ("added_lines", pa.string()),
 ])
 
+TRAJECTORY_SUMMARY_FILENAME = "trajectory_summary.parquet"
+EVALUATION_SUMMARY_FILENAME = "evaluation_summary.parquet"
+SUMMARY_MANIFEST_FILENAME = "manifest.json"
+SUMMARY_PUBLISH_FILENAMES = (
+    TRAJECTORY_SUMMARY_FILENAME,
+    EVALUATION_SUMMARY_FILENAME,
+    SUMMARY_MANIFEST_FILENAME,
+)
+
 
 # ---------------------------------------------------------------------------
 # Project path helpers
@@ -127,6 +140,55 @@ def resolve_dest_path_for_project(dest: str, project: str) -> Path:
     return dest_path / "project" / project / "trajectories" / "summaries"
 
 
+def normalize_publish_prefix(raw_value: str) -> str:
+    value = raw_value.strip()
+    if value.startswith("s3://"):
+        value = value[len("s3://") :]
+    value = value.strip("/")
+    if not value:
+        return ""
+    if "/" in value:
+        raise SystemExit(
+            "--publish-prefix must be a bucket name or s3://<bucket> (without path)",
+        )
+    return value
+
+
+def resolve_publish_prefix(args: argparse.Namespace) -> str | None:
+    raw_publish_prefix = getattr(args, "publish_prefix", None)
+    publish = bool(getattr(args, "publish", False) or raw_publish_prefix)
+    if not publish:
+        return None
+
+    raw_value = (
+        raw_publish_prefix
+        or os.environ.get("AWS_S3_PREFIX")
+        or os.environ.get("AWS_S3_BUCKET")
+        or ""
+    )
+    prefix = normalize_publish_prefix(raw_value)
+    if prefix:
+        return prefix
+
+    raise SystemExit(
+        "publish requested but no S3 prefix is configured; pass --publish-prefix "
+        "or set AWS_S3_PREFIX",
+    )
+
+
+def summary_artifact_key(project: str, filename: str) -> str:
+    return f"project/{project}/trajectories/summaries/{filename}"
+
+
+def get_s3_client():
+    return boto3.client(
+        "s3",
+        aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -149,6 +211,90 @@ def discover_trace_files(source: str) -> list[Path]:
         if trace_file.is_file():
             traces.append(trace_file)
     return traces
+
+
+def serialize_table_bytes(
+    rows: list[dict[str, Any]],
+    schema: pa.Schema,
+) -> bytes:
+    table = pa.Table.from_pylist(rows, schema=schema)
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def build_artifact_identity(data: bytes) -> dict[str, Any]:
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+    }
+
+
+def build_summary_manifest(
+    trajectory_summary_data: bytes,
+    evaluation_summary_data: bytes,
+    *,
+    published_at: str | None = None,
+) -> dict[str, Any]:
+    identities = {
+        TRAJECTORY_SUMMARY_FILENAME: build_artifact_identity(trajectory_summary_data),
+        EVALUATION_SUMMARY_FILENAME: build_artifact_identity(evaluation_summary_data),
+    }
+    revision = hashlib.sha256(
+        json.dumps(identities, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+    return {
+        "revision": revision,
+        "published_at": (
+            published_at
+            or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        ),
+        "identities": identities,
+    }
+
+
+def serialize_manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            manifest,
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def write_summary_outputs(
+    dest_path: Path,
+    outputs: dict[str, bytes],
+) -> None:
+    for filename in SUMMARY_PUBLISH_FILENAMES:
+        data = outputs[filename]
+        (dest_path / filename).write_bytes(data)
+
+
+def publish_summary_outputs(
+    prefix: str,
+    project: str,
+    outputs: dict[str, bytes],
+) -> None:
+    s3 = get_s3_client()
+    for filename in SUMMARY_PUBLISH_FILENAMES:
+        content_type = (
+            "application/json"
+            if filename.endswith(".json")
+            else "application/octet-stream"
+        )
+        s3.put_object(
+            Bucket=prefix,
+            Key=summary_artifact_key(project, filename),
+            Body=outputs[filename],
+            ContentType=content_type,
+        )
+        print(
+            f"[materialize] published s3://{prefix}/{summary_artifact_key(project, filename)}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -588,9 +734,14 @@ def materialize_command(args: argparse.Namespace) -> None:
     project = resolve_project_name(getattr(args, "project", None))
     source = args.source
     dest = args.dest
+    publish_prefix = resolve_publish_prefix(args)
     if project is not None:
         source = str(resolve_source_path_for_project(args.source, project))
         dest = str(resolve_dest_path_for_project(args.dest, project))
+    if publish_prefix is not None and project is None:
+        raise SystemExit(
+            "publishing summaries requires --project or ENVOI_PROJECT",
+        )
     extract_code = getattr(args, "extract_code", False)
     incremental = getattr(args, "incremental", False)
 
@@ -598,6 +749,8 @@ def materialize_command(args: argparse.Namespace) -> None:
 
     print(f"[materialize] project={project or 'none'} source={source} dest={dest}")
     print(f"[materialize] extract_code={extract_code} incremental={incremental}")
+    if publish_prefix is not None:
+        print(f"[materialize] publish_prefix={publish_prefix}")
 
     # Ensure destination directory exists
     dest_path = Path(dest)
@@ -606,15 +759,6 @@ def materialize_command(args: argparse.Namespace) -> None:
     # Discover trace files
     trace_files = discover_trace_files(source)
     print(f"[materialize] found {len(trace_files)} trace files")
-
-    if not trace_files and not incremental:
-        # Write empty summary files
-        empty_traj = pa.Table.from_pylist([], schema=TRAJECTORY_SUMMARY_SCHEMA)
-        pq.write_table(empty_traj, str(dest_path / "trajectory_summary.parquet"))
-        empty_eval = pa.Table.from_pylist([], schema=EVALUATION_SUMMARY_SCHEMA)
-        pq.write_table(empty_eval, str(dest_path / "evaluation_summary.parquet"))
-        print("[materialize] wrote empty summary files (no traces found)")
-        return
 
     # Load existing summaries for incremental mode
     known_ids: set[str] = set()
@@ -645,36 +789,51 @@ def materialize_command(args: argparse.Namespace) -> None:
     skipped = 0
     errors = 0
 
-    for trace_file in trace_files:
-        trajectory_id = trace_file.parent.name
+    if trace_files or incremental:
+        for trace_file in trace_files:
+            trajectory_id = trace_file.parent.name
 
-        if incremental and trajectory_id in known_ids:
-            skipped += 1
-            continue
+            if incremental and trajectory_id in known_ids:
+                skipped += 1
+                continue
 
-        try:
-            traj_row, eval_rows = process_trajectory(trace_file)
-            all_traj_rows.append(traj_row)
-            all_eval_rows.extend(eval_rows)
-            processed += 1
+            try:
+                traj_row, eval_rows = process_trajectory(trace_file)
+                all_traj_rows.append(traj_row)
+                all_eval_rows.extend(eval_rows)
+                processed += 1
 
-            if processed % 10 == 0:
-                print(f"[materialize] processed {processed} trajectories...")
+                if processed % 10 == 0:
+                    print(f"[materialize] processed {processed} trajectories...")
 
-        except Exception as err:
-            print(f"[materialize] error processing {trajectory_id}: {err}")
-            errors += 1
-            continue
+            except Exception as err:
+                print(f"[materialize] error processing {trajectory_id}: {err}")
+                errors += 1
+                continue
+    else:
+        print("[materialize] writing empty summary files (no traces found)")
 
-    # Write trajectory summary
-    traj_table = pa.Table.from_pylist(all_traj_rows, schema=TRAJECTORY_SUMMARY_SCHEMA)
-    traj_out = str(dest_path / "trajectory_summary.parquet")
-    pq.write_table(traj_table, traj_out)
-
-    # Write evaluation summary
-    eval_table = pa.Table.from_pylist(all_eval_rows, schema=EVALUATION_SUMMARY_SCHEMA)
-    eval_out = str(dest_path / "evaluation_summary.parquet")
-    pq.write_table(eval_table, eval_out)
+    trajectory_summary_data = serialize_table_bytes(
+        all_traj_rows,
+        TRAJECTORY_SUMMARY_SCHEMA,
+    )
+    evaluation_summary_data = serialize_table_bytes(
+        all_eval_rows,
+        EVALUATION_SUMMARY_SCHEMA,
+    )
+    manifest = build_summary_manifest(
+        trajectory_summary_data,
+        evaluation_summary_data,
+    )
+    manifest_data = serialize_manifest_bytes(manifest)
+    output_data = {
+        TRAJECTORY_SUMMARY_FILENAME: trajectory_summary_data,
+        EVALUATION_SUMMARY_FILENAME: evaluation_summary_data,
+        SUMMARY_MANIFEST_FILENAME: manifest_data,
+    }
+    write_summary_outputs(dest_path, output_data)
+    if publish_prefix is not None and project is not None:
+        publish_summary_outputs(publish_prefix, project, output_data)
 
     elapsed = time.monotonic() - start_time
     print(

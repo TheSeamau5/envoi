@@ -10,10 +10,11 @@
 
 import { Suspense } from "react";
 import type { Trajectory } from "@/lib/types";
-import { getAllTrajectories, getTrajectoryById } from "@/lib/server/data";
-import { SetupCompare } from "@/components/compare/setup-compare";
+import { getCompareTrajectories } from "@/lib/server/data";
+import { SetupsClient } from "@/components/setups/setups-client";
 import { LoadingSkeleton } from "@/components/loading-skeleton";
 import { requireActiveProject } from "@/lib/server/project-context";
+import { isTrajectoryActive } from "@/lib/trajectory-state";
 
 /** Strip a trajectory to only the fields SetupCompare needs */
 function slimTrajectory(trace: Trajectory): Trajectory {
@@ -39,14 +40,10 @@ export default async function SetupsPage() {
 }
 
 async function SetupsContent({ project }: { project: string }) {
-  const allTraces = await getAllTrajectories({ project });
-  const activeTraces = allTraces.filter((trace) => trace.finalPassed > 0);
+  const allTraces = await getCompareTrajectories({ project });
+  const activeTraces = allTraces
+    .filter((trace) => isTrajectoryActive(trace))
+    .map(slimTrajectory);
 
-  const fullTraces = (
-    await Promise.all(
-      activeTraces.map((trace) => getTrajectoryById(trace.id, { project })),
-    )
-  ).filter((trace) => trace !== undefined);
-
-  return <SetupCompare allTraces={fullTraces.map(slimTrajectory)} />;
+  return <SetupsClient allTraces={activeTraces} project={project} />;
 }

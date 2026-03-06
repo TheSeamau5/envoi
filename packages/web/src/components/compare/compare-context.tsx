@@ -27,6 +27,7 @@ import { computeTotalTests } from "@/lib/constants";
 import { queryKeys } from "@/lib/query-keys";
 import { usePersistedState } from "@/lib/storage";
 import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
+import { useProjectRevision } from "@/lib/use-project-revision";
 
 type SortKey = "score" | "date";
 
@@ -146,12 +147,16 @@ export function CompareProvider({
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [focusedIndex, setFocusedIndex] = useState(0);
 
+  useProjectRevision(project, {
+    invalidatePrefixes: [queryKeys.compare.all(project)],
+  });
+
   /** Keep trajectory list fresh; if first SSR pass is empty, poll until data arrives. */
   const allTracesQuery = useQuery({
     queryKey: queryKeys.compare.all(project),
     queryFn: async () => {
       const response = await fetch(
-        `/api/trajectories?project=${encodeURIComponent(project)}&bust=${Date.now()}`,
+        `/api/trajectories?project=${encodeURIComponent(project)}`,
       );
       if (!response.ok) {
         throw new Error("Failed to fetch trajectories");
@@ -162,10 +167,6 @@ export function CompareProvider({
     initialData: serverAllTraces,
     staleTime: 0,
     refetchOnMount: true,
-    refetchInterval: (query) => {
-      const traces = normalizeTrajectories(query.state.data);
-      return traces.length === 0 ? 5_000 : false;
-    },
   });
   const allTraces = useMemo(
     () => normalizeTrajectories(allTracesQuery.data ?? serverAllTraces),

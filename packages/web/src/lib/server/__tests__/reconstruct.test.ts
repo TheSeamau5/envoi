@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildEvaluationsFromRows,
+  buildCompareTrajectories,
   reconstructTrajectory,
   type ParquetRow,
 } from "../reconstruct";
@@ -617,5 +618,61 @@ describe("reconstructTrajectory", () => {
     expect(commitThree?.suiteState.c_testsuite).toBe(200);
     expect(commitThree?.suiteState.torture).toBe(370);
     expect(commitThree?.suiteState.wacct).toBe(304);
+  });
+});
+
+describe("buildCompareTrajectories", () => {
+  it("prefers completed eval scores over stale summary final_passed values", () => {
+    const trajectories = buildCompareTrajectories(
+      [
+        {
+          trajectory_id: "traj-compare",
+          environment: "c_compiler",
+          agent: "codex",
+          agent_model: "gpt-5",
+          started_at: "2026-01-01T00:00:00Z",
+          ended_at: "2026-01-01T00:10:00Z",
+          total_parts: 12,
+          total_turns: 2,
+          total_tokens: 1234,
+          final_passed: 0,
+          final_failed: 0,
+          final_total: 0,
+        },
+      ],
+      [
+        {
+          trajectory_id: "traj-compare",
+          environment: "c_compiler",
+          agent_model: "gpt-5",
+          eval_id: "eval-001",
+          target_commit: "commit-001",
+          trigger_part: 4,
+          trigger_turn: 1,
+          status: "completed",
+          passed: 845,
+          failed: 2440,
+          total: 3285,
+        },
+        {
+          trajectory_id: "traj-compare",
+          environment: "c_compiler",
+          agent_model: "gpt-5",
+          eval_id: "eval-002",
+          target_commit: "commit-002",
+          trigger_part: 8,
+          trigger_turn: 2,
+          status: "completed",
+          passed: 879,
+          failed: 2406,
+          total: 3285,
+        },
+      ],
+    );
+
+    expect(trajectories).toHaveLength(1);
+    expect(trajectories[0]?.finalPassed).toBe(879);
+    expect(trajectories[0]?.totalParts).toBe(12);
+    expect(trajectories[0]?.evalCount).toBe(2);
   });
 });

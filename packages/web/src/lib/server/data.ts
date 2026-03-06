@@ -17,6 +17,7 @@ import {
   freshLogsUri,
   query,
   hasSummaryTables,
+  getSummaryRevisionStatus,
 } from "./db";
 import { sqlLiteral } from "./utils";
 import {
@@ -207,6 +208,9 @@ export async function getAllTrajectories(opts?: {
   }
 
   const project = await resolveProject(opts?.project);
+  await getSummaryRevisionStatus(project, {
+    forceCheck: opts?.fresh === true,
+  });
   const fetch = async () => {
     if (await hasSummaryTables(project)) {
       return getAllTrajectoriesFromSummary(opts, project);
@@ -235,16 +239,58 @@ async function getAllTrajectoriesFromSummary(
   },
   project?: string,
 ): Promise<Trajectory[]> {
-  let sql = `SELECT * FROM trajectory_summary WHERE 1=1`;
+  let sql = `
+    WITH ranked_completed_evals AS (
+      SELECT
+        trajectory_id,
+        passed,
+        failed,
+        total,
+        finished_at,
+        COUNT(*) OVER (PARTITION BY trajectory_id) AS eval_count,
+        MAX(finished_at) OVER (PARTITION BY trajectory_id) AS last_eval_finished,
+        ROW_NUMBER() OVER (
+          PARTITION BY trajectory_id
+          ORDER BY passed DESC, total DESC, finished_at DESC, eval_id DESC
+        ) AS score_rank
+      FROM evaluation_summary
+      WHERE status = 'completed'
+    ),
+    best_eval AS (
+      SELECT
+        trajectory_id,
+        passed AS best_passed,
+        failed AS best_failed,
+        total AS best_total,
+        eval_count,
+        last_eval_finished
+      FROM ranked_completed_evals
+      WHERE score_rank = 1
+    )
+    SELECT
+      t.* EXCLUDE (ended_at),
+      CASE
+        WHEN b.last_eval_finished IS NOT NULL AND b.last_eval_finished > t.ended_at
+        THEN b.last_eval_finished
+        ELSE t.ended_at
+      END AS ended_at,
+      b.best_passed,
+      b.best_failed,
+      b.best_total,
+      b.eval_count
+    FROM trajectory_summary t
+    LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
+    WHERE 1=1
+  `;
 
   if (opts?.environment) {
-    sql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
+    sql += ` AND t.environment = '${sqlLiteral(opts.environment)}'`;
   }
   if (opts?.model) {
-    sql += ` AND agent_model = '${sqlLiteral(opts.model)}'`;
+    sql += ` AND t.agent_model = '${sqlLiteral(opts.model)}'`;
   }
 
-  sql += ` ORDER BY started_at DESC`;
+  sql += ` ORDER BY t.started_at DESC`;
 
   if (opts?.limit) {
     sql += ` LIMIT ${Number(opts.limit)}`;
@@ -637,6 +683,7 @@ export async function getEnvironments(project?: string): Promise<
   }
 
   const activeProject = await resolveProject(project);
+  await getSummaryRevisionStatus(activeProject);
   return cached(`environments:${activeProject}`, async () => {
     // Fast path: use summary table
     if (await hasSummaryTables(project)) {
@@ -695,6 +742,7 @@ export async function getEnvironments(project?: string): Promise<
 export async function getCompareTrajectories(opts?: {
   ids?: string[];
   environment?: string;
+  fresh?: boolean;
   project?: string;
 }): Promise<Trajectory[]> {
   if (!isS3Configured()) {
@@ -707,6 +755,9 @@ export async function getCompareTrajectories(opts?: {
   }
 
   const project = await resolveProject(opts?.project);
+  await getSummaryRevisionStatus(project, {
+    forceCheck: opts?.fresh === true,
+  });
 
   // Fast path: use summary + evaluation tables
   if (await hasSummaryTables(project)) {
@@ -762,6 +813,7 @@ async function getCompareTrajectoriesFromMaterialized(
   opts?: {
     ids?: string[];
     environment?: string;
+    fresh?: boolean;
   },
   project?: string,
 ): Promise<Trajectory[]> {
@@ -779,11 +831,14 @@ async function getCompareTrajectoriesFromMaterialized(
 
   // Load full trajectories in parallel, reusing the cached loadTrajectory path
   const results = await Promise.all(
-    ids.map((id) =>
-      cached(`trajectory:${project ?? "default"}:${id}`, () =>
+    ids.map((id) => {
+      if (opts?.fresh === true) {
+        return loadTrajectory(id, true, project);
+      }
+      return cached(`trajectory:${project ?? "default"}:${id}`, () =>
         loadTrajectory(id, false, project),
-      ),
-    ),
+      );
+    }),
   );
 
   return results.filter((traj): traj is Trajectory => traj !== undefined);
@@ -1369,6 +1424,7 @@ export async function getPortfolioEnvironmentData(
   }
 
   const activeProject = await resolveProject(project);
+  await getSummaryRevisionStatus(activeProject);
   return cached(`portfolio-env-data:${activeProject}`, async () => {
     try {
       const rawRows = await query(
@@ -1482,6 +1538,7 @@ export async function getParetoData(
   }
 
   const activeProject = await resolveProject(project);
+  await getSummaryRevisionStatus(activeProject);
   const cacheKey = `pareto-data:${activeProject}:${environment ?? "all"}`;
 
   return cached(cacheKey, async () => {

@@ -3075,9 +3075,6 @@ async def run_turn_loop(
             consecutive_no_progress_turns=consecutive_no_progress_turns,
         )
 
-    if end_reason == "agent_error":
-        end_reason = "part_limit"
-
     return TurnLoopResult(
         session_id=session_id,
         prompt_text=prompt_text,

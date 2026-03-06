@@ -10,6 +10,8 @@ import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
 import { SetupCompare } from "@/components/compare/setup-compare";
 import { queryKeys } from "@/lib/query-keys";
+import { isTrajectoryActive } from "@/lib/trajectory-state";
+import { useProjectRevision } from "@/lib/use-project-revision";
 
 type SetupsClientProps = {
   /** Summary-level trajectories from the server (fallback while loading) */
@@ -18,8 +20,12 @@ type SetupsClientProps = {
 };
 
 export function SetupsClient({ allTraces, project }: SetupsClientProps) {
+  useProjectRevision(project, {
+    invalidatePrefixes: [queryKeys.compare.all(project)],
+  });
+
   const compareQuery = useQuery({
-    queryKey: queryKeys.compare.all(project),
+    queryKey: queryKeys.compare.full(project),
     queryFn: async () => {
       const response = await fetch(
         `/api/compare?project=${encodeURIComponent(project)}`,
@@ -28,7 +34,7 @@ export function SetupsClient({ allTraces, project }: SetupsClientProps) {
         throw new Error("Failed to fetch trajectory data");
       }
       const data: Trajectory[] = await response.json();
-      return data.filter((trace) => trace.finalPassed > 0);
+      return data.filter((trace) => isTrajectoryActive(trace));
     },
   });
 

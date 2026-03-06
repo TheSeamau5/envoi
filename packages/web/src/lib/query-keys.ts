@@ -7,6 +7,8 @@
 export const queryKeys = {
   trajectories: {
     all: (project: string) => ["trajectories", project] as const,
+    live: (project: string, ids: string[]) =>
+      ["trajectories", project, "live", ...[...ids].sort()] as const,
     detail: (project: string, id: string) =>
       ["trajectories", project, id] as const,
     codeHistory: (project: string, id: string) =>
@@ -18,7 +20,11 @@ export const queryKeys = {
   },
   compare: {
     all: (project: string) => ["compare", project] as const,
+    full: (project: string) => ["compare", project, "full"] as const,
     byIds: (project: string, ids: string[]) =>
       ["compare", project, ...[...ids].sort()] as const,
+  },
+  revision: {
+    status: (project: string) => ["revision", project] as const,
   },
 } as const;

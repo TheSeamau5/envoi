@@ -7,6 +7,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getCompareTrajectories } from "@/lib/server/data";
+import {
+  buildSummaryRevisionHeaders,
+  getSummaryRevisionStatus,
+} from "@/lib/server/db";
 import { getProjectFromRequest } from "@/lib/server/project-context";
 
 export async function GET(request: NextRequest) {
@@ -22,23 +26,21 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const idsParam = searchParams.get("ids");
     const environment = searchParams.get("environment") ?? undefined;
+    const fresh = searchParams.has("bust");
 
     const ids = idsParam ? idsParam.split(",").filter(Boolean) : undefined;
-
-    if (!ids || ids.length === 0) {
-      return NextResponse.json(
-        { error: "ids parameter is required" },
-        { status: 400 },
-      );
-    }
 
     const trajectories = await getCompareTrajectories({
       ids,
       environment,
+      fresh,
       project,
     });
+    const revision = await getSummaryRevisionStatus(project);
 
-    return NextResponse.json(trajectories);
+    return NextResponse.json(trajectories, {
+      headers: buildSummaryRevisionHeaders(revision),
+    });
   } catch (error) {
     console.error("GET /api/compare error:", error);
     return NextResponse.json(

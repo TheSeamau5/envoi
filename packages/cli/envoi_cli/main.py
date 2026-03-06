@@ -145,6 +145,23 @@ def main() -> None:
                     "project/<name>/trajectories."
                 ),
             )
+            mat_parser.add_argument(
+                "--publish",
+                action="store_true",
+                default=False,
+                help=(
+                    "Upload summary artifacts to S3 after writing local output. "
+                    "Uses --publish-prefix or AWS_S3_PREFIX."
+                ),
+            )
+            mat_parser.add_argument(
+                "--publish-prefix",
+                default=None,
+                help=(
+                    "S3 bucket or s3://<bucket> override for summary publishing. "
+                    "Artifacts are written to project/<project>/trajectories/summaries/."
+                ),
+            )
 
     normalized_argv = normalize_code_argv(sys.argv[1:])
     is_code_command = bool(normalized_argv) and normalized_argv[0] == "code"
