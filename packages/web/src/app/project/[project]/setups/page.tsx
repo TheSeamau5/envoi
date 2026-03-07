@@ -10,9 +10,10 @@ export default async function ProjectSetupsPage({
   params,
 }: ProjectSetupsPageProps) {
   const { project } = await params;
+  const allTraces = await getAllTrajectories({ project });
   return (
     <SetupsClient
-      allTraces={dedupeTrajectoriesById(await getAllTrajectories({ project }))}
+      allTraces={dedupeTrajectoriesById(allTraces)}
       project={project}
     />
   );

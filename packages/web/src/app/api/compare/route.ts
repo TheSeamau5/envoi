@@ -27,22 +27,22 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const idsParam = searchParams.get("ids");
     const environment = searchParams.get("environment") ?? undefined;
-    const fresh = searchParams.has("bust");
+    const bustRequested = searchParams.has("bust");
 
     const ids = idsParam ? idsParam.split(",").filter(Boolean) : undefined;
 
     const trajectories = await getCompareTrajectories({
       ids,
       environment,
-      fresh,
+      fresh: false,
       project,
     });
     const status = await readProjectDataStatus(project, {
-      forceCheck: fresh,
-      mode: fresh ? "force" : "cached",
+      forceCheck: bustRequested,
+      mode: bustRequested ? "fresh" : "cached",
     });
     console.log(
-      `[api/compare] project=${project} fresh=${fresh} ids=${ids?.length ?? 0} environment=${environment ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
+      `[api/compare] project=${project} bust=${bustRequested} ids=${ids?.length ?? 0} environment=${environment ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
     );
 
     return NextResponse.json(trajectories, {

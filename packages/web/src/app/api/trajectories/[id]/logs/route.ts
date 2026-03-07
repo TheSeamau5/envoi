@@ -41,13 +41,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       request.nextUrl.searchParams.get("limit"),
       2500,
     );
-    const fresh = request.nextUrl.searchParams.has("bust");
-
     const rows = await getTrajectoryLogsById(id, {
       project,
       fromSeq,
       limit,
-      fresh,
+      fresh: false,
     });
 
     if (rows === undefined) {

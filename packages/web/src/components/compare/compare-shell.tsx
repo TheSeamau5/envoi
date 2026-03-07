@@ -85,7 +85,6 @@ export function CompareShell({ children, project }: CompareShellProps) {
     toggleTrace,
     getColorIndex,
     clearSelection,
-    isLoadingFull,
     computeTraceTotal,
   } = useCompare();
 
@@ -302,11 +301,6 @@ export function CompareShell({ children, project }: CompareShellProps) {
             </div>
           ) : (
             <div className="flex h-full flex-col">
-              {isLoadingFull ? (
-                <div className="mb-2 text-[12px] text-envoi-text-muted">
-                  Updating trajectory data...
-                </div>
-              ) : null}
               <div className="min-h-0 flex-1">{children}</div>
             </div>
           )}

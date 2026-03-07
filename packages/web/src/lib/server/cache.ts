@@ -11,8 +11,14 @@ type CacheEntry<T> = {
   timestamp: number;
 };
 
-const store = new Map<string, CacheEntry<unknown>>();
-const revalidating = new Set<string>();
+// Store on globalThis to survive Turbopack HMR re-evaluations in dev mode.
+type CacheGlobals = {
+  envoiCacheStore: Map<string, CacheEntry<unknown>>;
+  envoiCacheRevalidating: Set<string>;
+};
+const cg = globalThis as unknown as Partial<CacheGlobals>;
+const store = (cg.envoiCacheStore ??= new Map<string, CacheEntry<unknown>>());
+const revalidating = (cg.envoiCacheRevalidating ??= new Set<string>());
 const DEFAULT_TTL_MS = 5 * 60_000; // 5 minutes
 
 /**

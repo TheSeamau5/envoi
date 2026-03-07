@@ -190,13 +190,6 @@ type TrajectoryScore = {
   total: number;
 };
 
-type LiveTrajectoryMetrics = {
-  endedAt?: string;
-  totalParts?: number;
-  sessionEndReason?: string;
-  score?: TrajectoryScore;
-};
-
 function deriveScoreFromSuites(
   suitesValue: string | undefined,
 ): TrajectoryScore | undefined {
@@ -232,114 +225,6 @@ function deriveScoreFromSuites(
       passed,
       failed: Math.max(0, total - passed),
       total,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-async function loadLiveTrajectoryMetrics(
-  trajectoryId: string,
-  project: string,
-): Promise<LiveTrajectoryMetrics | undefined> {
-  const trace = await traceUri(trajectoryId, project);
-  const logs = await logsUri(trajectoryId, project);
-  try {
-    const traceRows = await query(
-      `
-      SELECT
-        timestamp,
-        part,
-        session_end_reason,
-        eval_events_delta
-      FROM read_parquet('${sqlLiteral(trace)}')
-      ORDER BY part
-      `,
-      project,
-    );
-    if (traceRows.length === 0) {
-      return undefined;
-    }
-
-    const logRows = await query(
-      `
-      SELECT MAX(ts) AS log_ended_at
-      FROM read_parquet('${sqlLiteral(logs)}')
-      `,
-      project,
-    );
-    let endedAt = String(traceRows[traceRows.length - 1]?.timestamp ?? "");
-    const logEndedAtValue = logRows[0]?.log_ended_at;
-    if (
-      logEndedAtValue != undefined
-      && String(logEndedAtValue) > endedAt
-    ) {
-      endedAt = String(logEndedAtValue);
-    }
-
-    let bestPassed = 0;
-    let bestFailed = 0;
-    let bestTotal = 0;
-    for (const row of traceRows) {
-      const rawEvents = row.eval_events_delta;
-      if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
-        continue;
-      }
-      try {
-        const events = JSON.parse(rawEvents);
-        if (!Array.isArray(events)) {
-          continue;
-        }
-        for (const event of events) {
-          if (typeof event !== "object" || event === null) {
-            continue;
-          }
-          if (
-            !("status" in event)
-            || event.status !== "completed"
-          ) {
-            continue;
-          }
-          const passed =
-            "passed" in event && typeof event.passed === "number"
-              ? event.passed
-              : 0;
-          const failed =
-            "failed" in event && typeof event.failed === "number"
-              ? event.failed
-              : 0;
-          const total =
-            "total" in event && typeof event.total === "number"
-              ? event.total
-              : 0;
-          if (passed > bestPassed || total > bestTotal) {
-            bestPassed = passed;
-            bestFailed = failed;
-            bestTotal = total;
-          }
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    const finalRow = traceRows[traceRows.length - 1];
-    if (!finalRow) {
-      return undefined;
-    }
-    return {
-      endedAt,
-      totalParts:
-        finalRow.part != undefined ? Number(finalRow.part) + 1 : undefined,
-      sessionEndReason:
-        finalRow.session_end_reason != undefined
-          ? String(finalRow.session_end_reason)
-          : undefined,
-      score: {
-        passed: bestPassed,
-        failed: bestFailed,
-        total: bestTotal,
-      },
     };
   } catch {
     return undefined;
@@ -559,27 +444,20 @@ async function loadTrajectory(
     }
 
     // If the evaluations table has data, inject it into the rows.
-    // Otherwise fall back to a full parquet read including eval_events_delta
-    // so we don't produce a broken 1-commit trajectory.
     if (evalRows.length > 0) {
       const evalsByPart = groupEvalsByPart(evalRows);
       return reconstructTrajectory(injectEvalData(rawRows, evalsByPart));
     }
 
-    // Evaluations table empty for this trajectory — fall back to full read
-    const fullRows = await query(
-      `
-      SELECT *
-      FROM read_parquet('${sqlLiteral(uri)}')
-      ORDER BY part
-    `,
-      project,
+    // Evaluations table empty — reconstruct without eval data.
+    // Do NOT fall back to SELECT * which includes eval_events_delta
+    // (100-300MB) and OOMs within the 960MB DuckDB limit.
+    return reconstructTrajectory(rawRows.map(toParquetRow));
+  } catch (error) {
+    console.error(
+      `[data] loadTrajectory failed id=${id} fresh=${fresh}:`,
+      error instanceof Error ? error.message : error,
     );
-    if (fullRows.length === 0) {
-      return undefined;
-    }
-    return reconstructTrajectory(fullRows.map(toParquetRow));
-  } catch {
     return undefined;
   }
 }

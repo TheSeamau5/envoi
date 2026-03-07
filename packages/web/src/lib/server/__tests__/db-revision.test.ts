@@ -170,6 +170,13 @@ describe("summary revision loading", () => {
     duckRunMock.mockClear();
     duckCreateMock.mockClear();
     clearCacheMock.mockClear();
+    // Clear globalThis singletons so each test starts fresh
+    const g = globalThis as Record<string, unknown>;
+    for (const key of Object.keys(g)) {
+      if (key.startsWith("envoi")) {
+        delete g[key];
+      }
+    }
     await cleanupProject(project);
   });
 

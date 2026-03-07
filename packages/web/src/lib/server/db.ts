@@ -26,15 +26,31 @@ import { clearCache } from "./cache";
 import { formatError, sqlLiteral } from "./utils";
 
 let warnedLegacyBucket = false;
-const instances = new Map<string, DuckDBInstance>();
-const initPromises = new Map<string, Promise<DuckDBInstance>>();
+
+// Store singletons on globalThis so they survive Turbopack HMR in dev mode.
+// Without this, each module re-evaluation creates fresh Maps and loses the
+// DuckDB instances warmed during instrumentation.
+type DbGlobals = {
+  envoiDbInstances: Map<string, DuckDBInstance>;
+  envoiDbInitPromises: Map<string, Promise<DuckDBInstance>>;
+  envoiSyncInFlight: Set<string>;
+  envoiRawSyncPromises: Map<string, Promise<void>>;
+  envoiLastSyncTime: Map<string, number>;
+  envoiAnalyticsViewsLock: Map<string, Promise<void>>;
+};
+const g = globalThis as unknown as Partial<DbGlobals>;
+const instances = (g.envoiDbInstances ??= new Map<string, DuckDBInstance>());
+const initPromises = (g.envoiDbInitPromises ??= new Map<string, Promise<DuckDBInstance>>());
 
 /** Tracks in-flight and recently completed syncs to prevent spam. */
-const syncInFlight = new Set<string>();
-const rawSyncPromises = new Map<string, Promise<void>>();
-const lastSyncTime = new Map<string, number>();
+const syncInFlight = (g.envoiSyncInFlight ??= new Set<string>());
+const rawSyncPromises = (g.envoiRawSyncPromises ??= new Map<string, Promise<void>>());
+const lastSyncTime = (g.envoiLastSyncTime ??= new Map<string, number>());
 const SYNC_MIN_INTERVAL_MS = 30_000;
 const SUMMARY_REVISION_POLL_MS = 5_000;
+
+/** Per-project mutex for createAnalyticsViews to prevent concurrent table rebuilds. */
+const analyticsViewsLock = (g.envoiAnalyticsViewsLock ??= new Map<string, Promise<void>>());
 
 const PROJECT_COOKIE = "envoi:project";
 const PROJECTS_JSON_KEY = "projects.json";
@@ -851,13 +867,10 @@ async function ensureSynced(project: string): Promise<void> {
   if (await hasLocalCache(project)) {
     console.log(`[db] ensureSynced project=${project} localCache=hit`);
     if (!lastSyncTime.has(project)) {
-      console.log(
-        `[db] ensureSynced project=${project} action=boot-sync-blocking`,
-      );
-      await startRawTraceSync(project, false, {
-        refreshTables: false,
-        rethrowErrors: true,
-      });
+      // Local cache exists — serve it immediately, sync in background.
+      // No blocking sync needed: the table build will use existing files.
+      lastSyncTime.set(project, Date.now());
+      void startRawTraceSync(project, false);
       return;
     }
     // Data exists locally — serve it now, maybe sync in background
@@ -866,9 +879,6 @@ async function ensureSynced(project: string): Promise<void> {
       syncInFlight.has(project) ||
       Date.now() - lastSync < SYNC_MIN_INTERVAL_MS
     ) {
-      console.log(
-        `[db] ensureSynced project=${project} action=serve-local syncInFlight=${syncInFlight.has(project)} lastSyncAgeMs=${Date.now() - lastSync}`,
-      );
       return;
     }
     void startRawTraceSync(project, false);
@@ -1251,12 +1261,25 @@ async function rebuildTrajectoriesFromTraceFiles(
   project: string,
   targetTable: string,
   conn: Awaited<ReturnType<DuckDBInstance["connect"]>>,
+  evaluationsTable?: string,
 ): Promise<void> {
   const files = await listTraceFiles(project);
   await conn.run(createTrajectoriesSchemaSql(targetTable));
+  if (evaluationsTable) {
+    await conn.run(createEvaluationsSchemaSql(evaluationsTable));
+  }
   for (const file of files) {
     const logsFile = path.join(path.dirname(file), "logs.parquet");
     const hasLogs = await pathExists(logsFile);
+    // Detect available columns — older parquet files may lack sandbox_id etc.
+    const colResult = await conn.run(
+      `SELECT name FROM parquet_schema('${file}')`,
+    );
+    const colRows = await colResult.getRowObjectsJson();
+    const columns = new Set(colRows.map((row) => String(row.name)));
+    const hasSandboxId = columns.has("sandbox_id");
+    const hasSandboxProvider = columns.has("sandbox_provider");
+
     const traceSummaryResult = await conn.run(`
       SELECT
         trajectory_id,
@@ -1271,8 +1294,8 @@ async function rebuildTrajectoriesFromTraceFiles(
         MAX(session_end_reason) AS session_end_reason,
         MIN(task_params) AS task_params,
         arg_max(suites, part) AS suites,
-        arg_max(sandbox_id, part) AS sandbox_id,
-        arg_max(sandbox_provider, part) AS sandbox_provider
+        ${hasSandboxId ? "arg_max(sandbox_id, part)" : "NULL"} AS sandbox_id,
+        ${hasSandboxProvider ? "arg_max(sandbox_provider, part)" : "NULL"} AS sandbox_provider
       FROM read_parquet('${file}')
       GROUP BY trajectory_id, environment, agent_model
     `);
@@ -1294,60 +1317,129 @@ async function rebuildTrajectoriesFromTraceFiles(
         endedAt = String(logEndedAt);
       }
     }
-    const evalResult = await conn.run(`
-      SELECT eval_events_delta
-      FROM read_parquet('${file}')
-      WHERE eval_events_delta IS NOT NULL
-        AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
-      ORDER BY part
-    `);
-    const evalRows = await evalResult.getRowObjectsJson();
+    // Compute best eval scores and populate evaluations table by streaming
+    // eval rows one at a time. The full eval_events_delta column can be
+    // 100-300 MB, exceeding the 960MB DuckDB limit. We get part numbers first,
+    // then read each row individually (parquet predicate pushdown).
+    // Skip entirely if the parquet lacks eval_events_delta (older format).
+    const hasEvalColumn = columns.has("eval_events_delta");
+    const trajectoryId = String(traceSummaryRow.trajectory_id ?? "");
+    const environment = String(traceSummaryRow.environment ?? "");
+    const agentModel = String(traceSummaryRow.agent_model ?? "");
     let bestPassed = 0;
     let bestFailed = 0;
     let bestTotal = 0;
-    const evalIds = new Set<string>();
-    for (const row of evalRows) {
-      const rawEvents = row.eval_events_delta;
-      if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
-        continue;
-      }
-      try {
-        const events = JSON.parse(rawEvents);
-        if (!Array.isArray(events)) {
+    let evalCount = 0;
+    if (hasEvalColumn) {
+    try {
+      const partsResult = await conn.run(`
+        SELECT part
+        FROM read_parquet('${file}')
+        WHERE eval_events_delta IS NOT NULL
+          AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
+        ORDER BY part
+      `);
+      const partsRows = await partsResult.getRowObjectsJson();
+
+      for (const partRow of partsRows) {
+        const partNum = Number(partRow.part);
+        const rowResult = await conn.run(`
+          SELECT eval_events_delta, turn
+          FROM read_parquet('${file}')
+          WHERE part = ${partNum}
+          LIMIT 1
+        `);
+        const rowData = await rowResult.getRowObjectsJson();
+        const rawEvents = rowData[0]?.eval_events_delta;
+        const turn = rowData[0]?.turn != undefined
+          ? Number(rowData[0].turn)
+          : undefined;
+        if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
           continue;
         }
-        for (const event of events) {
-          if (typeof event !== "object" || event === null) {
+        try {
+          const events = JSON.parse(rawEvents);
+          if (!Array.isArray(events)) {
             continue;
           }
-          if (!("status" in event) || event.status !== "completed") {
-            continue;
+          for (const event of events) {
+            if (typeof event !== "object" || event === null) {
+              continue;
+            }
+            const status = "status" in event ? String(event.status) : "";
+            const passed =
+              "passed" in event && typeof event.passed === "number"
+                ? event.passed
+                : 0;
+            const failed =
+              "failed" in event && typeof event.failed === "number"
+                ? event.failed
+                : 0;
+            const total =
+              "total" in event && typeof event.total === "number"
+                ? event.total
+                : 0;
+            const evalId =
+              "eval_id" in event && typeof event.eval_id === "string"
+                ? event.eval_id
+                : "";
+            const targetCommit =
+              "target_commit" in event &&
+              typeof event.target_commit === "string"
+                ? event.target_commit
+                : "";
+            const suiteResults =
+              "suite_results" in event
+                ? JSON.stringify(event.suite_results ?? {})
+                : "{}";
+            const finishedAt =
+              "finished_at" in event &&
+              typeof event.finished_at === "string"
+                ? event.finished_at
+                : undefined;
+
+            // Insert into evaluations table for detail page reconstruction
+            if (evaluationsTable && evalId) {
+              await conn.run(`
+                INSERT INTO ${evaluationsTable} VALUES (
+                  '${sqlLiteral(trajectoryId)}',
+                  '${sqlLiteral(environment)}',
+                  '${sqlLiteral(agentModel)}',
+                  ${partNum},
+                  ${turn ?? "NULL"},
+                  '${sqlLiteral(targetCommit)}',
+                  '${sqlLiteral(evalId)}',
+                  '${sqlLiteral(status)}',
+                  ${passed},
+                  ${failed},
+                  ${total},
+                  '${sqlLiteral(targetCommit)}',
+                  '${sqlLiteral(suiteResults)}',
+                  ${finishedAt ? `'${sqlLiteral(finishedAt)}'` : "NULL"}
+                )
+              `);
+            }
+
+            if (status === "completed") {
+              evalCount++;
+              if (passed > bestPassed || total > bestTotal) {
+                bestPassed = passed;
+                bestFailed = failed;
+                bestTotal = total;
+              }
+            }
           }
-          if ("eval_id" in event && typeof event.eval_id === "string") {
-            evalIds.add(event.eval_id);
-          }
-          const passed =
-            "passed" in event && typeof event.passed === "number"
-              ? event.passed
-              : 0;
-          const failed =
-            "failed" in event && typeof event.failed === "number"
-              ? event.failed
-              : 0;
-          const total =
-            "total" in event && typeof event.total === "number"
-              ? event.total
-              : 0;
-          if (passed > bestPassed || total > bestTotal) {
-            bestPassed = passed;
-            bestFailed = failed;
-            bestTotal = total;
-          }
+        } catch {
+          continue;
         }
-      } catch {
-        continue;
       }
+    } catch (scoreError) {
+      console.warn(
+        `[db] eval score query failed for ${file}:`,
+        formatError(scoreError),
+      );
     }
+    } // end if (hasEvalColumn)
 
     const values = {
       trajectory_id: String(traceSummaryRow.trajectory_id ?? ""),
@@ -1379,10 +1471,6 @@ async function rebuildTrajectoriesFromTraceFiles(
         traceSummaryRow.sandbox_provider != undefined
           ? String(traceSummaryRow.sandbox_provider)
           : "",
-      best_passed: bestPassed,
-      best_failed: bestFailed,
-      best_total: bestTotal,
-      eval_count: evalIds.size,
     };
 
     await conn.run(`
@@ -1401,16 +1489,39 @@ async function rebuildTrajectoriesFromTraceFiles(
         ${values.suites ? `'${sqlLiteral(values.suites)}'` : "NULL"},
         ${values.sandbox_id ? `'${sqlLiteral(values.sandbox_id)}'` : "NULL"},
         ${values.sandbox_provider ? `'${sqlLiteral(values.sandbox_provider)}'` : "NULL"},
-        ${values.best_passed},
-        ${values.best_failed},
-        ${values.best_total},
-        ${values.eval_count}
+        ${bestPassed > 0 ? bestPassed : "NULL"},
+        ${bestFailed > 0 ? bestFailed : "NULL"},
+        ${bestTotal > 0 ? bestTotal : "NULL"},
+        ${evalCount}
       )
     `);
   }
 }
 
 async function createAnalyticsViews(
+  inst: DuckDBInstance,
+  project: string,
+): Promise<void> {
+  // Serialize per-project to prevent concurrent table rebuilds from racing
+  // on shared temp table names (trajectories_next, evaluations_next).
+  const existing = analyticsViewsLock.get(project);
+  if (existing) {
+    await existing;
+  }
+  let resolve: () => void;
+  const lockPromise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  analyticsViewsLock.set(project, lockPromise);
+  try {
+    await createAnalyticsViewsInner(inst, project);
+  } finally {
+    analyticsViewsLock.delete(project);
+    resolve!();
+  }
+}
+
+async function createAnalyticsViewsInner(
   inst: DuckDBInstance,
   project: string,
 ): Promise<void> {
@@ -1441,9 +1552,12 @@ async function createAnalyticsViews(
     await conn.run(`DROP TABLE IF EXISTS ${rawTable}`);
     await conn.run(`DROP TABLE IF EXISTS ${summaryTable}`);
 
+    // When no evaluation summary exists, populate evaluations from raw traces.
+    const evalsTarget = hasEvaluationSummary ? undefined : nextEvaluationsTable;
+
     if (hasRawTraces && hasTrajectorySummary) {
       const summaryPath = sqlLiteral(trajectorySummaryPath(project));
-      await rebuildTrajectoriesFromTraceFiles(project, rawTable, conn);
+      await rebuildTrajectoriesFromTraceFiles(project, rawTable, conn, evalsTarget);
       await conn.run(`
         CREATE TABLE ${summaryTable} AS
         SELECT
@@ -1481,6 +1595,7 @@ async function createAnalyticsViews(
         project,
         nextTrajectoriesTable,
         conn,
+        evalsTarget,
       );
     } else if (hasTrajectorySummary) {
       const summaryPath = sqlLiteral(trajectorySummaryPath(project));
@@ -1512,6 +1627,7 @@ async function createAnalyticsViews(
         project,
         nextTrajectoriesTable,
         conn,
+        evalsTarget,
       );
     }
 
@@ -1536,7 +1652,8 @@ async function createAnalyticsViews(
           finished_at
         FROM read_parquet('${summaryPath}')
       `);
-    } else {
+    } else if (!evalsTarget) {
+      // Only create empty evaluations if rebuild didn't populate it
       await conn.run(createEvaluationsSchemaSql(nextEvaluationsTable));
     }
 
@@ -1642,18 +1759,9 @@ async function refreshProjectTables(
   );
 }
 
-async function createInstance(project: string): Promise<DuckDBInstance> {
-  await Promise.all([ensureDbDir(project), ensureSynced(project)]);
-  const projectDbPath = dbPath(project);
-
-  // Remove stale DB + WAL to avoid catalog errors on WAL replay.
-  // All data is rebuilt from parquet files, so nothing is lost.
-  await Promise.all([
-    rm(projectDbPath, { force: true }),
-    rm(`${projectDbPath}.wal`, { force: true }),
-  ]);
-
-  const inst = await DuckDBInstance.create(projectDbPath);
+async function configureInstance(
+  inst: DuckDBInstance,
+): Promise<void> {
   const cfgConn = await inst.connect();
   try {
     await cfgConn.run("SET memory_limit='960MB'");
@@ -1667,8 +1775,6 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
   }
 
   if (isS3Configured()) {
-    // Always load httpfs when S3 is configured — fresh reads bypass the
-    // local cache and go directly to S3 even when a cached copy exists.
     const conn = await inst.connect();
     try {
       await conn.run("INSTALL httpfs");
@@ -1682,14 +1788,60 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
       await conn.run(
         `SET s3_secret_access_key='${process.env.AWS_SECRET_ACCESS_KEY ?? ""}'`,
       );
-      // Disable ETag checks for live S3 reads. The parquet file is
-      // overwritten on every part during a live run, causing ETag
-      // mismatches that abort the query mid-read.
       await conn.run("SET unsafe_disable_etag_checks=true");
     } finally {
       conn.disconnectSync();
     }
   }
+}
+
+async function createInstance(project: string): Promise<DuckDBInstance> {
+  await Promise.all([ensureDbDir(project), ensureSynced(project)]);
+  const projectDbPath = dbPath(project);
+
+  // Try to reuse an existing DB file to avoid the ~3s table rebuild on restart.
+  // If the DB has a trajectories table with rows, it's usable as-is.
+  // Background sync will refresh tables when new data arrives.
+  if (await pathExists(projectDbPath)) {
+    try {
+      const inst = await DuckDBInstance.create(projectDbPath);
+      await configureInstance(inst);
+      const conn = await inst.connect();
+      try {
+        const result = await conn.run(
+          "SELECT COUNT(*) AS n FROM trajectories LIMIT 1",
+        );
+        const rows = await result.getRowObjectsJson();
+        if (rows.length > 0 && Number(rows[0]?.n) > 0) {
+          console.log(
+            `[db] createInstance project=${project} reused existing DB`,
+          );
+          markProjectTableRefresh(project);
+          // Refresh tables in background so data updates eventually.
+          void refreshProjectTables(inst, project, {
+            allowPartial: true,
+          }).then(() => {
+            markProjectTableRefresh(project);
+            clearCache();
+          });
+          return inst;
+        }
+      } finally {
+        conn.disconnectSync();
+      }
+    } catch {
+      // DB is corrupt or incompatible — fall through to fresh rebuild.
+    }
+  }
+
+  // Fresh rebuild: delete stale DB + WAL, create from scratch.
+  await Promise.all([
+    rm(projectDbPath, { force: true }),
+    rm(`${projectDbPath}.wal`, { force: true }),
+  ]);
+
+  const inst = await DuckDBInstance.create(projectDbPath);
+  await configureInstance(inst);
 
   await refreshProjectTables(inst, project, { allowPartial: true });
   markProjectTableRefresh(project);

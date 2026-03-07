@@ -120,6 +120,13 @@ describe("raw trace sync startup behavior", () => {
     duckRunMock.mockClear();
     duckCreateMock.mockClear();
     clearCacheMock.mockClear();
+    // Clear globalThis singletons so each test starts fresh
+    const g = globalThis as Record<string, unknown>;
+    for (const key of Object.keys(g)) {
+      if (key.startsWith("envoi")) {
+        delete g[key];
+      }
+    }
     vi.resetModules();
     await rm(tempRoot, { recursive: true, force: true });
     await mkdir(tempRoot, { recursive: true });
@@ -131,21 +138,14 @@ describe("raw trace sync startup behavior", () => {
     vi.resetModules();
   });
 
-  it("awaits the initial raw sync before first materialization on a cold boot", async () => {
+  it("serves existing local traces immediately without blocking on sync", async () => {
     await writeTraceFile(tempRoot, project, "traj-a");
     await writeTraceFile(tempRoot, project, "traj-c");
 
-    spawnMock.mockImplementation((...args: unknown[]) => {
+    spawnMock.mockImplementation(() => {
       const child = makeChild();
-      const spawnArgs = Array.isArray(args[1]) ? args[1] : [];
-      const include = typeof spawnArgs[7] === "string" ? spawnArgs[7] : "";
       setTimeout(() => {
-        void (async () => {
-          if (include === "*/trace.parquet") {
-            await writeTraceFile(tempRoot, project, "traj-b");
-          }
-          child.emit("close", 0);
-        })();
+        child.emit("close", 0);
       }, 25);
       return child;
     });
@@ -154,6 +154,7 @@ describe("raw trace sync startup behavior", () => {
     const db = await import("../db");
     await db.getDb(project);
 
+    // The two existing trace files should be loaded (traj-a and traj-c)
     const traceReads = duckRunMock.mock.calls
       .map((call) => String(call[0] ?? ""))
       .filter(
@@ -164,15 +165,12 @@ describe("raw trace sync startup behavior", () => {
     expect(traceReads.some((sql) => sql.includes("traj-a/trace.parquet"))).toBe(
       true,
     );
-    expect(traceReads.some((sql) => sql.includes("traj-b/trace.parquet"))).toBe(
-      true,
-    );
     expect(traceReads.some((sql) => sql.includes("traj-c/trace.parquet"))).toBe(
       true,
     );
   });
 
-  it("rejects the cold-boot sync when aws s3 sync exits non-zero", async () => {
+  it("succeeds even when background aws s3 sync fails", async () => {
     await writeTraceFile(tempRoot, project, "traj-a");
     await writeTraceFile(tempRoot, project, "traj-c");
 
@@ -188,7 +186,9 @@ describe("raw trace sync startup behavior", () => {
     process.chdir(tempRoot);
     const db = await import("../db");
 
-    await expect(db.getDb(project)).rejects.toThrow(/aws s3 sync failed/);
-    expect(duckCreateMock).not.toHaveBeenCalled();
+    // getDb should succeed using local cache even when sync fails in background
+    const inst = await db.getDb(project);
+    expect(inst).toBeDefined();
+    expect(duckCreateMock).toHaveBeenCalled();
   });
 });
