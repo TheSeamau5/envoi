@@ -3,7 +3,7 @@
  *
  * Returns code snapshots for each commit in the trajectory.
  * The response is a map from commit index (number) to CodeSnapshot.
- * Returns 404 if code_snapshots.parquet does not exist for this trajectory.
+ * Returns an empty object if code_snapshots.parquet does not exist.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -26,10 +26,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     const codeHistory = await getCodeHistory(id, project);
 
     if (codeHistory === undefined) {
-      return NextResponse.json(
-        { error: "Code history not available for this trajectory" },
-        { status: 404 },
-      );
+      return NextResponse.json({});
     }
 
     return NextResponse.json(codeHistory);

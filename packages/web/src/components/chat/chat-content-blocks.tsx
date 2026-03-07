@@ -6,6 +6,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import {
   ChevronDown,
   ChevronRight,
@@ -50,10 +51,13 @@ function ContentBlockRenderer({ block }: { block: ContentBlock }) {
       return <TableRenderer table={block} />;
     case "image":
       return (
-        <img
+        <Image
           src={block.src}
           alt={block.alt ?? "Chart"}
-          className="max-w-full rounded border border-envoi-border"
+          width={1200}
+          height={800}
+          unoptimized
+          className="h-auto max-w-full rounded border border-envoi-border"
         />
       );
     case "tool-call":

@@ -19,7 +19,7 @@
 
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle } from "react";
+import { useState, useRef, useCallback, useMemo, forwardRef, useImperativeHandle } from "react";
 import {
   Diamond,
   ArrowRight,
@@ -426,17 +426,13 @@ function FeedbackBanner({ commit }: { commit: Commit }) {
   );
 }
 
-/** Steps panel with fixed timeline and scrollable step list */
-export const StepsPanel = forwardRef<StepsPanelHandle, StepsPanelProps>(
-  function StepsPanel({ commit, selectedStepIndex, isFocused, onSelectStep }, ref) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const prevCommitIndex = useRef(commit.index);
-  const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
+/** Commit-scoped steps panel body */
+const CommitStepsPanel = forwardRef<StepsPanelHandle, StepsPanelProps>(
+  function CommitStepsPanel({ commit, selectedStepIndex, isFocused, onSelectStep }, ref) {
+    const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+    const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
 
-  /** Expose toggleExpand and scrollToStep to parent */
-  useImperativeHandle(ref, () => ({
-    toggleExpand: (index: number) => {
+    const toggleExpandedStep = useCallback((index: number) => {
       setExpandedSteps((prev) => {
         const next = new Set(prev);
         if (next.has(index)) {
@@ -446,88 +442,79 @@ export const StepsPanel = forwardRef<StepsPanelHandle, StepsPanelProps>(
         }
         return next;
       });
-    },
-    scrollToStep: (index: number) => {
-      const element = stepRefs.current.get(index);
-      if (element) {
-        element.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      }
-    },
-  }), []);
+    }, []);
 
-  /** Filter steps once for both timeline and list */
-  const filteredSteps = useMemo(
-    () => commit.steps.filter((step) => step.summary.length > 0 || step.detail.length > 0),
-    [commit.steps],
-  );
+    /** Expose toggleExpand and scrollToStep to parent */
+    useImperativeHandle(ref, () => ({
+      toggleExpand: (index: number) => {
+        toggleExpandedStep(index);
+      },
+      scrollToStep: (index: number) => {
+        const element = stepRefs.current.get(index);
+        if (element) {
+          element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+      },
+    }), [toggleExpandedStep]);
 
-  /** Reset scroll and expand state when commit changes */
-  useEffect(() => {
-    if (prevCommitIndex.current !== commit.index) {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = 0;
-      }
-      setExpandedSteps(new Set());
-      stepRefs.current.clear();
-    }
-    prevCommitIndex.current = commit.index;
-  }, [commit.index]);
+    /** Filter steps once for both timeline and list */
+    const filteredSteps = useMemo(
+      () => commit.steps.filter((step) => step.summary.length > 0 || step.detail.length > 0),
+      [commit.steps],
+    );
 
-  /** Handle step click — select + toggle expand */
-  const handleStepClick = useCallback((index: number) => {
-    onSelectStep(index);
-    setExpandedSteps((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) {
-        next.delete(index);
-      } else {
-        next.add(index);
-      }
-      return next;
-    });
-  }, [onSelectStep]);
+    /** Handle step click — select + toggle expand */
+    const handleStepClick = useCallback((index: number) => {
+      onSelectStep(index);
+      toggleExpandedStep(index);
+    }, [onSelectStep, toggleExpandedStep]);
 
-  /** Ref callback factory for step rows */
-  const getStepRef = useCallback((index: number) => {
-    return (element: HTMLDivElement | null) => {
-      if (element) {
-        stepRefs.current.set(index, element);
-      } else {
-        stepRefs.current.delete(index);
-      }
-    };
-  }, []);
+    /** Ref callback factory for step rows */
+    const getStepRef = useCallback((index: number) => {
+      return (element: HTMLDivElement | null) => {
+        if (element) {
+          stepRefs.current.set(index, element);
+        } else {
+          stepRefs.current.delete(index);
+        }
+      };
+    }, []);
 
-  return (
-    <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Fixed: feedback banner + timeline */}
-      <FeedbackBanner commit={commit} />
-      <StepsTimeline
-        steps={filteredSteps}
-        selectedStepIndex={selectedStepIndex}
-        onSelectStep={onSelectStep}
-      />
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Fixed: feedback banner + timeline */}
+        <FeedbackBanner commit={commit} />
+        <StepsTimeline
+          steps={filteredSteps}
+          selectedStepIndex={selectedStepIndex}
+          onSelectStep={onSelectStep}
+        />
 
-      {/* Scrollable step list */}
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden outline-none"
-      >
-        <div key={commit.index}>
-          {filteredSteps.map((step, stepIndex) => (
-            <StepRow
-              key={`${commit.index}-${stepIndex}`}
-              step={step}
-              stepIndex={stepIndex}
-              isSelected={selectedStepIndex === stepIndex}
-              isFocused={isFocused}
-              expanded={expandedSteps.has(stepIndex)}
-              onSelect={handleStepClick}
-              rowRef={getStepRef(stepIndex)}
-            />
-          ))}
+        {/* Scrollable step list */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden outline-none">
+          <div>
+            {filteredSteps.map((step, stepIndex) => (
+              <StepRow
+                key={`${commit.index}-${stepIndex}`}
+                step={step}
+                stepIndex={stepIndex}
+                isSelected={selectedStepIndex === stepIndex}
+                isFocused={isFocused}
+                expanded={expandedSteps.has(stepIndex)}
+                onSelect={handleStepClick}
+                rowRef={getStepRef(stepIndex)}
+              />
+            ))}
+          </div>
         </div>
       </div>
-    </div>
-  );
-});
+    );
+  },
+);
+
+/** Steps panel with fixed timeline and commit-scoped expansion state */
+export const StepsPanel = forwardRef<StepsPanelHandle, StepsPanelProps>(
+  function StepsPanel(props, ref) {
+    return <CommitStepsPanel key={props.commit.index} {...props} ref={ref} />;
+  },
+);

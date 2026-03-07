@@ -22,10 +22,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const fresh = request.nextUrl.searchParams.has("bust");
     const [rows, environmentRows, paretoPoints] = await Promise.all([
-      getPortfolioData(project),
-      getPortfolioEnvironmentData(project),
-      getParetoData(undefined, project),
+      getPortfolioData(project, { fresh }),
+      getPortfolioEnvironmentData(project, { fresh }),
+      getParetoData(undefined, project, { fresh }),
     ]);
 
     return NextResponse.json({ rows, environmentRows, paretoPoints });

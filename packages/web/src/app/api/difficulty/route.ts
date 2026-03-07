@@ -17,7 +17,8 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const data = await getDifficultyData(project);
+    const fresh = request.nextUrl.searchParams.has("bust");
+    const data = await getDifficultyData(project, { fresh });
     return NextResponse.json(data);
   } catch (error) {
     console.error("GET /api/difficulty error:", error);

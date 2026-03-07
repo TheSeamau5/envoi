@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from envoi_code.models import (
@@ -22,7 +23,6 @@ from envoi_code.models import (
 from envoi_code.sandbox.base import Sandbox
 from envoi_code.utils.git import create_part_checkpoint, get_changed_files
 from envoi_code.utils.helpers import (
-    iso_from_epoch_ms,
     redact_secrets,
     token_estimate,
     tprint,
@@ -190,14 +190,7 @@ def make_stream_part_callback(
                 if role_value in {"assistant", "user"}
                 else "assistant"
             )
-            event_timestamp_ms_value = stream_event.get(
-                "timestamp_ms",
-            )
-            event_timestamp_ms = (
-                event_timestamp_ms_value
-                if isinstance(event_timestamp_ms_value, int)
-                else int(time.time() * 1000)
-            )
+            event_timestamp_ms = int(time.time() * 1000)
             prev_ts = last_part_timestamp_ms_ref[0]
             duration_ms = (
                 event_timestamp_ms - prev_ts
@@ -282,9 +275,7 @@ def make_stream_part_callback(
                 session_id=session_id,
                 agent=agent_name,
                 part=absolute_part,
-                timestamp=iso_from_epoch_ms(
-                    event_timestamp_ms,
-                ),
+                timestamp=datetime.now(UTC).isoformat(),
                 role=role,
                 part_type=part_type,
                 item_type=item_type,

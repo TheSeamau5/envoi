@@ -13,24 +13,23 @@
 "use client";
 
 import { useState, useCallback, useRef, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
 import type {
   Trajectory,
   Suite,
-  CodeSnapshot,
   Commit,
   Step,
   ChangedFile,
-  TrajectoryLogRow,
 } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { usePersistedState } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import { setLayoutCookie } from "@/lib/cookies.client";
-import { queryKeys } from "@/lib/query-keys";
-import { useLiveTrajectory } from "@/lib/use-live-trajectory";
+import {
+  useProjectTrajectoryCodeHistory,
+  useProjectTrajectoryLogs,
+} from "@/lib/project-data";
 import { resolveTrajectoryLogs } from "@/lib/trajectory-log-mapping";
 import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 import {
@@ -50,6 +49,7 @@ import { LogsPanel } from "./logs-panel";
 
 type TrajectoryDetailProps = {
   trajectory: Trajectory;
+  isLive: boolean;
   project: string;
   /** Server-read initial values — eliminates FOUC on panel layout */
   initialRightPanelOpen: boolean;
@@ -65,13 +65,13 @@ type ActivePanel = "commits" | "steps";
 
 /** Main trajectory detail view with resizable split layout */
 export function TrajectoryDetail({
-  trajectory: initialTrajectory,
+  trajectory,
+  isLive,
   project,
   initialRightPanelOpen,
   initialDividerPct,
   initialGroupByTurn,
 }: TrajectoryDetailProps) {
-  const { trajectory, isLive } = useLiveTrajectory(initialTrajectory, project);
   const { commits } = trajectory;
   const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
   const totalTests = computeTotalTests(suites);
@@ -196,51 +196,21 @@ export function TrajectoryDetail({
   }, [commits, groupByTurn]);
 
   /** Code history — fetched lazily from code_snapshots.parquet via TanStack Query */
-  const codeHistoryQuery = useQuery({
-    queryKey: queryKeys.trajectories.codeHistory(project, trajectory.id),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/trajectories/${encodeURIComponent(trajectory.id)}/code-history?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        return null;
-      }
-      const data: Record<string, CodeSnapshot> = await response.json();
-      const mapped: Record<number, CodeSnapshot> = {};
-      for (const [key, snapshot] of Object.entries(data)) {
-        mapped[Number(key)] = snapshot;
-      }
-      return mapped;
-    },
-  });
+  const codeHistoryQuery = useProjectTrajectoryCodeHistory(
+    project,
+    trajectory.id,
+    true,
+  );
   const codeHistory = codeHistoryQuery.data ?? undefined;
 
   /** Structured logs — fetched lazily from logs.parquet via TanStack Query */
   const logsQueryLimit = 5000;
   const logsQueryFromSeq = 0;
-  const logsQuery = useQuery({
-    queryKey: queryKeys.trajectories.logs(
-      project,
-      trajectory.id,
-      logsQueryFromSeq,
-      logsQueryLimit,
-    ),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/trajectories/${encodeURIComponent(trajectory.id)}/logs?project=${encodeURIComponent(project)}&fromSeq=${logsQueryFromSeq}&limit=${logsQueryLimit}${isLive ? `&bust=${Date.now()}` : ""}`,
-      );
-      if (response.status === 404) {
-        return [] as TrajectoryLogRow[];
-      }
-      if (!response.ok) {
-        throw new Error("Failed to fetch trajectory logs");
-      }
-      const data: { rows?: TrajectoryLogRow[] } = await response.json();
-      return data.rows ?? [];
-    },
+  const logsQuery = useProjectTrajectoryLogs(project, trajectory.id, {
     enabled: rightTab === "logs",
-    refetchInterval: rightTab === "logs" && isLive ? 30_000 : false,
-    staleTime: 0,
+    isLive,
+    fromSeq: logsQueryFromSeq,
+    limit: logsQueryLimit,
   });
   const logsRows = useMemo(() => logsQuery.data ?? [], [logsQuery.data]);
   const resolvedLogs = useMemo(

@@ -18,7 +18,8 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const schema = await getSchemaInfo(project);
+    const fresh = request.nextUrl.searchParams.has("bust");
+    const schema = await getSchemaInfo(project, { fresh });
     return NextResponse.json(schema);
   } catch (error) {
     console.error("GET /api/schema error:", error);

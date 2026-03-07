@@ -38,7 +38,7 @@ export function ChatDrawer() {
       className="relative shrink-0 self-stretch overflow-hidden"
     >
       <section
-        className="absolute inset-y-0 right-0 flex h-full w-[440px] min-w-[440px] flex-col overflow-hidden border-l border-envoi-border bg-envoi-bg"
+        className="absolute inset-y-0 right-0 flex h-full w-110 min-w-110 flex-col overflow-hidden border-l border-envoi-border bg-envoi-bg"
         style={{ pointerEvents: isOpen ? "auto" : "none" }}
       >
         <ChatHeader />

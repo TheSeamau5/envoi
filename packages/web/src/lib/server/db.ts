@@ -23,6 +23,7 @@ const initPromises = new Map<string, Promise<DuckDBInstance>>();
 
 /** Tracks in-flight and recently completed syncs to prevent spam. */
 const syncInFlight = new Set<string>();
+const rawSyncPromises = new Map<string, Promise<void>>();
 const lastSyncTime = new Map<string, number>();
 const SYNC_MIN_INTERVAL_MS = 30_000;
 const SUMMARY_REVISION_POLL_MS = 5_000;
@@ -58,6 +59,18 @@ export type SummaryRevisionStatus = {
   refreshDurationMs?: number;
 };
 
+export type ProjectFreshnessMode = "cached" | "fresh" | "force";
+
+export type ProjectDataStatus = SummaryRevisionStatus & {
+  dataVersion: string;
+  summaryRevision?: string;
+  loadedSummaryRevision?: string;
+  lastRawSyncAt?: string;
+  lastTableRefreshAt?: string;
+  rawSyncInFlight: boolean;
+  summarySyncInFlight: boolean;
+};
+
 type SummaryRevisionState = {
   hasManifest: boolean;
   s3Revision?: string;
@@ -69,8 +82,15 @@ type SummaryRevisionState = {
   refreshDurationMs?: number;
 };
 
+type ProjectDataState = {
+  lastRawSyncAtMs?: number;
+  lastTableRefreshAtMs?: number;
+  dataVersion?: string;
+};
+
 const summaryRevisionStates = new Map<string, SummaryRevisionState>();
 const summaryRevisionInFlight = new Map<string, Promise<SummaryRevisionStatus>>();
+const projectDataStates = new Map<string, ProjectDataState>();
 
 function dbPath(project: string): string {
   return path.resolve(process.cwd(), ".cache", "duckdb", `${project}.duckdb`);
@@ -148,6 +168,16 @@ function getSummaryRevisionState(project: string): SummaryRevisionState {
   return created;
 }
 
+function getProjectDataState(project: string): ProjectDataState {
+  const existing = projectDataStates.get(project);
+  if (existing) {
+    return existing;
+  }
+  const created: ProjectDataState = {};
+  projectDataStates.set(project, created);
+  return created;
+}
+
 function formatRevisionTimestamp(value?: number): string | undefined {
   if (!value || !Number.isFinite(value)) {
     return undefined;
@@ -206,6 +236,49 @@ function buildSummaryRevisionStatus(
     publishedAt: state.manifest?.publishedAt,
     revisionLagMs,
     refreshDurationMs: state.refreshDurationMs,
+  };
+}
+
+function computeProjectDataVersion(project: string): string {
+  const summaryState = getSummaryRevisionState(project);
+  const projectState = getProjectDataState(project);
+  return JSON.stringify({
+    loadedRevision: summaryState.loadedRevision ?? "",
+    s3Revision: summaryState.s3Revision ?? "",
+    lastRawSyncAtMs: projectState.lastRawSyncAtMs ?? 0,
+    lastTableRefreshAtMs: projectState.lastTableRefreshAtMs ?? 0,
+  });
+}
+
+function markProjectTableRefresh(project: string): void {
+  const state = getProjectDataState(project);
+  state.lastTableRefreshAtMs = Date.now();
+  state.dataVersion = computeProjectDataVersion(project);
+}
+
+function markProjectRawSync(project: string): void {
+  const state = getProjectDataState(project);
+  state.lastRawSyncAtMs = Date.now();
+}
+
+function buildProjectDataStatus(project: string): ProjectDataStatus {
+  const summary = buildSummaryRevisionStatus(project);
+  const summaryState = getSummaryRevisionState(project);
+  const projectState = getProjectDataState(project);
+  const dataVersion =
+    projectState.dataVersion ?? computeProjectDataVersion(project);
+
+  return {
+    ...summary,
+    dataVersion,
+    summaryRevision: summaryState.s3Revision,
+    loadedSummaryRevision: summaryState.loadedRevision,
+    lastRawSyncAt: formatRevisionTimestamp(projectState.lastRawSyncAtMs),
+    lastTableRefreshAt: formatRevisionTimestamp(
+      projectState.lastTableRefreshAtMs,
+    ),
+    rawSyncInFlight: syncInFlight.has(project),
+    summarySyncInFlight: summaryRevisionInFlight.has(project),
   };
 }
 
@@ -663,6 +736,59 @@ async function syncFromS3(
   console.log(`[db] Background sync complete for ${project}`);
 }
 
+async function startRawTraceSync(
+  project: string,
+  force: boolean,
+): Promise<void> {
+  const state = getProjectDataState(project);
+  const now = Date.now();
+  if (
+    !force &&
+    typeof state.lastRawSyncAtMs === "number" &&
+    now - state.lastRawSyncAtMs < SYNC_MIN_INTERVAL_MS
+  ) {
+    console.log(
+      `[db] Raw sync skip project=${project} reason=throttled ageMs=${now - state.lastRawSyncAtMs}`,
+    );
+    return;
+  }
+
+  const existing = rawSyncPromises.get(project);
+  if (existing) {
+    console.log(`[db] Raw sync join project=${project} force=${force}`);
+    await existing;
+    return;
+  }
+
+  syncInFlight.add(project);
+  const startedAt = Date.now();
+  console.log(`[db] Raw sync start project=${project} force=${force}`);
+  const task = (async () => {
+    await syncFromS3(project, {
+      summaries: false,
+    });
+    markProjectRawSync(project);
+    lastSyncTime.set(project, Date.now());
+    const inst = await getDb(project);
+    await refreshProjectTables(inst, project, { allowPartial: true });
+    markProjectTableRefresh(project);
+    clearCache();
+    console.log(
+      `[db] Raw sync done project=${project} force=${force} durationMs=${Date.now() - startedAt}`,
+    );
+  })()
+    .catch((error) => {
+      console.warn("[db] Background sync failed:", error);
+    })
+    .finally(() => {
+      syncInFlight.delete(project);
+      rawSyncPromises.delete(project);
+    });
+
+  rawSyncPromises.set(project, task);
+  await task;
+}
+
 async function hasLocalCache(project: string): Promise<boolean> {
   const root = cacheDir(project);
   try {
@@ -691,33 +817,23 @@ async function ensureSynced(project: string): Promise<void> {
   await ensureCacheDir(project);
 
   if (await hasLocalCache(project)) {
+    console.log(`[db] ensureSynced project=${project} localCache=hit`);
     // Data exists locally — serve it now, maybe sync in background
     const lastSync = lastSyncTime.get(project) ?? 0;
     if (
       syncInFlight.has(project) ||
       Date.now() - lastSync < SYNC_MIN_INTERVAL_MS
     ) {
+      console.log(
+        `[db] ensureSynced project=${project} action=serve-local syncInFlight=${syncInFlight.has(project)} lastSyncAgeMs=${Date.now() - lastSync}`,
+      );
       return;
     }
-    syncInFlight.add(project);
-    syncFromS3(project, {
-      summaries: false,
-    })
-      .then(async () => {
-        lastSyncTime.set(project, Date.now());
-        const inst = instances.get(project);
-        if (inst) {
-          await refreshProjectTables(inst, project, { allowPartial: true });
-        }
-      })
-      .catch((error) => {
-        console.warn("[db] Background sync failed:", error);
-      })
-      .finally(() => {
-        syncInFlight.delete(project);
-      });
+    void startRawTraceSync(project, false);
     return;
   }
+
+  console.log(`[db] ensureSynced project=${project} localCache=miss`);
 
   // No local traces yet — sync summaries first for fast first paint.
   let hasSummaries = false;
@@ -748,27 +864,12 @@ async function ensureSynced(project: string): Promise<void> {
       codeSnapshots: false,
       logs: false,
     });
+    markProjectRawSync(project);
   }
 
   // Continue full sync in background so detail views stay local and fast.
   if (!syncInFlight.has(project)) {
-    syncInFlight.add(project);
-    syncFromS3(project, {
-      summaries: false,
-    })
-      .then(async () => {
-        lastSyncTime.set(project, Date.now());
-        const inst = instances.get(project);
-        if (inst) {
-          await refreshProjectTables(inst, project, { allowPartial: true });
-        }
-      })
-      .catch((error) => {
-        console.warn("[db] Background sync failed:", error);
-      })
-      .finally(() => {
-        syncInFlight.delete(project);
-      });
+    void startRawTraceSync(project, false);
   }
   lastSyncTime.set(project, Date.now());
 }
@@ -789,6 +890,7 @@ async function refreshSummaryRevision(
     });
     const inst = await getDb(project);
     await refreshProjectTables(inst, project, { allowPartial: true });
+    markProjectTableRefresh(project);
     state.lastLoadedAtMs = Date.now();
     state.refreshDurationMs = undefined;
     clearCache();
@@ -807,6 +909,7 @@ async function refreshSummaryRevision(
   state.loadedRevision = manifest.revision;
   state.lastLoadedAtMs = Date.now();
   state.refreshDurationMs = state.lastLoadedAtMs - startedAt;
+  markProjectTableRefresh(project);
   return buildSummaryRevisionStatus(project);
 }
 
@@ -853,16 +956,71 @@ export async function getSummaryRevisionStatus(
   return ensureSummaryRevisionLoaded(activeProject, opts);
 }
 
-export function buildSummaryRevisionHeaders(
-  status: SummaryRevisionStatus,
+export async function ensureProjectDataFreshness(
+  project?: string,
+  opts?: { mode?: ProjectFreshnessMode },
+): Promise<ProjectDataStatus> {
+  const activeProject = await getActiveProject(project);
+  const startedAt = Date.now();
+  await getDb(activeProject);
+  const mode = opts?.mode ?? "cached";
+  console.log(
+    `[db] ensureProjectDataFreshness project=${activeProject} mode=${mode}`,
+  );
+  if (mode === "force") {
+    await startRawTraceSync(activeProject, true);
+  } else if (mode === "fresh" && !syncInFlight.has(activeProject)) {
+    void startRawTraceSync(activeProject, false);
+  }
+  console.log(
+    `[db] ensureProjectDataFreshness done project=${activeProject} mode=${mode} durationMs=${Date.now() - startedAt}`,
+  );
+  return buildProjectDataStatus(activeProject);
+}
+
+export async function getProjectDataStatus(
+  project?: string,
+  opts?: { forceCheck?: boolean; mode?: ProjectFreshnessMode },
+): Promise<ProjectDataStatus> {
+  const activeProject = await getActiveProject(project);
+  const startedAt = Date.now();
+  await ensureProjectDataFreshness(activeProject, {
+    mode: opts?.mode ?? "fresh",
+  });
+  if (opts?.forceCheck === true) {
+    if ((opts?.mode ?? "fresh") === "force") {
+      await ensureSummaryRevisionLoaded(activeProject, {
+        forceCheck: true,
+      });
+    } else {
+      void ensureSummaryRevisionLoaded(activeProject, {
+        forceCheck: true,
+      });
+    }
+  }
+  console.log(
+    `[db] getProjectDataStatus project=${activeProject} mode=${opts?.mode ?? "fresh"} forceCheck=${opts?.forceCheck === true} durationMs=${Date.now() - startedAt}`,
+  );
+  return buildProjectDataStatus(activeProject);
+}
+
+export function buildProjectDataHeaders(
+  status: SummaryRevisionStatus | ProjectDataStatus,
 ): Record<string, string> {
+  const dataVersion =
+    "dataVersion" in status && typeof status.dataVersion === "string"
+      ? status.dataVersion
+      : "";
   return {
     "x-envoi-has-manifest": status.hasManifest ? "true" : "false",
     "x-envoi-in-sync": status.inSync ? "true" : "false",
     "x-envoi-s3-revision": status.s3Revision ?? "",
     "x-envoi-loaded-revision": status.loadedRevision ?? "",
+    "x-envoi-data-version": dataVersion,
   };
 }
+
+export const buildSummaryRevisionHeaders = buildProjectDataHeaders;
 
 /** Glob for all trace parquet files — uses local cache if available, else S3. */
 export async function allTracesGlob(project?: string): Promise<string> {
@@ -1015,7 +1173,13 @@ function createTrajectoriesSchemaSql(tableName: string): string {
       total_tokens BIGINT,
       session_end_reason VARCHAR,
       task_params VARCHAR,
-      suites VARCHAR
+      suites VARCHAR,
+      sandbox_id VARCHAR,
+      sandbox_provider VARCHAR,
+      best_passed INTEGER,
+      best_failed INTEGER,
+      best_total INTEGER,
+      eval_count INTEGER
     )
   `;
 }
@@ -1047,36 +1211,163 @@ async function rebuildTrajectoriesFromTraceFiles(
   conn: Awaited<ReturnType<DuckDBInstance["connect"]>>,
 ): Promise<void> {
   const files = await listTraceFiles(project);
-  if (files.length === 0) {
-    await conn.run(createTrajectoriesSchemaSql(targetTable));
-    return;
-  }
-
-  let firstTrajectory = true;
+  await conn.run(createTrajectoriesSchemaSql(targetTable));
   for (const file of files) {
-    const sql = `
+    const logsFile = path.join(path.dirname(file), "logs.parquet");
+    const hasLogs = await pathExists(logsFile);
+    const traceSummaryResult = await conn.run(`
       SELECT
         trajectory_id,
         environment,
         agent_model,
         MIN(agent) AS agent,
         MIN(started_at) AS started_at,
-        MAX(timestamp) AS ended_at,
+        MAX(timestamp) AS trace_ended_at,
         MAX(part) + 1 AS total_parts,
         MAX(turn) AS total_turns,
         SUM(content_token_estimate) AS total_tokens,
         MAX(session_end_reason) AS session_end_reason,
         MIN(task_params) AS task_params,
-        arg_max(suites, part) AS suites
+        arg_max(suites, part) AS suites,
+        arg_max(sandbox_id, part) AS sandbox_id,
+        arg_max(sandbox_provider, part) AS sandbox_provider
       FROM read_parquet('${file}')
       GROUP BY trajectory_id, environment, agent_model
-    `;
-    if (firstTrajectory) {
-      await conn.run(`CREATE TABLE ${targetTable} AS ${sql}`);
-      firstTrajectory = false;
+    `);
+    const traceSummaryRows = await traceSummaryResult.getRowObjectsJson();
+    const traceSummaryRow = traceSummaryRows[0];
+    if (!traceSummaryRow) {
       continue;
     }
-    await conn.run(`INSERT INTO ${targetTable} ${sql}`);
+
+    let endedAt = String(traceSummaryRow.trace_ended_at ?? "");
+    if (hasLogs) {
+      const logSummaryResult = await conn.run(`
+        SELECT MAX(ts) AS log_ended_at
+        FROM read_parquet('${logsFile}')
+      `);
+      const logSummaryRows = await logSummaryResult.getRowObjectsJson();
+      const logEndedAt = logSummaryRows[0]?.log_ended_at;
+      if (
+        logEndedAt !== undefined
+        && String(logEndedAt) > endedAt
+      ) {
+        endedAt = String(logEndedAt);
+      }
+    }
+    const evalResult = await conn.run(`
+      SELECT eval_events_delta
+      FROM read_parquet('${file}')
+      WHERE eval_events_delta IS NOT NULL
+        AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
+      ORDER BY part
+    `);
+    const evalRows = await evalResult.getRowObjectsJson();
+    let bestPassed = 0;
+    let bestFailed = 0;
+    let bestTotal = 0;
+    const evalIds = new Set<string>();
+    for (const row of evalRows) {
+      const rawEvents = row.eval_events_delta;
+      if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
+        continue;
+      }
+      try {
+        const events = JSON.parse(rawEvents);
+        if (!Array.isArray(events)) {
+          continue;
+        }
+        for (const event of events) {
+          if (typeof event !== "object" || event === null) {
+            continue;
+          }
+          if (!("status" in event) || event.status !== "completed") {
+            continue;
+          }
+          if ("eval_id" in event && typeof event.eval_id === "string") {
+            evalIds.add(event.eval_id);
+          }
+          const passed =
+            "passed" in event && typeof event.passed === "number"
+              ? event.passed
+              : 0;
+          const failed =
+            "failed" in event && typeof event.failed === "number"
+              ? event.failed
+              : 0;
+          const total =
+            "total" in event && typeof event.total === "number"
+              ? event.total
+              : 0;
+          if (passed > bestPassed || total > bestTotal) {
+            bestPassed = passed;
+            bestFailed = failed;
+            bestTotal = total;
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const values = {
+      trajectory_id: String(traceSummaryRow.trajectory_id ?? ""),
+      environment: String(traceSummaryRow.environment ?? ""),
+      agent_model: String(traceSummaryRow.agent_model ?? ""),
+      agent: String(traceSummaryRow.agent ?? ""),
+      started_at: String(traceSummaryRow.started_at ?? ""),
+      ended_at: endedAt,
+      total_parts: Number(traceSummaryRow.total_parts ?? 0),
+      total_turns: Number(traceSummaryRow.total_turns ?? 0),
+      total_tokens: Number(traceSummaryRow.total_tokens ?? 0),
+      session_end_reason:
+        traceSummaryRow.session_end_reason != undefined
+          ? String(traceSummaryRow.session_end_reason)
+          : "",
+      task_params:
+        traceSummaryRow.task_params != undefined
+          ? String(traceSummaryRow.task_params)
+          : "",
+      suites:
+        traceSummaryRow.suites != undefined
+          ? String(traceSummaryRow.suites)
+          : "",
+      sandbox_id:
+        traceSummaryRow.sandbox_id != undefined
+          ? String(traceSummaryRow.sandbox_id)
+          : "",
+      sandbox_provider:
+        traceSummaryRow.sandbox_provider != undefined
+          ? String(traceSummaryRow.sandbox_provider)
+          : "",
+      best_passed: bestPassed,
+      best_failed: bestFailed,
+      best_total: bestTotal,
+      eval_count: evalIds.size,
+    };
+
+    await conn.run(`
+      INSERT INTO ${targetTable} VALUES (
+        '${sqlLiteral(values.trajectory_id)}',
+        '${sqlLiteral(values.environment)}',
+        '${sqlLiteral(values.agent_model)}',
+        '${sqlLiteral(values.agent)}',
+        '${sqlLiteral(values.started_at)}',
+        '${sqlLiteral(values.ended_at)}',
+        ${values.total_parts},
+        ${values.total_turns},
+        ${values.total_tokens},
+        ${values.session_end_reason ? `'${sqlLiteral(values.session_end_reason)}'` : "NULL"},
+        ${values.task_params ? `'${sqlLiteral(values.task_params)}'` : "NULL"},
+        ${values.suites ? `'${sqlLiteral(values.suites)}'` : "NULL"},
+        ${values.sandbox_id ? `'${sqlLiteral(values.sandbox_id)}'` : "NULL"},
+        ${values.sandbox_provider ? `'${sqlLiteral(values.sandbox_provider)}'` : "NULL"},
+        ${values.best_passed},
+        ${values.best_failed},
+        ${values.best_total},
+        ${values.eval_count}
+      )
+    `);
   }
 }
 
@@ -1084,6 +1375,7 @@ async function createAnalyticsViews(
   inst: DuckDBInstance,
   project: string,
 ): Promise<void> {
+  const startedAt = Date.now();
   const conn = await inst.connect();
   const nextTrajectoriesTable = "trajectories_next";
   const nextEvaluationsTable = "evaluations_next";
@@ -1091,6 +1383,7 @@ async function createAnalyticsViews(
     pathExists(trajectorySummaryPath(project)),
     pathExists(evaluationSummaryPath(project)),
   ]);
+  const hasRawTraces = await hasLocalCache(project);
   try {
     await conn.run("SET threads=1");
     await conn.run("SET preserve_insertion_order=false");
@@ -1100,7 +1393,13 @@ async function createAnalyticsViews(
     await conn.run(`DROP TABLE IF EXISTS ${nextTrajectoriesTable}`);
     await conn.run(`DROP TABLE IF EXISTS ${nextEvaluationsTable}`);
 
-    if (hasTrajectorySummary) {
+    if (hasRawTraces) {
+      await rebuildTrajectoriesFromTraceFiles(
+        project,
+        nextTrajectoriesTable,
+        conn,
+      );
+    } else if (hasTrajectorySummary) {
       const summaryPath = sqlLiteral(trajectorySummaryPath(project));
       await conn.run(`
         CREATE TABLE ${nextTrajectoriesTable} AS
@@ -1116,7 +1415,9 @@ async function createAnalyticsViews(
           total_tokens,
           session_end_reason,
           task_params,
-          suites
+          suites,
+          NULL::VARCHAR AS sandbox_id,
+          NULL::VARCHAR AS sandbox_provider
         FROM read_parquet('${summaryPath}')
       `);
     } else {
@@ -1202,6 +1503,9 @@ async function createAnalyticsViews(
     } catch (error) {
       console.warn("[db] Failed to refresh file_access view:", error);
     }
+    console.log(
+      `[db] createAnalyticsViews project=${project} trajectoriesSource=${hasRawTraces ? "raw" : hasTrajectorySummary ? "summary" : "empty"} evaluationsSource=${hasEvaluationSummary ? "summary" : "empty"} durationMs=${Date.now() - startedAt}`,
+    );
   } finally {
     conn.disconnectSync();
   }
@@ -1301,6 +1605,7 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
   }
 
   await refreshProjectTables(inst, project, { allowPartial: true });
+  markProjectTableRefresh(project);
   const localManifest = await readLocalSummaryManifest(project);
   if (localManifest) {
     const state = getSummaryRevisionState(project);
@@ -1309,6 +1614,7 @@ async function createInstance(project: string): Promise<DuckDBInstance> {
     state.s3Revision = localManifest.revision;
     state.loadedRevision = localManifest.revision;
     state.lastLoadedAtMs = Date.now();
+    markProjectTableRefresh(project);
   }
   return inst;
 }
@@ -1405,11 +1711,9 @@ export async function refreshData(project?: string): Promise<void> {
   const activeProject = await getActiveProject(project);
   syncInFlight.delete(activeProject);
   lastSyncTime.delete(activeProject);
-  await syncFromS3(activeProject, {
-    summaries: false,
-  });
+  rawSyncPromises.delete(activeProject);
+  await startRawTraceSync(activeProject, true);
   await ensureSummaryRevisionLoaded(activeProject, { forceCheck: true });
-  lastSyncTime.set(activeProject, Date.now());
 }
 
 /**

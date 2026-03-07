@@ -18,7 +18,8 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const environments = await getEnvironments(project);
+    const fresh = request.nextUrl.searchParams.has("bust");
+    const environments = await getEnvironments(project, { fresh });
     return NextResponse.json(environments);
   } catch (error) {
     console.error("GET /api/environments error:", error);

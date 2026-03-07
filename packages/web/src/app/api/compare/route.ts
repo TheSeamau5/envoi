@@ -8,12 +8,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCompareTrajectories } from "@/lib/server/data";
 import {
-  buildSummaryRevisionHeaders,
-  getSummaryRevisionStatus,
-} from "@/lib/server/db";
+  buildProjectDataHeaders,
+  readProjectDataStatus,
+} from "@/lib/server/project-data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
 
 export async function GET(request: NextRequest) {
+  const startedAt = Date.now();
   try {
     const project = await getProjectFromRequest(request);
     if (!project) {
@@ -36,10 +37,16 @@ export async function GET(request: NextRequest) {
       fresh,
       project,
     });
-    const revision = await getSummaryRevisionStatus(project);
+    const status = await readProjectDataStatus(project, {
+      forceCheck: fresh,
+      mode: fresh ? "force" : "cached",
+    });
+    console.log(
+      `[api/compare] project=${project} fresh=${fresh} ids=${ids?.length ?? 0} environment=${environment ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
+    );
 
     return NextResponse.json(trajectories, {
-      headers: buildSummaryRevisionHeaders(revision),
+      headers: buildProjectDataHeaders(status),
     });
   } catch (error) {
     console.error("GET /api/compare error:", error);

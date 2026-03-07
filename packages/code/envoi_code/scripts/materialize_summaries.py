@@ -223,6 +223,24 @@ def serialize_table_bytes(
     return buf.getvalue()
 
 
+def read_table_rows(
+    data: bytes | None,
+    schema: pa.Schema,
+) -> list[dict[str, Any]]:
+    if data is None:
+        return []
+
+    table = pq.read_table(io.BytesIO(data))
+    for field in schema:
+        if field.name in table.schema.names:
+            continue
+        nulls = pa.nulls(table.num_rows, type=field.type)
+        table = table.append_column(field.name, nulls)
+    table = table.select(schema.names)
+    table = table.cast(schema, safe=False)
+    return table.to_pylist()
+
+
 def build_artifact_identity(data: bytes) -> dict[str, Any]:
     return {
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -265,6 +283,32 @@ def serialize_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     )
 
 
+def build_summary_outputs(
+    trajectory_rows: list[dict[str, Any]],
+    evaluation_rows: list[dict[str, Any]],
+    *,
+    published_at: str | None = None,
+) -> dict[str, bytes]:
+    trajectory_summary_data = serialize_table_bytes(
+        trajectory_rows,
+        TRAJECTORY_SUMMARY_SCHEMA,
+    )
+    evaluation_summary_data = serialize_table_bytes(
+        evaluation_rows,
+        EVALUATION_SUMMARY_SCHEMA,
+    )
+    manifest = build_summary_manifest(
+        trajectory_summary_data,
+        evaluation_summary_data,
+        published_at=published_at,
+    )
+    return {
+        TRAJECTORY_SUMMARY_FILENAME: trajectory_summary_data,
+        EVALUATION_SUMMARY_FILENAME: evaluation_summary_data,
+        SUMMARY_MANIFEST_FILENAME: serialize_manifest_bytes(manifest),
+    }
+
+
 def write_summary_outputs(
     dest_path: Path,
     outputs: dict[str, bytes],
@@ -301,16 +345,12 @@ def publish_summary_outputs(
 # Trajectory processing
 # ---------------------------------------------------------------------------
 
-def process_trajectory(
-    trace_path: Path,
+def process_trace_rows(
+    rows: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Process a single trace.parquet into a summary row and evaluation rows.
-
-    Returns (trajectory_summary_row, evaluation_summary_rows).
-    """
-    rows = read_trace_parquet(str(trace_path))
+    """Process trace rows into a summary row and evaluation rows."""
     if not rows:
-        raise ValueError(f"Empty trace file: {trace_path}")
+        raise ValueError("Empty trace rows")
 
     first = rows[0]
 
@@ -448,6 +488,44 @@ def process_trajectory(
         })
 
     return trajectory_summary, eval_rows
+
+
+def process_trajectory(
+    trace_path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Process a single trace.parquet into a summary row and evaluation rows.
+
+    Returns (trajectory_summary_row, evaluation_summary_rows).
+    """
+    rows = read_trace_parquet(str(trace_path))
+    if not rows:
+        raise ValueError(f"Empty trace file: {trace_path}")
+    return process_trace_rows(rows)
+
+
+def replace_summary_rows_for_trajectory(
+    existing_trajectory_rows: list[dict[str, Any]],
+    existing_evaluation_rows: list[dict[str, Any]],
+    trajectory_row: dict[str, Any],
+    evaluation_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    trajectory_id = trajectory_row.get("trajectory_id")
+    if not isinstance(trajectory_id, str) or not trajectory_id:
+        raise ValueError("trajectory summary row missing trajectory_id")
+
+    merged_trajectory_rows = [
+        row
+        for row in existing_trajectory_rows
+        if row.get("trajectory_id") != trajectory_id
+    ]
+    merged_evaluation_rows = [
+        row
+        for row in existing_evaluation_rows
+        if row.get("trajectory_id") != trajectory_id
+    ]
+    merged_trajectory_rows.append(trajectory_row)
+    merged_evaluation_rows.extend(evaluation_rows)
+    return merged_trajectory_rows, merged_evaluation_rows
 
 
 # ---------------------------------------------------------------------------
@@ -813,24 +891,10 @@ def materialize_command(args: argparse.Namespace) -> None:
     else:
         print("[materialize] writing empty summary files (no traces found)")
 
-    trajectory_summary_data = serialize_table_bytes(
+    output_data = build_summary_outputs(
         all_traj_rows,
-        TRAJECTORY_SUMMARY_SCHEMA,
-    )
-    evaluation_summary_data = serialize_table_bytes(
         all_eval_rows,
-        EVALUATION_SUMMARY_SCHEMA,
     )
-    manifest = build_summary_manifest(
-        trajectory_summary_data,
-        evaluation_summary_data,
-    )
-    manifest_data = serialize_manifest_bytes(manifest)
-    output_data = {
-        TRAJECTORY_SUMMARY_FILENAME: trajectory_summary_data,
-        EVALUATION_SUMMARY_FILENAME: evaluation_summary_data,
-        SUMMARY_MANIFEST_FILENAME: manifest_data,
-    }
     write_summary_outputs(dest_path, output_data)
     if publish_prefix is not None and project is not None:
         publish_summary_outputs(publish_prefix, project, output_data)

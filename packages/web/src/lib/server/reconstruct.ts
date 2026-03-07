@@ -1401,6 +1401,8 @@ export type TrajectorySummaryRow = {
   total_turns: number | bigint;
   total_tokens: number | bigint;
   session_end_reason?: string;
+  sandbox_id?: string;
+  sandbox_provider?: string;
   task_params?: string;
   suites?: string;
 };
@@ -1483,6 +1485,8 @@ export function summaryRowToTrajectory(
     suites: suites.length > 0 ? suites : undefined,
     agentHarness: agent || undefined,
     sessionEndReason: row.session_end_reason ?? undefined,
+    sandboxId: row.sandbox_id ?? undefined,
+    sandboxProvider: row.sandbox_provider ?? undefined,
   };
 }
 

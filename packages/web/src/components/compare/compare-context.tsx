@@ -21,30 +21,16 @@ import {
   useCallback,
 } from "react";
 import type { ReactNode } from "react";
-import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import type { Trajectory, Suite } from "@/lib/types";
 import { computeTotalTests } from "@/lib/constants";
-import { queryKeys } from "@/lib/query-keys";
+import {
+  useProjectCompare,
+  useProjectTrajectories,
+} from "@/lib/project-data";
 import { usePersistedState } from "@/lib/storage";
 import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
-import { useProjectRevision } from "@/lib/use-project-revision";
 
 type SortKey = "score" | "date";
-
-function normalizeTrajectories(value: unknown): Trajectory[] {
-  if (Array.isArray(value)) {
-    return value;
-  }
-  if (
-    value !== null &&
-    typeof value === "object" &&
-    "trajectories" in value &&
-    Array.isArray(value.trajectories)
-  ) {
-    return value.trajectories as Trajectory[];
-  }
-  return [];
-}
 
 /** Find the smallest non-negative integer not in `usedSet` */
 function minAvailableColor(usedSet: Set<number>): number {
@@ -132,10 +118,6 @@ export function CompareProvider({
   children,
   project,
 }: CompareProviderProps) {
-  const serverAllTraces = useMemo(
-    () => normalizeTrajectories(initialAllTraces),
-    [initialAllTraces],
-  );
   /**
    * colorMap: traceId → colorIndex.
    * Canonically persisted in localStorage via usePersistedState.
@@ -148,31 +130,8 @@ export function CompareProvider({
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [focusedIndex, setFocusedIndex] = useState(0);
 
-  useProjectRevision(project, {
-    invalidatePrefixes: [queryKeys.compare.all(project)],
-  });
-
-  /** Keep trajectory list fresh; if first SSR pass is empty, poll until data arrives. */
-  const allTracesQuery = useQuery({
-    queryKey: queryKeys.compare.all(project),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/trajectories?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch trajectories");
-      }
-      const data: unknown = await response.json();
-      return normalizeTrajectories(data);
-    },
-    initialData: serverAllTraces.length > 0 ? serverAllTraces : undefined,
-    staleTime: 0,
-    refetchOnMount: true,
-  });
-  const allTraces = useMemo(
-    () => normalizeTrajectories(allTracesQuery.data ?? serverAllTraces),
-    [allTracesQuery.data, serverAllTraces],
-  );
+  const allTracesQuery = useProjectTrajectories(project, initialAllTraces);
+  const allTraces = allTracesQuery.data ?? initialAllTraces;
   const isLoadingAll = allTraces.length === 0 && allTracesQuery.isPending;
   const validTraceIds = useMemo(
     () => new Set(allTraces.map((trace) => trace.id)),
@@ -201,27 +160,15 @@ export function CompareProvider({
    * Key changes when selectedIds changes → auto-refetch.
    * keepPreviousData ensures deselecting a trace doesn't flash loading state.
    */
-  const compareQuery = useQuery({
-    queryKey: queryKeys.compare.byIds(project, sortedSelectedIds),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/compare?project=${encodeURIComponent(project)}&ids=${sortedSelectedIds.join(",")}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch trajectory data");
-      }
-      const data: unknown = await response.json();
-      return normalizeTrajectories(data);
-    },
+  const compareQuery = useProjectCompare(project, {
+    ids: sortedSelectedIds,
     enabled: sortedSelectedIds.length > 0,
-    placeholderData: keepPreviousData,
-    staleTime: 2 * 60 * 1000,
   });
 
   /** Derive fullTrajectories map from query data */
   const fullTrajectories: Record<string, Trajectory> = useMemo(() => {
     const map: Record<string, Trajectory> = {};
-    for (const traj of normalizeTrajectories(compareQuery.data)) {
+    for (const traj of compareQuery.data ?? []) {
       map[traj.id] = traj;
     }
     return map;

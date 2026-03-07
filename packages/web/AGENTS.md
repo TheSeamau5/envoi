@@ -67,13 +67,25 @@ This file contains all rules, conventions, and architectural context for AI agen
 The dashboard reads trajectory parquet files from S3 via DuckDB (in-process).
 There is a hard 1 GB memory budget — every query must stay within it.
 
+### Centralized freshness
+
+All project-scoped data must flow through the centralized data layer:
+- **Server**: `src/lib/server/project-data.ts`
+- **Client**: `src/lib/project-data.tsx`
+
+Do not add route-specific freshness logic in pages, components, or API handlers.
+Do not import `useQuery` or `queryKeys` directly in feature components for
+project-scoped dashboard data. Add or extend centralized hooks instead.
+
 ### Materialized tables
 
-At startup, `db.ts` materializes two DuckDB tables from the raw parquet files:
-- **`trajectories`** — one row per trajectory (GROUP BY summary).
-- **`evaluations`** — one row per eval event, parsed from `eval_events_delta` JSON.
+`db.ts` maintains the project-local DuckDB tables:
+- **`trajectories`** — the unified source of truth for list/aggregate pages
+- **`evaluations`** — evaluation rows when available
 
-List and compare pages query these tables, never raw parquet at request time.
+Raw `trace.parquet` data is the source of truth for live/in-progress runs.
+Published summary parquet/manifests accelerate completed-history reads only; they
+must never hide a raw live trajectory.
 
 ### The `eval_events_delta` column is the memory killer
 

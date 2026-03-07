@@ -227,4 +227,36 @@ describe("summary revision loading", () => {
     expect(duckRunMock.mock.calls.length).toBeGreaterThan(firstRunCount);
     expect(clearCacheMock.mock.calls.length).toBe(firstClearCount + 1);
   });
+
+  it("reports holistic project data status with a data version", async () => {
+    setRemoteRevision(project, "rev-1", "etag-1");
+    const db = await import("../db");
+
+    const status = await db.getProjectDataStatus(project, {
+      forceCheck: true,
+      mode: "cached",
+    });
+
+    expect(status.hasManifest).toBe(true);
+    expect(status.loadedRevision).toBe("rev-1");
+    expect(status.loadedSummaryRevision).toBe("rev-1");
+    expect(typeof status.dataVersion).toBe("string");
+    expect(status.dataVersion.length).toBeGreaterThan(0);
+    expect(typeof status.summarySyncInFlight).toBe("boolean");
+  });
+
+  it("includes the data version in project freshness headers", async () => {
+    const db = await import("../db");
+
+    const headers = db.buildProjectDataHeaders({
+      hasManifest: false,
+      inSync: false,
+      revisionLagMs: 0,
+      dataVersion: "version-123",
+      rawSyncInFlight: false,
+      summarySyncInFlight: false,
+    });
+
+    expect(headers["x-envoi-data-version"]).toBe("version-123");
+  });
 });

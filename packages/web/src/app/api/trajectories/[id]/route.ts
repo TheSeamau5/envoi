@@ -13,6 +13,7 @@ import { getProjectFromRequest } from "@/lib/server/project-context";
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
+  const startedAt = Date.now();
   try {
     const project = await getProjectFromRequest(request);
     if (!project) {
@@ -32,6 +33,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         { status: 404 },
       );
     }
+
+    console.log(
+      `[api/trajectory-detail] project=${project} id=${id} fresh=${fresh} commits=${trajectory.commits.length} durationMs=${Date.now() - startedAt}`,
+    );
 
     return NextResponse.json(trajectory);
   } catch (error) {

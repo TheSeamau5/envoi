@@ -8,7 +8,6 @@
  */
 
 import {
-  getActiveProject,
   isS3Configured,
   traceUri,
   freshTraceUri,
@@ -16,21 +15,19 @@ import {
   logsUri,
   freshLogsUri,
   query,
-  hasSummaryTables,
-  getSummaryRevisionStatus,
 } from "./db";
+import {
+  freshnessFromBool,
+  readProjectData,
+} from "./project-data";
 import { sqlLiteral } from "./utils";
 import {
   reconstructTrajectory,
   summaryRowToTrajectory,
-  summaryTableRowToTrajectory,
-  buildCompareTrajectories,
   parseSuites,
-  toSummaryTableRow,
   type ParquetRow,
   type TrajectorySummaryRow,
 } from "./reconstruct";
-import { cached } from "./cache";
 import type {
   Trajectory,
   Suite,
@@ -62,10 +59,6 @@ async function getMockTrajectoryById(
   return getTrajectoryById(id);
 }
 
-async function resolveProject(project?: string): Promise<string> {
-  return getActiveProject(project);
-}
-
 // ---------------------------------------------------------------------------
 // Row validation helpers
 // ---------------------------------------------------------------------------
@@ -84,6 +77,12 @@ function toSummaryRow(row: Record<string, unknown>): TrajectorySummaryRow {
     session_end_reason:
       row.session_end_reason != undefined
         ? String(row.session_end_reason)
+        : undefined,
+    sandbox_id:
+      row.sandbox_id != undefined ? String(row.sandbox_id) : undefined,
+    sandbox_provider:
+      row.sandbox_provider != undefined
+        ? String(row.sandbox_provider)
         : undefined,
     task_params:
       row.task_params != undefined ? String(row.task_params) : undefined,
@@ -185,6 +184,168 @@ function toParquetRow(row: Record<string, unknown>): ParquetRow {
   };
 }
 
+type TrajectoryScore = {
+  passed: number;
+  failed: number;
+  total: number;
+};
+
+type LiveTrajectoryMetrics = {
+  endedAt?: string;
+  totalParts?: number;
+  sessionEndReason?: string;
+  score?: TrajectoryScore;
+};
+
+function deriveScoreFromSuites(
+  suitesValue: string | undefined,
+): TrajectoryScore | undefined {
+  if (!suitesValue) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(suitesValue);
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    let passed = 0;
+    let total = 0;
+    for (const value of Object.values(parsed)) {
+      if (typeof value !== "object" || value === null) {
+        continue;
+      }
+      const rowPassed =
+        "passed" in value && typeof value.passed === "number"
+          ? value.passed
+          : 0;
+      const rowTotal =
+        "total" in value && typeof value.total === "number"
+          ? value.total
+          : 0;
+      passed += rowPassed;
+      total += rowTotal;
+    }
+    if (total <= 0) {
+      return undefined;
+    }
+    return {
+      passed,
+      failed: Math.max(0, total - passed),
+      total,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadLiveTrajectoryMetrics(
+  trajectoryId: string,
+  project: string,
+): Promise<LiveTrajectoryMetrics | undefined> {
+  const trace = await traceUri(trajectoryId, project);
+  const logs = await logsUri(trajectoryId, project);
+  try {
+    const traceRows = await query(
+      `
+      SELECT
+        timestamp,
+        part,
+        session_end_reason,
+        eval_events_delta
+      FROM read_parquet('${sqlLiteral(trace)}')
+      ORDER BY part
+      `,
+      project,
+    );
+    if (traceRows.length === 0) {
+      return undefined;
+    }
+
+    const logRows = await query(
+      `
+      SELECT MAX(ts) AS log_ended_at
+      FROM read_parquet('${sqlLiteral(logs)}')
+      `,
+      project,
+    );
+    let endedAt = String(traceRows[traceRows.length - 1]?.timestamp ?? "");
+    const logEndedAtValue = logRows[0]?.log_ended_at;
+    if (
+      logEndedAtValue != undefined
+      && String(logEndedAtValue) > endedAt
+    ) {
+      endedAt = String(logEndedAtValue);
+    }
+
+    let bestPassed = 0;
+    let bestFailed = 0;
+    let bestTotal = 0;
+    for (const row of traceRows) {
+      const rawEvents = row.eval_events_delta;
+      if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
+        continue;
+      }
+      try {
+        const events = JSON.parse(rawEvents);
+        if (!Array.isArray(events)) {
+          continue;
+        }
+        for (const event of events) {
+          if (typeof event !== "object" || event === null) {
+            continue;
+          }
+          if (
+            !("status" in event)
+            || event.status !== "completed"
+          ) {
+            continue;
+          }
+          const passed =
+            "passed" in event && typeof event.passed === "number"
+              ? event.passed
+              : 0;
+          const failed =
+            "failed" in event && typeof event.failed === "number"
+              ? event.failed
+              : 0;
+          const total =
+            "total" in event && typeof event.total === "number"
+              ? event.total
+              : 0;
+          if (passed > bestPassed || total > bestTotal) {
+            bestPassed = passed;
+            bestFailed = failed;
+            bestTotal = total;
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const finalRow = traceRows[traceRows.length - 1];
+    if (!finalRow) {
+      return undefined;
+    }
+    return {
+      endedAt,
+      totalParts:
+        finalRow.part != undefined ? Number(finalRow.part) + 1 : undefined,
+      sessionEndReason:
+        finalRow.session_end_reason != undefined
+          ? String(finalRow.session_end_reason)
+          : undefined,
+      score: {
+        passed: bestPassed,
+        failed: bestFailed,
+        total: bestTotal,
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -207,185 +368,84 @@ export async function getAllTrajectories(opts?: {
     return getMockTrajectories();
   }
 
-  const project = await resolveProject(opts?.project);
-  await getSummaryRevisionStatus(project, {
-    forceCheck: opts?.fresh === true,
-  });
-  const fetch = async () => {
-    if (await hasSummaryTables(project)) {
-      return getAllTrajectoriesFromSummary(opts, project);
-    }
-    return getAllTrajectoriesFromGlob(opts, project);
-  };
+  return readProjectData({
+    project: opts?.project,
+    freshness: freshnessFromBool(opts?.fresh),
+    cacheKey: `all-trajectories:${opts?.project ?? ""}:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`,
+    load: async (project) => {
+      let sql = `
+        SELECT
+          *
+        FROM trajectories s
+        WHERE 1=1
+      `;
 
-  if (opts?.fresh) {
-    return fetch();
-  }
+      if (opts?.environment) {
+        sql += ` AND s.environment = '${sqlLiteral(opts.environment)}'`;
+      }
+      if (opts?.model) {
+        sql += ` AND s.agent_model = '${sqlLiteral(opts.model)}'`;
+      }
 
-  const cacheKey = `all-trajectories:${project}:${opts?.environment ?? ""}:${opts?.model ?? ""}:${opts?.limit ?? ""}:${opts?.offset ?? ""}`;
-  return cached(cacheKey, fetch);
-}
+      sql += ` ORDER BY s.started_at DESC`;
 
-/**
- * Fast path: query pre-materialized trajectory_summary table.
- * Final scores are already embedded — no N+1 queries needed.
- */
-async function getAllTrajectoriesFromSummary(
-  opts?: {
-    environment?: string;
-    model?: string;
-    limit?: number;
-    offset?: number;
-  },
-  project?: string,
-): Promise<Trajectory[]> {
-  let sql = `
-    WITH ranked_completed_evals AS (
-      SELECT
-        trajectory_id,
-        passed,
-        failed,
-        total,
-        finished_at,
-        COUNT(*) OVER (PARTITION BY trajectory_id) AS eval_count,
-        MAX(finished_at) OVER (PARTITION BY trajectory_id) AS last_eval_finished,
-        ROW_NUMBER() OVER (
-          PARTITION BY trajectory_id
-          ORDER BY passed DESC, total DESC, finished_at DESC, eval_id DESC
-        ) AS score_rank
-      FROM evaluation_summary
-      WHERE status = 'completed'
-    ),
-    best_eval AS (
-      SELECT
-        trajectory_id,
-        passed AS best_passed,
-        failed AS best_failed,
-        total AS best_total,
-        eval_count,
-        last_eval_finished
-      FROM ranked_completed_evals
-      WHERE score_rank = 1
-    )
-    SELECT
-      t.* EXCLUDE (ended_at),
-      CASE
-        WHEN b.last_eval_finished IS NOT NULL AND b.last_eval_finished > t.ended_at
-        THEN b.last_eval_finished
-        ELSE t.ended_at
-      END AS ended_at,
-      b.best_passed,
-      b.best_failed,
-      b.best_total,
-      b.eval_count
-    FROM trajectory_summary t
-    LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
-    WHERE 1=1
-  `;
+      if (opts?.limit) {
+        sql += ` LIMIT ${Number(opts.limit)}`;
+      }
+      if (opts?.offset) {
+        sql += ` OFFSET ${Number(opts.offset)}`;
+      }
 
-  if (opts?.environment) {
-    sql += ` AND t.environment = '${sqlLiteral(opts.environment)}'`;
-  }
-  if (opts?.model) {
-    sql += ` AND t.agent_model = '${sqlLiteral(opts.model)}'`;
-  }
+      const rawRows = await query(sql, project);
+      const trajectories = await Promise.all(rawRows.map(async (row) => {
+        const summaryRow = toSummaryRow(row);
+        let finalScore = (
+          row.best_passed !== undefined && row.best_passed !== null
+            ? {
+                passed: Number(row.best_passed ?? 0),
+                failed: Number(row.best_failed ?? 0),
+                total: Number(row.best_total ?? 0),
+              }
+            : deriveScoreFromSuites(summaryRow.suites)
+        );
+        let endedAt = String(row.ended_at ?? "");
+        let totalParts = Number(row.total_parts ?? 0);
+        let sessionEndReason = summaryRow.session_end_reason;
 
-  sql += ` ORDER BY t.started_at DESC`;
-
-  if (opts?.limit) {
-    sql += ` LIMIT ${Number(opts.limit)}`;
-  }
-  if (opts?.offset) {
-    sql += ` OFFSET ${Number(opts.offset)}`;
-  }
-
-  const rawRows = await query(sql, project);
-  return rawRows.map((row) =>
-    summaryTableRowToTrajectory(toSummaryTableRow(row)),
-  );
-}
-
-/**
- * Slow path: query materialized trajectories + evaluations tables.
- * Used when pre-built summary tables are not available.
- */
-async function getAllTrajectoriesFromGlob(
-  opts?: {
-    environment?: string;
-    model?: string;
-    limit?: number;
-    offset?: number;
-  },
-  project?: string,
-): Promise<Trajectory[]> {
-  /**
-   * Query the materialized trajectories + evaluations tables directly.
-   * No parquet scanning at query time — everything was materialized at startup.
-   */
-  let sql = `
-    WITH best_eval AS (
-      SELECT
-        trajectory_id,
-        MAX(passed) AS best_passed,
-        MAX(failed) AS best_failed,
-        MAX(total) AS best_total,
-        COUNT(*) AS eval_count,
-        MAX(finished_at) AS last_eval_finished
-      FROM evaluations
-      WHERE status = 'completed'
-      GROUP BY trajectory_id
-    )
-    SELECT
-      s.* EXCLUDE (ended_at),
-      CASE
-        WHEN b.last_eval_finished IS NOT NULL AND b.last_eval_finished > s.ended_at
-        THEN b.last_eval_finished
-        ELSE s.ended_at
-      END AS ended_at,
-      b.best_passed,
-      b.best_failed,
-      b.best_total,
-      b.eval_count
-    FROM trajectories s
-    LEFT JOIN best_eval b ON b.trajectory_id = s.trajectory_id
-    WHERE 1=1
-  `;
-
-  if (opts?.environment) {
-    sql += ` AND s.environment = '${sqlLiteral(opts.environment)}'`;
-  }
-  if (opts?.model) {
-    sql += ` AND s.agent_model = '${sqlLiteral(opts.model)}'`;
-  }
-
-  sql += ` ORDER BY s.started_at DESC`;
-
-  if (opts?.limit) {
-    sql += ` LIMIT ${Number(opts.limit)}`;
-  }
-  if (opts?.offset) {
-    sql += ` OFFSET ${Number(opts.offset)}`;
-  }
-
-  const rawRows = await query(sql, project);
-
-  return rawRows.map((row) => {
-    const summaryRow = toSummaryRow(row);
-    const finalScore =
-      row.best_passed !== undefined && row.best_passed !== null
-        ? {
-            passed: Number(row.best_passed ?? 0),
-            failed: Number(row.best_failed ?? 0),
-            total: Number(row.best_total ?? 0),
+        if (!sessionEndReason) {
+          const liveMetrics = await loadLiveTrajectoryMetrics(
+            summaryRow.trajectory_id,
+            project,
+          );
+          if (liveMetrics?.endedAt) {
+            endedAt = liveMetrics.endedAt;
           }
-        : undefined;
+          if (typeof liveMetrics?.totalParts === "number") {
+            totalParts = liveMetrics.totalParts;
+          }
+          if (liveMetrics?.sessionEndReason) {
+            sessionEndReason = liveMetrics.sessionEndReason;
+          }
+          if (
+            liveMetrics?.score &&
+            liveMetrics.score.total > 0
+          ) {
+            finalScore = liveMetrics.score;
+          }
+        }
 
-    return summaryRowToTrajectory(
-      summaryRow,
-      finalScore,
-      String(row.ended_at ?? ""),
-      Number(row.eval_count ?? 0),
-    );
+        const trajectory = summaryRowToTrajectory(
+          summaryRow,
+          finalScore,
+          endedAt,
+          Number(row.eval_count ?? 0),
+        );
+        trajectory.totalParts = totalParts;
+        trajectory.sessionEndReason = sessionEndReason ?? undefined;
+        return trajectory;
+      }));
+      return trajectories;
+    },
   });
 }
 
@@ -399,15 +459,12 @@ export async function getTrajectoryById(
   if (!isS3Configured()) {
     return getMockTrajectoryById(id);
   }
-  const project = await resolveProject(options?.project);
-
-  if (options?.fresh) {
-    return loadTrajectory(id, true, project);
-  }
-
-  return cached(`trajectory:${project}:${id}`, () =>
-    loadTrajectory(id, false, project),
-  );
+  return readProjectData({
+    project: options?.project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `trajectory:${options?.project ?? "default"}:${id}`,
+    load: (project) => loadTrajectory(id, options?.fresh === true, project),
+  });
 }
 
 /**
@@ -567,27 +624,45 @@ export async function getTrajectorySandboxMeta(
   if (!isS3Configured()) {
     return undefined;
   }
-  const activeProject = await resolveProject(project);
-  try {
-    const summaryRows = await query(
-      `
-      SELECT session_end_reason
-      FROM trajectories
-      WHERE trajectory_id = '${sqlLiteral(id)}'
-      LIMIT 1
-    `,
-      activeProject,
-    );
-    if (summaryRows.length === 0) {
-      return undefined;
-    }
-    const endReason = summaryRows[0]!.session_end_reason;
-    return {
-      sessionEndReason: endReason != undefined ? String(endReason) : undefined,
-    };
-  } catch {
-    return undefined;
-  }
+  return readProjectData({
+    project,
+    freshness: "cached",
+    cacheKey: `trajectory-sandbox-meta:${project ?? "default"}:${id}`,
+    load: async (activeProject) => {
+      try {
+        const summaryRows = await query(
+          `
+          SELECT session_end_reason, sandbox_id, sandbox_provider
+          FROM trajectories
+          WHERE trajectory_id = '${sqlLiteral(id)}'
+          LIMIT 1
+        `,
+          activeProject,
+        );
+        if (summaryRows.length === 0) {
+          return undefined;
+        }
+        const row = summaryRows[0];
+        if (!row) {
+          return undefined;
+        }
+        return {
+          sessionEndReason:
+            row.session_end_reason != undefined
+              ? String(row.session_end_reason)
+              : undefined,
+          sandboxId:
+            row.sandbox_id != undefined ? String(row.sandbox_id) : undefined,
+          sandboxProvider:
+            row.sandbox_provider != undefined
+              ? String(row.sandbox_provider)
+              : undefined,
+        };
+      } catch {
+        return undefined;
+      }
+    },
+  });
 }
 
 /**
@@ -627,43 +702,51 @@ export async function getTrajectoryEvaluations(
       targetCommit: commit.hash,
     }));
   }
-  const activeProject = await resolveProject(project);
+  return readProjectData({
+    project,
+    freshness: "cached",
+    cacheKey: `trajectory-evaluations:${project ?? "default"}:${id}`,
+    load: async (activeProject) => {
+      try {
+        const sql = `
+          SELECT eval_id, part, passed, failed, total, suite_results, target_commit
+          FROM evaluations
+          WHERE trajectory_id = '${sqlLiteral(id)}'
+            AND status = 'completed'
+          ORDER BY part
+        `;
+        const rawRows = await query(sql, activeProject);
 
-  try {
-    const sql = `
-      SELECT eval_id, part, passed, failed, total, suite_results, target_commit
-      FROM evaluations
-      WHERE trajectory_id = '${sqlLiteral(id)}'
-        AND status = 'completed'
-      ORDER BY part
-    `;
-    const rawRows = await query(sql, activeProject);
-
-    return rawRows.map((row) => ({
-      evalId: String(row.eval_id ?? ""),
-      part: Number(row.part ?? 0),
-      passed: Number(row.passed ?? 0),
-      failed: Number(row.failed ?? 0),
-      total: Number(row.total ?? 0),
-      suiteResults: (() => {
-        try {
-          const raw = row.suite_results;
-          return JSON.parse(typeof raw === "string" ? raw : "{}");
-        } catch {
-          return {};
-        }
-      })(),
-      targetCommit: String(row.target_commit ?? ""),
-    }));
-  } catch {
-    return [];
-  }
+        return rawRows.map((row) => ({
+          evalId: String(row.eval_id ?? ""),
+          part: Number(row.part ?? 0),
+          passed: Number(row.passed ?? 0),
+          failed: Number(row.failed ?? 0),
+          total: Number(row.total ?? 0),
+          suiteResults: (() => {
+            try {
+              const raw = row.suite_results;
+              return JSON.parse(typeof raw === "string" ? raw : "{}");
+            } catch {
+              return {};
+            }
+          })(),
+          targetCommit: String(row.target_commit ?? ""),
+        }));
+      } catch {
+        return [];
+      }
+    },
+  });
 }
 
 /**
  * Get distinct environments from the data.
  */
-export async function getEnvironments(project?: string): Promise<
+export async function getEnvironments(
+  project?: string,
+  options?: { fresh?: boolean },
+): Promise<
   {
     environment: string;
     suites: Suite[];
@@ -682,18 +765,18 @@ export async function getEnvironments(project?: string): Promise<
     ];
   }
 
-  const activeProject = await resolveProject(project);
-  await getSummaryRevisionStatus(activeProject);
-  return cached(`environments:${activeProject}`, async () => {
-    // Fast path: use summary table
-    if (await hasSummaryTables(project)) {
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `environments:${project ?? "default"}`,
+    load: async (activeProject) => {
       const sql = `
         SELECT
           environment,
           MIN(suites) AS suites,
           COUNT(*) AS trajectory_count,
           COUNT(DISTINCT agent_model) AS model_count
-        FROM trajectory_summary
+        FROM trajectories
         GROUP BY environment
         ORDER BY environment
       `;
@@ -706,28 +789,7 @@ export async function getEnvironments(project?: string): Promise<
         trajectoryCount: Number(row.trajectory_count ?? 0),
         modelCount: Number(row.model_count ?? 0),
       }));
-    }
-
-    // Slow path: use materialized trajectories table
-    const sql = `
-      SELECT
-        environment,
-        MIN(suites) AS suites,
-        COUNT(*) AS trajectory_count,
-        COUNT(DISTINCT agent_model) AS model_count
-      FROM trajectories
-      GROUP BY environment
-      ORDER BY environment
-    `;
-    const rawRows = await query(sql, activeProject);
-    return rawRows.map((row) => ({
-      environment: String(row.environment ?? ""),
-      suites: parseSuites(
-        row.suites !== undefined ? String(row.suites) : undefined,
-      ),
-      trajectoryCount: Number(row.trajectory_count ?? 0),
-      modelCount: Number(row.model_count ?? 0),
-    }));
+    },
   });
 }
 
@@ -754,94 +816,32 @@ export async function getCompareTrajectories(opts?: {
     return all;
   }
 
-  const project = await resolveProject(opts?.project);
-  await getSummaryRevisionStatus(project, {
-    forceCheck: opts?.fresh === true,
-  });
+  return readProjectData({
+    project: opts?.project,
+    freshness: freshnessFromBool(opts?.fresh),
+    cacheKey: `compare-trajectories:${opts?.project ?? "default"}:${(opts?.ids ?? []).join(",")}:${opts?.environment ?? ""}`,
+    load: async (project) => {
+      let ids = opts?.ids ?? [];
 
-  // Fast path: use summary + evaluation tables
-  if (await hasSummaryTables(project)) {
-    return getCompareTrajectoriesFromSummary(opts, project);
-  }
-
-  // Slow path: use materialized trajectories + evaluations tables
-  return getCompareTrajectoriesFromMaterialized(opts, project);
-}
-
-/**
- * Fast path for compare: query summary + evaluation tables in two bulk queries,
- * then build trajectories in memory via buildCompareTrajectories.
- */
-async function getCompareTrajectoriesFromSummary(
-  opts?: {
-    ids?: string[];
-    environment?: string;
-  },
-  project?: string,
-): Promise<Trajectory[]> {
-  let summSql = `SELECT * FROM trajectory_summary WHERE 1=1`;
-  let evalSql = `SELECT * FROM evaluation_summary WHERE 1=1`;
-
-  if (opts?.ids && opts.ids.length > 0) {
-    const idList = opts.ids.map((id) => `'${sqlLiteral(id)}'`).join(", ");
-    summSql += ` AND trajectory_id IN (${idList})`;
-    evalSql += ` AND trajectory_id IN (${idList})`;
-  }
-  if (opts?.environment) {
-    summSql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
-    evalSql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
-  }
-
-  summSql += ` ORDER BY started_at DESC`;
-  evalSql += ` ORDER BY trajectory_id, trigger_part`;
-
-  const [summaryRows, evalRows] = await Promise.all([
-    query(summSql, project),
-    query(evalSql, project),
-  ]);
-
-  return buildCompareTrajectories(summaryRows, evalRows);
-}
-
-/**
- * Load full trajectories for compare from parquet files.
- * Uses the same loadTrajectory path as /trajectories/:id so that commits
- * have proper timestamps and minutesElapsed for the progress curves chart.
- * Each trajectory is cached so repeated selections are instant.
- */
-async function getCompareTrajectoriesFromMaterialized(
-  opts?: {
-    ids?: string[];
-    environment?: string;
-    fresh?: boolean;
-  },
-  project?: string,
-): Promise<Trajectory[]> {
-  let ids = opts?.ids ?? [];
-
-  // If no specific IDs, get all trajectory IDs from the materialized table
-  if (ids.length === 0) {
-    let sql = `SELECT trajectory_id FROM trajectories WHERE 1=1`;
-    if (opts?.environment) {
-      sql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
-    }
-    const rows = await query(sql, project);
-    ids = rows.map((row) => String(row.trajectory_id ?? ""));
-  }
-
-  // Load full trajectories in parallel, reusing the cached loadTrajectory path
-  const results = await Promise.all(
-    ids.map((id) => {
-      if (opts?.fresh === true) {
-        return loadTrajectory(id, true, project);
+      if (ids.length === 0) {
+        let sql = `SELECT trajectory_id FROM trajectories WHERE 1=1`;
+        if (opts?.environment) {
+          sql += ` AND environment = '${sqlLiteral(opts.environment)}'`;
+        }
+        sql += ` ORDER BY started_at DESC`;
+        const rows = await query(sql, project);
+        ids = rows.map((row) => String(row.trajectory_id ?? ""));
       }
-      return cached(`trajectory:${project ?? "default"}:${id}`, () =>
-        loadTrajectory(id, false, project),
-      );
-    }),
-  );
 
-  return results.filter((traj): traj is Trajectory => traj !== undefined);
+      const results = await Promise.all(
+        ids.map((id) =>
+          loadTrajectory(id, opts?.fresh === true, project),
+        ),
+      );
+
+      return results.filter((traj): traj is Trajectory => traj !== undefined);
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -895,51 +895,55 @@ export async function getCodeHistory(
   if (!isS3Configured()) {
     return undefined;
   }
-
-  const activeProject = await resolveProject(project);
-  const uri = await codeSnapshotsUri(trajectoryId, activeProject);
-  if (uri === undefined) {
-    return undefined;
-  }
-
-  try {
-    const sql = `
-      SELECT commit_hash, commit_index, file_path, status, content, added_lines
-      FROM read_parquet('${sqlLiteral(uri)}')
-      ORDER BY commit_index, file_path
-    `;
-    const rawRows = await query(sql, activeProject);
-
-    const result: Record<number, CodeSnapshot> = {};
-
-    for (const raw of rawRows) {
-      const row = toCodeSnapshotRow(raw);
-      const snapshot = result[row.commit_index];
-      if (snapshot === undefined) {
-        result[row.commit_index] = {};
+  return readProjectData({
+    project,
+    freshness: "cached",
+    cacheKey: `trajectory-code-history:${project ?? "default"}:${trajectoryId}`,
+    load: async (activeProject) => {
+      const uri = await codeSnapshotsUri(trajectoryId, activeProject);
+      if (uri === undefined) {
+        return undefined;
       }
 
-      const fileSnapshot: FileSnapshot = {
-        lines: row.content.split("\n"),
-        added: parseAddedLines(row.added_lines),
-        touched: row.status === "A" || row.status === "M",
-        isNew: row.status === "A" ? true : undefined,
-      };
+      try {
+        const sql = `
+          SELECT commit_hash, commit_index, file_path, status, content, added_lines
+          FROM read_parquet('${sqlLiteral(uri)}')
+          ORDER BY commit_index, file_path
+        `;
+        const rawRows = await query(sql, activeProject);
 
-      const target = result[row.commit_index];
-      if (target !== undefined) {
-        target[row.file_path] = fileSnapshot;
+        const result: Record<number, CodeSnapshot> = {};
+
+        for (const raw of rawRows) {
+          const row = toCodeSnapshotRow(raw);
+          if (result[row.commit_index] === undefined) {
+            result[row.commit_index] = {};
+          }
+
+          const fileSnapshot: FileSnapshot = {
+            lines: row.content.split("\n"),
+            added: parseAddedLines(row.added_lines),
+            touched: row.status === "A" || row.status === "M",
+            isNew: row.status === "A" ? true : undefined,
+          };
+
+          const target = result[row.commit_index];
+          if (target !== undefined) {
+            target[row.file_path] = fileSnapshot;
+          }
+        }
+
+        return result;
+      } catch (error) {
+        console.error(
+          `[data] Failed to load code history for ${trajectoryId}:`,
+          error,
+        );
+        return undefined;
       }
-    }
-
-    return result;
-  } catch (error) {
-    console.error(
-      `[data] Failed to load code history for ${trajectoryId}:`,
-      error,
-    );
-    return undefined;
-  }
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,60 +1021,50 @@ export async function getTrajectoryLogsById(
   if (!isS3Configured()) {
     return undefined;
   }
-
-  const project = await resolveProject(opts?.project);
   const limitRaw = Number.isFinite(opts?.limit) ? Number(opts?.limit) : 2500;
   const limit = Math.max(1, Math.min(10_000, Math.floor(limitRaw)));
   const fromSeqRaw = Number.isFinite(opts?.fromSeq) ? Number(opts?.fromSeq) : 0;
   const fromSeq = Math.max(0, Math.floor(fromSeqRaw));
-  const fresh = opts?.fresh === true;
-
-  const load = async () => {
-    const uri = fresh
-      ? await freshLogsUri(id, project)
-      : await logsUri(id, project);
-    const sql = `
-      SELECT
-        seq,
-        ts,
-        component,
-        event,
-        level,
-        message,
-        turn,
-        part,
-        git_commit,
-        session_id,
-        source,
-        fields
-      FROM read_parquet('${sqlLiteral(uri)}')
-      WHERE seq > ${fromSeq}
-      ORDER BY seq
-      LIMIT ${limit}
-    `;
-    const rawRows = await query(sql, project);
-    if (rawRows.length === 0) {
-      return [] as TrajectoryLogRow[];
-    }
-    return rawRows.map((row) =>
-      mapTrajectoryLogRow(toTrajectoryLogRowRaw(row)),
-    );
-  };
-
-  if (fresh) {
-    try {
-      return await load();
-    } catch {
-      return undefined;
-    }
-  }
-
-  const cacheKey = `trajectory-logs:${project}:${id}:${fromSeq}:${limit}`;
-  try {
-    return await cached(cacheKey, load);
-  } catch {
-    return undefined;
-  }
+  return readProjectData({
+    project: opts?.project,
+    freshness: freshnessFromBool(opts?.fresh),
+    cacheKey: `trajectory-logs:${opts?.project ?? "default"}:${id}:${fromSeq}:${limit}`,
+    load: async (project) => {
+      try {
+        const uri = opts?.fresh === true
+          ? await freshLogsUri(id, project)
+          : await logsUri(id, project);
+        const sql = `
+          SELECT
+            seq,
+            ts,
+            component,
+            event,
+            level,
+            message,
+            turn,
+            part,
+            git_commit,
+            session_id,
+            source,
+            fields
+          FROM read_parquet('${sqlLiteral(uri)}')
+          WHERE seq > ${fromSeq}
+          ORDER BY seq
+          LIMIT ${limit}
+        `;
+        const rawRows = await query(sql, project);
+        if (rawRows.length === 0) {
+          return [] as TrajectoryLogRow[];
+        }
+        return rawRows.map((row) =>
+          mapTrajectoryLogRow(toTrajectoryLogRowRaw(row)),
+        );
+      } catch {
+        return undefined;
+      }
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,31 +1075,39 @@ export async function getTrajectoryLogsById(
  * Get database schema info — table/view names with their columns.
  * Used by the SQL Console to show a schema reference sidebar.
  */
-export async function getSchemaInfo(project?: string): Promise<SchemaColumn[]> {
+export async function getSchemaInfo(
+  project?: string,
+  options?: { fresh?: boolean },
+): Promise<SchemaColumn[]> {
   if (!isS3Configured()) {
     return [];
   }
-  const activeProject = await resolveProject(project);
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `schema:${project ?? "default"}`,
+    load: async (activeProject) => {
+      try {
+        const rawRows = await query(
+          `
+          SELECT table_name, column_name, data_type
+          FROM information_schema.columns
+          WHERE table_schema = 'main'
+          ORDER BY table_name, ordinal_position
+        `,
+          activeProject,
+        );
 
-  try {
-    const rawRows = await query(
-      `
-      SELECT table_name, column_name, data_type
-      FROM information_schema.columns
-      WHERE table_schema = 'main'
-      ORDER BY table_name, ordinal_position
-    `,
-      activeProject,
-    );
-
-    return rawRows.map((row) => ({
-      tableName: String(row.table_name ?? ""),
-      columnName: String(row.column_name ?? ""),
-      dataType: String(row.data_type ?? ""),
-    }));
-  } catch {
-    return [];
-  }
+        return rawRows.map((row) => ({
+          tableName: String(row.table_name ?? ""),
+          columnName: String(row.column_name ?? ""),
+          dataType: String(row.data_type ?? ""),
+        }));
+      } catch {
+        return [];
+      }
+    },
+  });
 }
 
 /**
@@ -1121,12 +1123,17 @@ export async function executeQuery(
   rowCount: number;
   durationMs: number;
 }> {
-  const activeProject = await resolveProject(project);
-  const start = Date.now();
-  const rows = await query(sql, activeProject);
-  const durationMs = Date.now() - start;
-  const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
-  return { rows, columns, rowCount: rows.length, durationMs };
+  return readProjectData({
+    project,
+    freshness: "fresh",
+    load: async (activeProject) => {
+      const start = Date.now();
+      const rows = await query(sql, activeProject);
+      const durationMs = Date.now() - start;
+      const columns = rows.length > 0 ? Object.keys(rows[0] ?? {}) : [];
+      return { rows, columns, rowCount: rows.length, durationMs };
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,80 +1162,76 @@ function suiteToEnvironment(suiteName: string): string {
  */
 export async function getDifficultyData(
   project?: string,
+  options?: { fresh?: boolean },
 ): Promise<DifficultyCell[]> {
   if (!isS3Configured()) {
     return getMockDifficultyData();
   }
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `difficulty-data:${project ?? "default"}`,
+    load: async (activeProject) => {
+      try {
+        const rawRows = await query(
+          `
+          WITH snapshots AS (
+            SELECT trajectory_id, agent_model, suites::JSON AS sr
+            FROM trajectories
+            WHERE suites IS NOT NULL
+              AND LENGTH(CAST(suites AS VARCHAR)) > 5
+          ),
+          suite_entries AS (
+            SELECT
+              agent_model,
+              unnest(json_keys(sr)) AS suite_key,
+              sr
+            FROM snapshots
+          ),
+          parsed AS (
+            SELECT
+              agent_model,
+              SPLIT_PART(suite_key, '/', 2) AS suite_name,
+              CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE) AS passed,
+              CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE) AS total
+            FROM suite_entries
+          ),
+          aggregated AS (
+            SELECT
+              suite_name AS category,
+              agent_model AS model,
+              SUM(passed) AS total_passed,
+              SUM(total) AS total_total,
+              COUNT(*) AS attempts
+            FROM parsed
+            WHERE suite_name != '' AND suite_name != 'all'
+            GROUP BY suite_name, agent_model
+          )
+          SELECT
+            category,
+            model,
+            CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate,
+            attempts
+          FROM aggregated
+          ORDER BY category, model
+        `,
+          activeProject,
+        );
 
-  const activeProject = await resolveProject(project);
-  return cached(`difficulty-data:${activeProject}`, async () => {
-    try {
-      /**
-       * The `suites` column contains JSON like:
-       *   {"all/basics/smoke": {"ok":true,"passed":7,"failed":0,"total":7}, ...}
-       *
-       * Uses the materialized trajectories table (suites = latest snapshot via arg_max).
-       * Unnest the JSON keys, extract suite name (2nd path segment),
-       * and aggregate passed/total per (suite, model).
-       */
-      const rawRows = await query(
-        `
-        WITH snapshots AS (
-          SELECT trajectory_id, agent_model, suites::JSON AS sr
-          FROM trajectories
-          WHERE suites IS NOT NULL
-            AND LENGTH(CAST(suites AS VARCHAR)) > 5
-        ),
-        suite_entries AS (
-          SELECT
-            agent_model,
-            unnest(json_keys(sr)) AS suite_key,
-            sr
-          FROM snapshots
-        ),
-        parsed AS (
-          SELECT
-            agent_model,
-            SPLIT_PART(suite_key, '/', 2) AS suite_name,
-            CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE) AS passed,
-            CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE) AS total
-          FROM suite_entries
-        ),
-        aggregated AS (
-          SELECT
-            suite_name AS category,
-            agent_model AS model,
-            SUM(passed) AS total_passed,
-            SUM(total) AS total_total,
-            COUNT(*) AS attempts
-          FROM parsed
-          WHERE suite_name != '' AND suite_name != 'all'
-          GROUP BY suite_name, agent_model
-        )
-        SELECT
-          category,
-          model,
-          CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate,
-          attempts
-        FROM aggregated
-        ORDER BY category, model
-      `,
-        activeProject,
-      );
-
-      return rawRows.map((row) => {
-        const category = String(row.category ?? "");
-        return {
-          environment: suiteToEnvironment(category),
-          category,
-          model: String(row.model ?? ""),
-          passRate: Number(row.pass_rate ?? 0),
-          attempts: Number(row.attempts ?? 0),
-        };
-      });
-    } catch {
-      return getMockDifficultyData();
-    }
+        return rawRows.map((row) => {
+          const category = String(row.category ?? "");
+          return {
+            environment: suiteToEnvironment(category),
+            category,
+            model: String(row.model ?? ""),
+            passRate: Number(row.pass_rate ?? 0),
+            attempts: Number(row.attempts ?? 0),
+          };
+        });
+      } catch {
+        return getMockDifficultyData();
+      }
+    },
   });
 }
 
@@ -1269,84 +1272,84 @@ async function getMockDifficultyData(): Promise<DifficultyCell[]> {
  */
 export async function getPortfolioData(
   project?: string,
+  options?: { fresh?: boolean },
 ): Promise<PortfolioRow[]> {
   if (!isS3Configured()) {
     return getMockPortfolioData();
   }
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `portfolio-data:${project ?? "default"}`,
+    load: async (activeProject) => {
+      try {
+        const rawRows = await query(
+          `
+          WITH snapshots AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              suites::JSON AS sr
+            FROM trajectories
+            WHERE suites IS NOT NULL
+              AND LENGTH(CAST(suites AS VARCHAR)) > 5
+          ),
+          suite_entries AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              unnest(json_keys(sr)) AS suite_key,
+              sr
+            FROM snapshots
+          ),
+          per_trajectory AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              SPLIT_PART(MIN(suite_key), '/', 2) AS first_suite,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE)) AS total_passed,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE)) AS total_total
+            FROM suite_entries
+            WHERE SPLIT_PART(suite_key, '/', 2) != 'all'
+              AND SPLIT_PART(suite_key, '/', 2) != ''
+            GROUP BY trajectory_id, agent_model
+          ),
+          with_env AS (
+            SELECT
+              agent_model,
+              CASE
+                WHEN first_suite IN ('basics', 'wacct', 'c_testsuite', 'torture')
+                THEN 'c_compiler'
+                ELSE 'gameboy_emulator'
+              END AS environment,
+              CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate
+            FROM per_trajectory
+          ),
+          scores AS (
+            SELECT
+              agent_model,
+              environment,
+              AVG(pass_rate) AS pass_rate
+            FROM with_env
+            GROUP BY agent_model, environment
+          ),
+          ranked AS (
+            SELECT *,
+              RANK() OVER (PARTITION BY environment ORDER BY pass_rate DESC) AS env_rank
+            FROM scores
+          )
+          SELECT agent_model, environment, pass_rate, env_rank
+          FROM ranked
+          ORDER BY agent_model, environment
+        `,
+          activeProject,
+        );
 
-  const activeProject = await resolveProject(project);
-  return cached(`portfolio-data:${activeProject}`, async () => {
-    try {
-      /**
-       * Uses materialized trajectories table (suites = latest snapshot via arg_max).
-       * Compute overall pass rate per trajectory, derive environment from suite keys.
-       */
-      const rawRows = await query(
-        `
-        WITH snapshots AS (
-          SELECT
-            trajectory_id,
-            agent_model,
-            suites::JSON AS sr
-          FROM trajectories
-          WHERE suites IS NOT NULL
-            AND LENGTH(CAST(suites AS VARCHAR)) > 5
-        ),
-        suite_entries AS (
-          SELECT
-            trajectory_id,
-            agent_model,
-            unnest(json_keys(sr)) AS suite_key,
-            sr
-          FROM snapshots
-        ),
-        per_trajectory AS (
-          SELECT
-            trajectory_id,
-            agent_model,
-            SPLIT_PART(MIN(suite_key), '/', 2) AS first_suite,
-            SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE)) AS total_passed,
-            SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE)) AS total_total
-          FROM suite_entries
-          WHERE SPLIT_PART(suite_key, '/', 2) != 'all'
-            AND SPLIT_PART(suite_key, '/', 2) != ''
-          GROUP BY trajectory_id, agent_model
-        ),
-        with_env AS (
-          SELECT
-            agent_model,
-            CASE
-              WHEN first_suite IN ('basics', 'wacct', 'c_testsuite', 'torture')
-              THEN 'c_compiler'
-              ELSE 'gameboy_emulator'
-            END AS environment,
-            CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate
-          FROM per_trajectory
-        ),
-        scores AS (
-          SELECT
-            agent_model,
-            environment,
-            AVG(pass_rate) AS pass_rate
-          FROM with_env
-          GROUP BY agent_model, environment
-        ),
-        ranked AS (
-          SELECT *,
-            RANK() OVER (PARTITION BY environment ORDER BY pass_rate DESC) AS env_rank
-          FROM scores
-        )
-        SELECT agent_model, environment, pass_rate, env_rank
-        FROM ranked
-        ORDER BY agent_model, environment
-      `,
-        activeProject,
-      );
-
-      return buildPortfolioRows(rawRows);
-    } catch {
-      return getMockPortfolioData();
-    }
+        return buildPortfolioRows(rawRows);
+      } catch {
+        return getMockPortfolioData();
+      }
+    },
   });
 }
 
@@ -1418,63 +1421,89 @@ async function getMockPortfolioData(): Promise<PortfolioRow[]> {
  */
 export async function getPortfolioEnvironmentData(
   project?: string,
+  options?: { fresh?: boolean },
 ): Promise<PortfolioEnvironmentRow[]> {
   if (!isS3Configured()) {
     return getMockPortfolioEnvironmentData();
   }
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `portfolio-env-data:${project ?? "default"}`,
+    load: async (activeProject) => {
+      try {
+        const rawRows = await query(
+          `
+          WITH snapshots AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              total_tokens,
+              suites::JSON AS sr
+            FROM trajectories
+            WHERE suites IS NOT NULL
+              AND LENGTH(CAST(suites AS VARCHAR)) > 5
+          ),
+          suite_entries AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              total_tokens,
+              unnest(json_keys(sr)) AS suite_key,
+              sr
+            FROM snapshots
+          ),
+          per_trajectory AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              MAX(total_tokens) AS total_tokens,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE)) AS total_passed,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE)) AS total_total
+            FROM suite_entries
+            WHERE SPLIT_PART(suite_key, '/', 2) != 'all'
+              AND SPLIT_PART(suite_key, '/', 2) != ''
+            GROUP BY trajectory_id, agent_model, environment
+          ),
+          ranked AS (
+            SELECT
+              *,
+              ROW_NUMBER() OVER (
+                PARTITION BY environment
+                ORDER BY total_passed DESC, total_total DESC, agent_model ASC
+              ) AS score_rank
+            FROM per_trajectory
+          ),
+          env_summary AS (
+            SELECT
+              environment,
+              COUNT(*) AS run_count,
+              MAX(total_passed) AS max_passed,
+              MAX(total_total) AS max_total,
+              MEDIAN(CASE WHEN total_total > 0 THEN total_passed * 1.0 / total_total ELSE 0 END) AS median_pass_rate,
+              SUM(total_tokens) AS total_tokens
+            FROM per_trajectory
+            GROUP BY environment
+          ),
+          best_model AS (
+            SELECT
+              environment,
+              agent_model AS best_model
+            FROM ranked
+            WHERE score_rank = 1
+          )
+          SELECT env_summary.*, best_model.best_model
+          FROM env_summary
+          LEFT JOIN best_model USING (environment)
+          ORDER BY environment
+        `,
+          activeProject,
+        );
 
-  const activeProject = await resolveProject(project);
-  await getSummaryRevisionStatus(activeProject);
-  return cached(`portfolio-env-data:${activeProject}`, async () => {
-    try {
-      const rawRows = await query(
-        `
-        WITH best_eval AS (
-          SELECT
-            trajectory_id,
-            MAX(passed) AS best_passed,
-            MAX(total) AS best_total
-          FROM evaluations
-          WHERE status = 'completed'
-          GROUP BY trajectory_id
-        ),
-        traj_scores AS (
-          SELECT
-            t.trajectory_id,
-            t.agent_model,
-            t.environment,
-            t.total_tokens,
-            COALESCE(b.best_passed, 0) AS best_passed,
-            COALESCE(b.best_total, 0) AS best_total
-          FROM trajectories t
-          LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
-        ),
-        env_summary AS (
-          SELECT
-            environment,
-            COUNT(*) AS run_count,
-            MAX(best_passed) AS max_passed,
-            MAX(best_total) AS max_total,
-            MEDIAN(CASE WHEN best_total > 0 THEN best_passed * 1.0 / best_total ELSE 0 END) AS median_pass_rate,
-            SUM(total_tokens) AS total_tokens,
-            (SELECT agent_model FROM traj_scores ts2
-              WHERE ts2.environment = traj_scores.environment
-              ORDER BY ts2.best_passed DESC
-              LIMIT 1) AS best_model,
-            LIST(DISTINCT agent_model) AS model_list
-          FROM traj_scores
-          GROUP BY environment
-        )
-        SELECT * FROM env_summary
-        ORDER BY environment
-      `,
-        activeProject,
-      );
-
-      return rawRows.map((row) => {
-        /** Count runs per model from the data */
-        const perModelCounts: Record<string, number> = {};
-        return {
+        return rawRows.map((row) => ({
           environment: String(row.environment ?? ""),
           bestPassed: Number(row.max_passed ?? 0),
           bestTotal: Number(row.max_total ?? 0),
@@ -1482,12 +1511,12 @@ export async function getPortfolioEnvironmentData(
           medianPassRate: Number(row.median_pass_rate ?? 0),
           runCount: Number(row.run_count ?? 0),
           totalTokens: Number(row.total_tokens ?? 0),
-          perModelCounts,
-        };
-      });
-    } catch {
-      return getMockPortfolioEnvironmentData();
-    }
+          perModelCounts: {},
+        }));
+      } catch {
+        return getMockPortfolioEnvironmentData();
+      }
+    },
   });
 }
 
@@ -1532,63 +1561,82 @@ function getMockPortfolioEnvironmentData(): PortfolioEnvironmentRow[] {
 export async function getParetoData(
   environment?: string,
   project?: string,
+  options?: { fresh?: boolean },
 ): Promise<ParetoPoint[]> {
   if (!isS3Configured()) {
     return getMockParetoData();
   }
+  return readProjectData({
+    project,
+    freshness: freshnessFromBool(options?.fresh),
+    cacheKey: `pareto-data:${project ?? "default"}:${environment ?? "all"}`,
+    load: async (activeProject) => {
+      try {
+        let sql = `
+          WITH snapshots AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              total_tokens,
+              suites::JSON AS sr
+            FROM trajectories
+            WHERE suites IS NOT NULL
+              AND LENGTH(CAST(suites AS VARCHAR)) > 5
+          ),
+          suite_entries AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              total_tokens,
+              unnest(json_keys(sr)) AS suite_key,
+              sr
+            FROM snapshots
+          ),
+          per_trajectory AS (
+            SELECT
+              trajectory_id,
+              agent_model,
+              environment,
+              MAX(total_tokens) AS total_tokens,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE)) AS total_passed,
+              SUM(CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE)) AS total_total
+            FROM suite_entries
+            WHERE SPLIT_PART(suite_key, '/', 2) != 'all'
+              AND SPLIT_PART(suite_key, '/', 2) != ''
+            GROUP BY trajectory_id, agent_model, environment
+          )
+          SELECT *
+          FROM per_trajectory
+          WHERE total_total > 0
+        `;
 
-  const activeProject = await resolveProject(project);
-  await getSummaryRevisionStatus(activeProject);
-  const cacheKey = `pareto-data:${activeProject}:${environment ?? "all"}`;
+        if (environment) {
+          sql += ` AND environment = '${sqlLiteral(environment)}'`;
+        }
 
-  return cached(cacheKey, async () => {
-    try {
-      let sql = `
-        WITH best_eval AS (
-          SELECT
-            trajectory_id,
-            MAX(passed) AS best_passed,
-            MAX(total) AS best_total
-          FROM evaluations
-          WHERE status = 'completed'
-          GROUP BY trajectory_id
-        )
-        SELECT
-          t.trajectory_id,
-          t.agent_model,
-          t.environment,
-          t.total_tokens,
-          COALESCE(b.best_passed, 0) AS best_passed,
-          COALESCE(b.best_total, 0) AS best_total
-        FROM trajectories t
-        LEFT JOIN best_eval b ON b.trajectory_id = t.trajectory_id
-        WHERE COALESCE(b.best_total, 0) > 0
-      `;
+        sql += ` ORDER BY total_tokens ASC`;
 
-      if (environment) {
-        sql += ` AND t.environment = '${sqlLiteral(environment)}'`;
+        const rawRows = await query(sql, activeProject);
+
+        return rawRows.map((row) => {
+          const passed = Number(row.total_passed ?? 0);
+          const total = Number(row.total_total ?? 0);
+          return {
+            trajectoryId: String(row.trajectory_id ?? ""),
+            model: String(row.agent_model ?? ""),
+            environment: String(row.environment ?? ""),
+            totalTokens: Number(row.total_tokens ?? 0),
+            passed,
+            total,
+            passRate: total > 0 ? passed / total : 0,
+          };
+        });
+      } catch {
+        return getMockParetoData();
       }
-
-      sql += ` ORDER BY t.total_tokens ASC`;
-
-      const rawRows = await query(sql, activeProject);
-
-      return rawRows.map((row) => {
-        const passed = Number(row.best_passed ?? 0);
-        const total = Number(row.best_total ?? 0);
-        return {
-          trajectoryId: String(row.trajectory_id ?? ""),
-          model: String(row.agent_model ?? ""),
-          environment: String(row.environment ?? ""),
-          totalTokens: Number(row.total_tokens ?? 0),
-          passed,
-          total,
-          passRate: total > 0 ? passed / total : 0,
-        };
-      });
-    } catch {
-      return getMockParetoData();
-    }
+    },
   });
 }
 

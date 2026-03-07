@@ -1,9 +1,7 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
 import type { SchemaColumn } from "@/lib/types";
-import { queryKeys } from "@/lib/query-keys";
-import { useProjectRevision } from "@/lib/use-project-revision";
+import { useProjectSchema } from "@/lib/project-data";
 import { QUERY_TEMPLATES } from "@/lib/query-templates";
 import { PageHeader } from "@/components/page-shell";
 import { QueryPageSkeleton } from "@/components/page-skeletons";
@@ -11,27 +9,15 @@ import { QueryClient } from "./query-client";
 
 type QueryPageClientProps = {
   project: string;
+  initialSchema?: SchemaColumn[];
 };
 
 /** Cache-first SQL console page shell with a page-specific cold-load skeleton. */
-export function QueryPageClient({ project }: QueryPageClientProps) {
-  useProjectRevision(project, {
-    invalidatePrefixes: [queryKeys.schema.all(project)],
-  });
-
-  const schemaQuery = useQuery({
-    queryKey: queryKeys.schema.all(project),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/schema?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch schema");
-      }
-      const data: SchemaColumn[] = await response.json();
-      return data;
-    },
-  });
+export function QueryPageClient({
+  project,
+  initialSchema,
+}: QueryPageClientProps) {
+  const schemaQuery = useProjectSchema(project, initialSchema);
 
   const schema = schemaQuery.data;
   const showSkeleton = schema === undefined && schemaQuery.isPending;

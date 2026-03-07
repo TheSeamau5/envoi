@@ -16,6 +16,18 @@ from typing import Any
 import boto3
 
 from envoi_code.models import AgentTrace
+from envoi_code.scripts.materialize_summaries import (
+    EVALUATION_SUMMARY_FILENAME,
+    EVALUATION_SUMMARY_SCHEMA,
+    SUMMARY_PUBLISH_FILENAMES,
+    TRAJECTORY_SUMMARY_FILENAME,
+    TRAJECTORY_SUMMARY_SCHEMA,
+    build_summary_outputs,
+    process_trace_rows,
+    read_table_rows,
+    replace_summary_rows_for_trajectory,
+    summary_artifact_key,
+)
 from envoi_code.utils.helpers import tprint, ts
 from envoi_code.utils.logs_parquet import (
     log_records_to_rows,
@@ -103,6 +115,21 @@ def trajectory_artifact_key(
     return f"project/{active_project}/trajectories/{trajectory_id}/{filename}"
 
 
+def build_trace_suites(trace: AgentTrace) -> dict[str, Any]:
+    # Merge suite_results across all evaluations to build the most complete
+    # picture. Individual evals may have partial results when suites timeout,
+    # so taking the union ensures the suite definition reflects the full
+    # environment rather than one eval's partial snapshot.
+    suites: dict[str, Any] = {}
+    for eval_rec in trace.evaluations.values():
+        if not eval_rec.suite_results:
+            continue
+        for key, val in eval_rec.suite_results.items():
+            if key not in suites:
+                suites[key] = val
+    return suites
+
+
 def save_trace_parquet(
     trajectory_id: str,
     trace: AgentTrace,
@@ -122,23 +149,11 @@ def save_trace_parquet(
     if not allow_empty and turn_count == 0 and part_count == 0:
         return
 
-    # Merge suite_results across all evaluations to build the most complete
-    # picture.  Individual evals may have partial results when suites timeout,
-    # so taking the union ensures the suite definition reflects the full
-    # environment rather than one eval's partial snapshot.
-    suites: dict[str, Any] = {}
-    for eval_rec in trace.evaluations.values():
-        if not eval_rec.suite_results:
-            continue
-        for key, val in eval_rec.suite_results.items():
-            if key not in suites:
-                suites[key] = val
-
     rows = agent_trace_to_rows(
         trace,
         environment=environment,
         task_params=task_params or {},
-        suites=suites,
+        suites=build_trace_suites(trace),
         bundle_uri=artifact_uri(trajectory_id, "repo.bundle", project=project),
     )
     buf = io.BytesIO()
@@ -222,6 +237,99 @@ def artifact_uri(
     prefix = get_prefix()
     key = trajectory_artifact_key(trajectory_id, filename, project=project)
     return f"s3://{prefix}/{key}"
+
+
+def download_optional_file_bytes(key: str) -> bytes | None:
+    s3 = get_s3_client()
+    prefix = get_prefix()
+    try:
+        response = s3.get_object(Bucket=prefix, Key=key)
+    except Exception as error:
+        code = str(
+            getattr(error, "response", {}).get("Error", {}).get("Code", ""),
+        ).strip()
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            return None
+        print(f"[s3] failed to download {key}: {error}")
+        return None
+
+    raw_body = response.get("Body")
+    if raw_body is None:
+        return None
+    return raw_body.read()
+
+
+def publish_completed_trajectory_summary(
+    trace: AgentTrace,
+    *,
+    environment: str,
+    task_params: dict[str, Any] | None = None,
+    project: str | None = None,
+) -> None:
+    active_project = (project or get_project()).strip() or "default"
+    if active_project != "c-compiler":
+        return
+    if not trace.parts:
+        return
+
+    trajectory_id = trace.trajectory_id
+    trajectory_rows = agent_trace_to_rows(
+        trace,
+        environment=environment,
+        task_params=task_params or {},
+        suites=build_trace_suites(trace),
+        bundle_uri=artifact_uri(trajectory_id, "repo.bundle", project=active_project),
+    )
+    trajectory_row, evaluation_rows = process_trace_rows(trajectory_rows)
+
+    trajectory_key = summary_artifact_key(
+        active_project,
+        TRAJECTORY_SUMMARY_FILENAME,
+    )
+    evaluation_key = summary_artifact_key(
+        active_project,
+        EVALUATION_SUMMARY_FILENAME,
+    )
+    existing_trajectory_rows = read_table_rows(
+        download_optional_file_bytes(trajectory_key),
+        TRAJECTORY_SUMMARY_SCHEMA,
+    )
+    existing_evaluation_rows = read_table_rows(
+        download_optional_file_bytes(evaluation_key),
+        EVALUATION_SUMMARY_SCHEMA,
+    )
+    merged_trajectory_rows, merged_evaluation_rows = (
+        replace_summary_rows_for_trajectory(
+            existing_trajectory_rows,
+            existing_evaluation_rows,
+            trajectory_row,
+            evaluation_rows,
+        )
+    )
+    outputs = build_summary_outputs(
+        merged_trajectory_rows,
+        merged_evaluation_rows,
+    )
+
+    s3 = get_s3_client()
+    prefix = get_prefix()
+    for filename in SUMMARY_PUBLISH_FILENAMES:
+        content_type = (
+            "application/json"
+            if filename.endswith(".json")
+            else "application/octet-stream"
+        )
+        key = summary_artifact_key(active_project, filename)
+        s3.put_object(
+            Bucket=prefix,
+            Key=key,
+            Body=outputs[filename],
+            ContentType=content_type,
+        )
+    print(
+        f"[s3] published trajectory summaries for project={active_project} "
+        f"trajectory_id={trajectory_id}",
+    )
 
 
 def load_trace_snapshot(

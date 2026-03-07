@@ -14,7 +14,6 @@ from envoi_code.sandbox.base import (
     SandboxImageRequirements,
     SandboxResolution,
 )
-from envoi_code.sandbox.modal import ModalSandbox
 
 try:
     from envoi_code.sandbox.e2b import E2BSandbox
@@ -34,6 +33,8 @@ async def create_sandbox(
 ) -> SandboxLaunchResult:
     """Resolve provider config and create a sandbox."""
     if provider == "modal":
+        from envoi_code.sandbox.modal import ModalSandbox
+
         resolution = ModalSandbox.resolve_config(config)
         sandbox = await ModalSandbox.create(resolution.applied_config)
         return SandboxLaunchResult(sandbox=sandbox, resolution=resolution)

@@ -95,7 +95,13 @@ export function QueryClient({
     return interpolated;
   }, [activeTemplate, paramValues, sql]);
 
-  const queryMutation = useMutation({
+  const {
+    mutate,
+    reset,
+    isPending: isLoading,
+    error,
+    data,
+  } = useMutation({
     mutationFn: async (queryText: string) => {
       const response = await fetch(
         `/api/query?project=${encodeURIComponent(project)}`,
@@ -119,18 +125,17 @@ export function QueryClient({
       if (queryText.trim().length === 0) {
         return;
       }
-      queryMutation.mutate(queryText);
+      mutate(queryText);
     },
-    [queryMutation],
+    [mutate],
   );
 
   const handleRun = useCallback(() => {
     runQuery(interpolatedSql);
   }, [runQuery, interpolatedSql]);
 
-  const isLoading = queryMutation.isPending;
-  const error = queryMutation.error?.message;
-  const result = queryMutation.data;
+  const errorMessage = error?.message;
+  const result = data;
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -163,7 +168,7 @@ export function QueryClient({
       }
       setActiveTemplateId(templateId);
       setActiveVisualization(tmpl.visualization);
-      queryMutation.reset();
+      reset();
 
       /** Populate default param values */
       const defaults: Record<string, string> = {};
@@ -176,7 +181,7 @@ export function QueryClient({
       setSql(tmpl.sql);
       textareaRef.current?.focus();
     },
-    [allTemplates],
+    [allTemplates, reset],
   );
 
   const handleClearTemplate = useCallback(() => {
@@ -403,7 +408,7 @@ export function QueryClient({
 
         {/* Results area */}
         <div className="flex-1 overflow-auto">
-          {error && (
+          {errorMessage && (
             <div
               className="border-b px-3.5 py-2.5 text-[12px]"
               style={{
@@ -412,7 +417,7 @@ export function QueryClient({
                 borderColor: T.redBorderLight,
               }}
             >
-              {error}
+              {errorMessage}
             </div>
           )}
 
@@ -493,7 +498,7 @@ export function QueryClient({
             </div>
           )}
 
-          {!result && !error && !isLoading && (
+          {!result && !errorMessage && !isLoading && (
             <div className="flex flex-1 items-center justify-center py-10 text-[12px] text-envoi-text-dim">
               Select a template or write SQL, then click Run
             </div>

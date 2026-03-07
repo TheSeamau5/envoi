@@ -8,47 +8,20 @@
 import { useMemo } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
 import type { Trajectory } from "@/lib/types";
-import { isPossiblyLive } from "@/lib/use-live-trajectory";
-import { useProjectRevision } from "@/lib/use-project-revision";
+import {
+  useProjectLiveTrajectoryIds,
+  useProjectTrajectories,
+} from "@/lib/project-data";
 import { TOTAL_TESTS, computeTotalTests } from "@/lib/constants";
 import { PageHeader } from "@/components/page-shell";
 import { TrajectoryListSkeleton } from "@/components/page-skeletons";
 import { formatPercent, formatDate, needsYear } from "@/lib/utils";
-import { queryKeys } from "@/lib/query-keys";
 
 type TrajectoryListProps = {
   trajectories: Trajectory[];
   project: string;
 };
-
-type TrajectoryListQueryData = {
-  trajectories: Trajectory[];
-  liveIds: Set<string>;
-};
-
-function normalizeTrajectoryListData(value: unknown): TrajectoryListQueryData {
-  if (
-    value !== null &&
-    typeof value === "object" &&
-    "trajectories" in value &&
-    Array.isArray(value.trajectories)
-  ) {
-    const liveIds =
-      "liveIds" in value && value.liveIds instanceof Set
-        ? value.liveIds
-        : new Set<string>();
-    return {
-      trajectories: value.trajectories as Trajectory[],
-      liveIds,
-    };
-  }
-  return {
-    trajectories: [],
-    liveIds: new Set<string>(),
-  };
-}
 
 /** Fixed column widths — shared between header and rows for alignment */
 const COL = {
@@ -108,92 +81,17 @@ function groupByEnvironmentThenModel(
   return sorted;
 }
 
-/** Poll every 30 seconds while any trajectory is live */
-const LIST_POLL_MS = 30_000;
-
-/**
- * Check sandbox status for a list of trajectory IDs.
- * Returns the set of IDs that are confirmed running.
- */
-async function checkLiveTrajectories(
-  trajectoryIds: string[],
-  project: string,
-): Promise<Set<string>> {
-  const liveIds = new Set<string>();
-  await Promise.allSettled(
-    trajectoryIds.map(async (trajectoryId) => {
-      const response = await fetch(
-        `/api/trajectories/${encodeURIComponent(trajectoryId)}/sandbox-status?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        return;
-      }
-      const data = await response.json();
-      if (data.running === true) {
-        liveIds.add(trajectoryId);
-      }
-    }),
-  );
-  return liveIds;
-}
-
 export function TrajectoryList({
   trajectories: initialTrajectories,
   project,
 }: TrajectoryListProps) {
-  useProjectRevision(project, {
-    invalidatePrefixes: [queryKeys.trajectories.all(project)],
-  });
-
-  /** Fetch trajectory list with polling */
-  const trajectoriesQuery = useQuery({
-    queryKey: queryKeys.trajectories.all(project),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/trajectories?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch trajectories");
-      }
-      const data: Trajectory[] = await response.json();
-      return { trajectories: data, liveIds: new Set<string>() };
-    },
-    initialData:
-      initialTrajectories.length > 0
-        ? {
-            trajectories: initialTrajectories,
-            liveIds: new Set<string>(),
-          }
-        : undefined,
-    staleTime: 0,
-  });
-
-  const normalizedQueryData = normalizeTrajectoryListData(
-    trajectoriesQuery.data,
+  const trajectoriesQuery = useProjectTrajectories(
+    project,
+    initialTrajectories,
   );
-  const trajectories =
-    normalizedQueryData.trajectories.length > 0
-      ? normalizedQueryData.trajectories
-      : initialTrajectories;
-  const candidateIds = useMemo(
-    () =>
-      trajectories
-        .filter((trace) => isPossiblyLive(trace))
-        .map((trace) => trace.id)
-        .sort(),
-    [trajectories],
-  );
-
-  const liveIdsQuery = useQuery({
-    queryKey: queryKeys.trajectories.live(project, candidateIds),
-    queryFn: () => checkLiveTrajectories(candidateIds, project),
-    initialData: new Set<string>(),
-    enabled: candidateIds.length > 0,
-    refetchInterval: candidateIds.length > 0 ? LIST_POLL_MS : false,
-    staleTime: 0,
-  });
-
-  const liveIds = liveIdsQuery.data ?? normalizedQueryData.liveIds;
+  const trajectories = trajectoriesQuery.data ?? initialTrajectories;
+  const liveIdsQuery = useProjectLiveTrajectoryIds(project, trajectories);
+  const liveIds = liveIdsQuery.data ?? new Set<string>();
   const grouped = useMemo(
     () => groupByEnvironmentThenModel(trajectories),
     [trajectories],

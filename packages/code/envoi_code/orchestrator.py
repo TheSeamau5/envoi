@@ -119,6 +119,7 @@ from envoi_code.utils.storage import (
     get_prefix,
     get_s3_client,
     load_trace_snapshot,
+    publish_completed_trajectory_summary,
     save_logs_parquet,
     save_trace_parquet,
     trajectory_artifact_key,
@@ -831,6 +832,16 @@ async def end_session(
             task_params=task_params,
             project=project,
         )
+        if project == "c-compiler":
+            try:
+                publish_completed_trajectory_summary(
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params,
+                    project=project,
+                )
+            except Exception as summary_error:
+                print(f"[summary] failed publishing trajectory summaries: {summary_error}")
 
     print(f"[end] session ended: {reason}, {part_count} parts, commit={final_commit}")
 
@@ -3446,6 +3457,30 @@ async def finalize_trajectory_run(
             )
         part_count = max(part_count, trace_part_count)
         turn_count = max(turn_count, trace_turn_count)
+        if agent_trace.session_end is None:
+            print(
+                "[end] persisting minimal session_end before long shutdown work "
+                f"reason={end_reason} parts={part_count} turns={turn_count}",
+            )
+            agent_trace.session_end = SessionEnd(
+                reason=end_reason,
+                total_parts=part_count,
+                total_turns=turn_count,
+                final_git_commit=latest_git_commit,
+            )
+            try:
+                save_trace_parquet(
+                    trajectory_id,
+                    agent_trace,
+                    environment=environment,
+                    task_params=task_params_loaded,
+                    project=project,
+                )
+            except Exception as minimal_save_error:
+                print(
+                    "[end] failed to persist minimal final trace: "
+                    f"{minimal_save_error}",
+                )
 
     if evaluator is not None:
         try:

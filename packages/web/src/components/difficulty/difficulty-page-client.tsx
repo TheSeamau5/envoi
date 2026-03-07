@@ -1,38 +1,22 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
 import type { DifficultyCell } from "@/lib/types";
-import { queryKeys } from "@/lib/query-keys";
-import { useProjectRevision } from "@/lib/use-project-revision";
+import { useProjectDifficulty } from "@/lib/project-data";
 import { PageHeader } from "@/components/page-shell";
 import { DifficultyPageSkeleton } from "@/components/page-skeletons";
 import { DifficultyHeatmap } from "./difficulty-heatmap";
 
 type DifficultyPageClientProps = {
   project: string;
+  initialCells?: DifficultyCell[];
 };
 
 /** Cache-first difficulty page shell with a page-specific cold-load skeleton. */
 export function DifficultyPageClient({
   project,
+  initialCells,
 }: DifficultyPageClientProps) {
-  useProjectRevision(project, {
-    invalidatePrefixes: [queryKeys.difficulty.all(project)],
-  });
-
-  const difficultyQuery = useQuery({
-    queryKey: queryKeys.difficulty.all(project),
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/difficulty?project=${encodeURIComponent(project)}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch difficulty data");
-      }
-      const data: DifficultyCell[] = await response.json();
-      return data;
-    },
-  });
+  const difficultyQuery = useProjectDifficulty(project, initialCells);
 
   const showSkeleton =
     difficultyQuery.data === undefined && difficultyQuery.isPending;
