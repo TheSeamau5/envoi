@@ -67,6 +67,74 @@ This file contains all rules, conventions, and architectural context for AI agen
 The dashboard reads trajectory parquet files from S3 via DuckDB (in-process).
 There is a hard 1 GB memory budget — every query must stay within it.
 
+## Mandatory Delivery Workflow
+
+These rules apply to any non-trivial change under `packages/web`, especially
+when the change touches routing, data loading, caching, S3 reads, query
+invalidations, client state, or rendering.
+
+### Multi-agent default
+
+- If multi-agent execution is available, do not work single-threaded by default.
+- Minimum role split:
+  - **Planner / tracker** — define the approach, the invariants, and the
+    verification plan before edits; keep a short live checklist with
+    `todo/in-progress/done`.
+  - **Implementer** — make the change.
+  - **Adversarial verifier** — assume the change is wrong until proven
+    otherwise; actively look for stale cache reads, UI/runtime mismatches,
+    broken navigation, hydration issues, and regressions.
+- Trivial exceptions are limited to copy-only edits, comments, or tiny cosmetic
+  fixes with no behavioral impact. Even then, final verification is still
+  required.
+
+### Planning and progress tracking
+
+- Before editing, write down:
+  - the user-visible surfaces being changed,
+  - the data sources involved,
+  - what must stay immutable during loading/navigation,
+  - the exact verification commands you will run.
+- Keep a short progress ledger while working. Do not just "work until done" and
+  hope it holds together.
+- Close each task by checking the finished behavior against the original plan,
+  not just against whether the code compiles.
+
+### Adversarial verification is required
+
+- Every meaningful `packages/web` change gets an explicit falsification pass.
+- The verifier should try to prove:
+  - S3 data, local materialized/cache data, and runtime UI disagree.
+  - Cached revisits still show cold-loading states.
+  - Back/forward navigation causes visible lag or layout churn.
+  - Immutable page chrome gets torn down and rebuilt unnecessarily.
+  - Query invalidation or refresh logic drops known data on the floor.
+  - Console errors, hydration errors, or runtime error overlays appear.
+- If the verifier cannot run because the environment is unavailable, say that
+  explicitly and do not claim the full workflow was completed.
+
+## Runtime Truth: S3, Cache, UI
+
+For dashboard work, treat runtime truth as a three-way agreement:
+
+- **S3 parquet** — canonical raw/source data.
+- **Local DuckDB/materialized/cache layer** — the mirror the app actually uses.
+- **Rendered UI at runtime** — the final user-visible truth.
+
+For `c-compiler` work in particular, the task is not done until these agree.
+
+- Required closeout command for `c-compiler` data/caching/routing work:
+  `pnpm verify:c-compiler`
+- `pnpm verify:c-compiler` must validate:
+  - trajectory list metrics,
+  - trajectory detail metrics,
+  - project routes that read the same underlying data,
+  - console/runtime cleanliness,
+  - cached revisit behavior with delayed API responses.
+
+If one layer says one thing and another layer says something else, treat that as
+a bug even if the page "looks fine".
+
 ### Centralized freshness
 
 All project-scoped data must flow through the centralized data layer:
@@ -117,6 +185,28 @@ trajectory so selecting/deselecting traces is fast.
 the agent wrote code), not eval `finishedAt` (when CI completed). Eval
 completion times are non-monotonic because evals run asynchronously — using them
 produces backward jumps on the time axis.
+
+## Snappy UI Rules
+
+- Cached data renders first. Background revalidation is allowed. Blocking on
+  already-known data is not.
+- Returning to a previously visited page must reuse cached data immediately.
+  Cached revisits must not show cold skeletons, blank panels, or generic loading
+  copy.
+- Keep immutable page structure mounted. Only splice in the precise leaf data
+  that is actually missing or changing.
+- If the page shape is already known, loading states must preserve that shape.
+  Do not replace a known layout with a spinner or a generic placeholder.
+- Never clear already-visible data just because a refetch started.
+- Prefer persistent layouts, shared query keys, `initialData`,
+  `placeholderData`, `keepPreviousData`, and stale-while-revalidate patterns
+  over mount-time blocking fetches.
+- Navigation between already-visited pages should feel instantaneous. If a slow
+  network response can make the UI look blank, the architecture is wrong.
+- New routes/components should define:
+  - what data is immutable during navigation,
+  - what data may refresh in the background,
+  - what precise subtrees are allowed to show placeholders.
 
 ## localStorage & UI Persistence
 

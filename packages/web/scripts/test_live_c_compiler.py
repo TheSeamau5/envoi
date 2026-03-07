@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import io
-import math
 import os
 import re
 import signal
@@ -17,7 +16,6 @@ from typing import Any
 import boto3
 import pyarrow.parquet as pq
 import requests
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 WEB_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +23,13 @@ BASE_URL = os.environ.get("ENVOI_UI_BASE_URL", "http://localhost:3000")
 PROJECT = "c-compiler"
 S3_PREFIX = os.environ.get("AWS_S3_PREFIX", "envoi-trace-data").strip() or "envoi-trace-data"
 SCREENSHOT_DIR = Path("/tmp/envoi-live-c-compiler")
+CACHED_REVISIT_MAX_SECONDS = 0.5
+DELAYED_API_SECONDS = 2.5
+BLOCKED_LOADING_COPY = [
+    "Loading cached runs...",
+    "Loading cached run...",
+    "Loading trajectory...",
+]
 
 
 @dataclass
@@ -267,7 +272,7 @@ def cache_summary_row(trajectory_id: str) -> dict[str, Any]:
     """
     rows = sql_rows(sql)
     if len(rows) != 1:
-      raise RuntimeError(f"Expected 1 cache row for {trajectory_id}, got {rows}")
+        raise RuntimeError(f"Expected 1 cache row for {trajectory_id}, got {rows}")
     return rows[0]
 
 
@@ -288,6 +293,126 @@ def parse_row_metrics(row_text: str) -> tuple[str, int, str]:
         int(match.group("passed")),
         match.group("pct"),
     )
+
+
+def expected_detail_score_text(row: dict[str, Any]) -> str | None:
+    best_total = int(row["best_total"])
+    if best_total <= 0:
+        return None
+    return f"{row['best_passed']} passed / {best_total - row['best_passed']} failed"
+
+
+def assert_no_blocked_loading_copy(page: Any, context_name: str) -> None:
+    body_text = page.locator("body").inner_text()
+    for blocked_text in BLOCKED_LOADING_COPY:
+        if blocked_text in body_text:
+            raise AssertionError(
+                f"{context_name}: blocked loading copy visible during cached revisit: {blocked_text}",
+            )
+
+
+def install_delayed_route(context: Any, pattern: Any) -> Any:
+    def handler(route: Any) -> None:
+        time.sleep(DELAYED_API_SECONDS)
+        route.continue_()
+
+    context.route(pattern, handler)
+    return handler
+
+
+def run_cached_navigation_checks(
+    context: Any,
+    list_page: Any,
+    trajectory_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if len(trajectory_rows) == 0:
+        return []
+
+    row = next(
+        (candidate for candidate in trajectory_rows if expected_detail_score_text(candidate)),
+        None,
+    )
+    if row is None:
+        raise AssertionError(
+            "Expected at least one completed evaluation to verify cached detail revisits",
+        )
+    trajectory_id = str(row["trajectory_id"])
+    detail_score = expected_detail_score_text(row)
+    if detail_score is None:
+        raise AssertionError(f"{trajectory_id}: missing detail score for cached revisit check")
+
+    list_path = f"/project/{PROJECT}/trajectory"
+    detail_path = f"/project/{PROJECT}/trajectory/{trajectory_id}"
+    list_link = list_page.locator(
+        f'a[href="{detail_path}"]'
+    ).first
+
+    list_link.wait_for(timeout=120000)
+    list_link.click()
+    list_page.wait_for_url(f"{BASE_URL}{detail_path}", timeout=120000)
+    list_page.get_by_text(detail_score, exact=False).first.wait_for(timeout=120000)
+    list_page.wait_for_timeout(750)
+
+    results: list[dict[str, Any]] = []
+    list_api_pattern = re.compile(
+        rf".*/api/trajectories\?project={re.escape(PROJECT)}(?:&.*)?$",
+    )
+    detail_api_pattern = re.compile(
+        rf".*/api/trajectories/{re.escape(trajectory_id)}\?project={re.escape(PROJECT)}(?:&.*)?$",
+    )
+
+    delayed_list_handler = install_delayed_route(context, list_api_pattern)
+    try:
+        started_at = time.perf_counter()
+        list_page.evaluate("window.history.back()")
+        list_page.wait_for_url(f"{BASE_URL}{list_path}", timeout=120000)
+        list_page.get_by_text("TRAJECTORIES", exact=False).first.wait_for(
+            timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000),
+        )
+        list_page.locator(
+            f'a[href="{detail_path}"]'
+        ).first.wait_for(timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000))
+        duration = time.perf_counter() - started_at
+        if duration > CACHED_REVISIT_MAX_SECONDS:
+            raise AssertionError(
+                f"trajectory_list_revisit: cached revisit too slow ({duration:.3f}s > {CACHED_REVISIT_MAX_SECONDS:.3f}s)",
+            )
+        assert_no_blocked_loading_copy(list_page, "trajectory_list_revisit")
+        results.append({
+            "route": "trajectory_list_revisit",
+            "path": list_path,
+            "duration_s": round(duration, 3),
+            "delayed_api_s": DELAYED_API_SECONDS,
+        })
+        list_page.wait_for_timeout(round(DELAYED_API_SECONDS * 1000) + 250)
+    finally:
+        context.unroute(list_api_pattern, delayed_list_handler)
+
+    delayed_detail_handler = install_delayed_route(context, detail_api_pattern)
+    try:
+        started_at = time.perf_counter()
+        list_page.locator(f'a[href="{detail_path}"]').first.click()
+        list_page.wait_for_url(f"{BASE_URL}{detail_path}", timeout=120000)
+        list_page.get_by_text(detail_score, exact=False).first.wait_for(
+            timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000),
+        )
+        duration = time.perf_counter() - started_at
+        if duration > CACHED_REVISIT_MAX_SECONDS:
+            raise AssertionError(
+                f"trajectory_detail_revisit: cached revisit too slow ({duration:.3f}s > {CACHED_REVISIT_MAX_SECONDS:.3f}s)",
+            )
+        assert_no_blocked_loading_copy(list_page, "trajectory_detail_revisit")
+        results.append({
+            "route": "trajectory_detail_revisit",
+            "path": detail_path,
+            "duration_s": round(duration, 3),
+            "delayed_api_s": DELAYED_API_SECONDS,
+        })
+        list_page.wait_for_timeout(round(DELAYED_API_SECONDS * 1000) + 250)
+    finally:
+        context.unroute(detail_api_pattern, delayed_detail_handler)
+
+    return results
 
 
 def run_playwright_checks(trajectory_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -384,15 +509,15 @@ def run_playwright_checks(trajectory_rows: list[dict[str, Any]]) -> list[dict[st
                 wait_until="domcontentloaded",
                 timeout=120000,
             )
-            detail_page.get_by_text("codex/gpt-5.3-codex", exact=False).first.wait_for(timeout=120000)
+            detail_ready_text = expected_detail_score_text(row) or trajectory_id
+            detail_page.get_by_text(detail_ready_text, exact=False).first.wait_for(timeout=120000)
             detail_page.wait_for_timeout(1000)
             detail_text = detail_page.locator("body").inner_text()
-            if row["best_total"] > 0:
-                expected = f"{row['best_passed']} passed / {row['best_total'] - row['best_passed']} failed"
-                if expected not in detail_text:
-                    raise AssertionError(
-                        f"{trajectory_id}: detail page missing expected score '{expected}'",
-                    )
+            expected = expected_detail_score_text(row)
+            if expected and expected not in detail_text:
+                raise AssertionError(
+                    f"{trajectory_id}: detail page missing expected score '{expected}'",
+                )
             if "Console Error" in detail_text or "Application error" in detail_text:
                 raise AssertionError(f"{trajectory_id}: runtime error overlay on detail page")
             detail_page.screenshot(
@@ -401,6 +526,7 @@ def run_playwright_checks(trajectory_rows: list[dict[str, Any]]) -> list[dict[st
             )
             detail_page.close()
 
+        results.extend(run_cached_navigation_checks(context, list_page, trajectory_rows))
         list_page.close()
         browser.close()
     return results

@@ -127,6 +127,61 @@ Uses `importlib.util.spec_from_file_location` — task directories don't need to
 - **SDK isolation**: Agent scripts run inside the sandbox. The orchestrator talks to them via a JSON stdio surface, decoupled from agent SDK internals.
 - **Two Protocol abstractions**: `Agent` for agents, `Sandbox` for sandboxes. Swap implementations without touching the orchestrator.
 
+## ExecPlans
+
+Use an ExecPlan for any cross-package feature, significant refactor, schema or
+data-contract migration, or task with meaningful unknowns. The repo-wide
+ExecPlan contract lives in `PLANS.md`.
+
+Create or update a task-specific ExecPlan under
+`.codex/plans/<yyyy-mm-dd>-<slug>.md` when:
+
+- work spans more than one package or a package plus `examples/`,
+- work changes a public contract between `envoi`, `envoi-code`, `envoi-cli`,
+  `packages/web`, or the example environments,
+- work changes `trace.parquet`, `logs.parquet`, replay/checkpoint semantics, or
+  the canonical `part` / `turn` vocabulary,
+- work changes runtime data flow in the dashboard (`packages/web`), especially
+  S3, cache, and UI parity,
+- the task is large enough that milestones and verification need to survive
+  across multiple turns or sessions.
+
+ExecPlans are living documents. Keep `Progress`, `Decisions`, `Surprises`, and
+`Validation` current as you work. Do not treat the existing `plan.md` file as
+the repo-wide planning standard; unless a task explicitly references it, follow
+`PLANS.md`.
+
+## Monorepo Workflow
+
+Before editing:
+
+- identify the impacted package(s), downstream dependents, and any affected
+  example task/environment;
+- identify package-specific instruction files along the path;
+  `packages/web/AGENTS.md` adds stricter runtime and verification rules for the
+  dashboard;
+- write down the validation commands before changing code.
+
+Dependency-aware workflow rules:
+
+- `packages/cli` changes can affect both `packages/code` and `packages/envoi`;
+- `packages/code` changes can affect `packages/envoi` and any example
+  environment/task used for evaluation;
+- `packages/web` changes read S3/DuckDB/cache state and must respect the
+  runtime data rules in its local `AGENTS.md`;
+- `examples/` changes can invalidate assumptions in the SDK, runner, and web
+  surfaces that consume those artifacts.
+
+For non-trivial work, use multiple agents if available:
+
+- planner/tracker,
+- implementer(s) with disjoint write scopes,
+- adversarial verifier.
+
+The verifier's job is to prove the change wrong via contract drift, missing
+tests, stale docs, replay breakage, CLI routing regressions, or runtime
+S3/cache/UI mismatches.
+
 ## Hard Requirements
 
 - Persist `trace.parquet` after every recorded part.
@@ -239,6 +294,27 @@ uv sync
 cp .env.example .env  # fill in credentials
 envoi code --example examples/c_compiler
 ```
+
+## Validation Strategy
+
+Validate the narrowest changed surface and every downstream consumer of the
+touched contract.
+
+- `packages/envoi/`: `uv run pytest packages/envoi/tests` and, when types
+  changed, `uv run pyright -p packages/envoi/pyrightconfig.json`.
+- `packages/code/`: `uv run pytest packages/code/tests`; add targeted
+  orchestrator/trace/storage/parsing coverage when those contracts change.
+- `packages/cli/`: run the relevant `envoi ...` smoke path (at minimum
+  `envoi --help` or the changed subcommand) plus downstream tests for the
+  package it routes into.
+- `packages/web/`: `pnpm --dir packages/web lint`, `pnpm --dir packages/web test`,
+  and any live verifier required by `packages/web/AGENTS.md`.
+- `examples/` or environment/task changes: run the narrowest real
+  `envoi code ...` or `envoi deploy ...` command that exercises the changed
+  flow.
+
+Never claim success from one package's tests alone when a shared contract
+changed underneath another package.
 
 ## Where To Edit What
 

@@ -1,0 +1,65 @@
+model = "gpt-5.4"
+model_provider = "openai"
+model_reasoning_effort = "xhigh"
+model_verbosity = "medium"
+personality = "pragmatic"
+model_context_window=1000000
+model_auto_compact_token_limit=900000
+
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+web_search = "live"
+project_root_markers = [".git"]
+
+[features]
+multi_agent = true
+unified_exec = true
+apply_patch_freeform = true
+
+[agents]
+max_threads = 8
+max_depth = 2
+job_max_runtime_seconds = 7200
+
+[projects."/Users/hassanhayat/GeneralCoginition/envoi"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/personal_website"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/client_edfinity_temp"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/simple_agent"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/envoi-trace-code"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/synthetic-website"]
+trust_level = "trusted"
+
+[projects."/Users/hassanhayat/GeneralCoginition/synthetic-data-room"]
+trust_level = "trusted"
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+required = true
+startup_timeout_sec = 20
+tool_timeout_sec = 90
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+enabled = true
+required = false
+startup_timeout_sec = 20
+tool_timeout_sec = 90
+
+[mcp_servers.exa_ai]
+enabled = true
+url = "https://mcp.exa.ai/mcp"
+
+[mcp_servers.playwright]
+args = ["@playwright/mcp@latest"]
+command = "npx"

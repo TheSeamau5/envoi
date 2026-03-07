@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:live-c-compiler": "python scripts/test_live_c_compiler.py"
+    "test:live-c-compiler": "python scripts/test_live_c_compiler.py",
+    "verify:c-compiler": "pnpm lint && pnpm test && pnpm test:live-c-compiler"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.69",
