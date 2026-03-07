@@ -18,8 +18,19 @@ type SetupsClientProps = {
   project: string;
 };
 
+function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
+  const deduped = new Map<string, Trajectory>();
+  for (const trace of traces) {
+    deduped.set(trace.id, trace);
+  }
+  return [...deduped.values()];
+}
+
 export function SetupsClient({ allTraces, project }: SetupsClientProps) {
-  const compareQuery = useProjectSetups(project, allTraces);
+  const compareQuery = useProjectSetups(
+    project,
+    dedupeTrajectoriesById(allTraces),
+  );
 
   if (compareQuery.isError) {
     return (
@@ -45,7 +56,9 @@ export function SetupsClient({ allTraces, project }: SetupsClientProps) {
         <SetupsPageSkeleton />
       ) : (
         <SetupCompare
-          allTraces={traces && traces.length > 0 ? traces : allTraces}
+          allTraces={dedupeTrajectoriesById(
+            traces && traces.length > 0 ? traces : allTraces,
+          )}
         />
       )}
     </div>

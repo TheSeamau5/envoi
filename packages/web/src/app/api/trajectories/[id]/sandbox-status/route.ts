@@ -43,10 +43,10 @@ export async function GET(
   try {
     const meta = await getTrajectorySandboxMeta(id, project);
     if (!meta) {
-      return NextResponse.json(
-        { error: "Trajectory not found" },
-        { status: 404 },
-      );
+      return NextResponse.json({
+        running: false,
+        reason: "trajectory_not_found",
+      });
     }
 
     /** Already finished — no need to query the provider */

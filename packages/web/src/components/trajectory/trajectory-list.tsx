@@ -41,13 +41,36 @@ const CELL_BORDER = "border-r border-envoi-border-light px-3";
 
 type GroupedTrajectories = Map<string, Map<string, Trajectory[]>>;
 
+function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
+  const deduped = new Map<string, Trajectory>();
+  const duplicateIds = new Set<string>();
+  for (const trace of traces) {
+    if (deduped.has(trace.id)) {
+      duplicateIds.add(trace.id);
+    }
+    deduped.set(trace.id, trace);
+  }
+  if (duplicateIds.size > 0) {
+    console.warn(
+      "[trajectory-list] deduped duplicate trajectory ids",
+      [...duplicateIds.values()],
+    );
+  }
+  return [...deduped.values()];
+}
+
 /** Group trajectories by environment then model, sorted reverse chronological */
 function groupByEnvironmentThenModel(
   traces: Trajectory[],
 ): GroupedTrajectories {
   const envGroups: GroupedTrajectories = new Map();
+  const seenIds = new Set<string>();
 
   for (const trace of traces) {
+    if (seenIds.has(trace.id)) {
+      continue;
+    }
+    seenIds.add(trace.id);
     const environment = trace.environment || "unknown";
     let modelMap = envGroups.get(environment);
     if (!modelMap) {
@@ -89,7 +112,10 @@ export function TrajectoryList({
     project,
     initialTrajectories,
   );
-  const trajectories = trajectoriesQuery.data ?? initialTrajectories;
+  const trajectories = useMemo(
+    () => dedupeTrajectoriesById(trajectoriesQuery.data ?? initialTrajectories),
+    [initialTrajectories, trajectoriesQuery.data],
+  );
   const liveIdsQuery = useProjectLiveTrajectoryIds(project, trajectories);
   const liveIds = liveIdsQuery.data ?? new Set<string>();
   const grouped = useMemo(

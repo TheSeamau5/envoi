@@ -47,6 +47,14 @@ type PortfolioResponse = {
   paretoPoints: ParetoPoint[];
 };
 
+function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
+  const deduped = new Map<string, Trajectory>();
+  for (const trace of traces) {
+    deduped.set(trace.id, trace);
+  }
+  return [...deduped.values()];
+}
+
 export function ensureQueryValue<T>(
   value: T | undefined,
   queryKey: readonly unknown[],
@@ -159,8 +167,14 @@ export function useProjectTrajectories(
 
   return useQuery({
     queryKey: queryKeys.trajectories.all(project),
-    queryFn: () => fetchProjectJson<Trajectory[]>("/api/trajectories", project),
-    initialData: initialData && initialData.length > 0 ? initialData : undefined,
+    queryFn: async () =>
+      dedupeTrajectoriesById(
+        await fetchProjectJson<Trajectory[]>("/api/trajectories", project),
+      ),
+    initialData:
+      initialData && initialData.length > 0
+        ? dedupeTrajectoriesById(initialData)
+        : undefined,
     staleTime: 0,
     refetchOnMount: true,
   });
@@ -237,13 +251,15 @@ export function useProjectCompare(
 
   return useQuery({
     queryKey,
-    queryFn: () =>
-      fetchProjectJson<Trajectory[]>("/api/compare", project, {
-        searchParams,
-      }),
+    queryFn: async () =>
+      dedupeTrajectoriesById(
+        await fetchProjectJson<Trajectory[]>("/api/compare", project, {
+          searchParams,
+        }),
+      ),
     initialData:
       options?.initialData && options.initialData.length > 0
-        ? options.initialData
+        ? dedupeTrajectoriesById(options.initialData)
         : undefined,
     enabled: options?.enabled !== false,
     placeholderData: keepPreviousData,
@@ -262,7 +278,9 @@ export function useProjectSetups(
 
   return {
     ...query,
-    data: (query.data ?? []).filter((trace) => isTrajectoryActive(trace)),
+    data: dedupeTrajectoriesById(
+      (query.data ?? []).filter((trace) => isTrajectoryActive(trace)),
+    ),
   };
 }
 
