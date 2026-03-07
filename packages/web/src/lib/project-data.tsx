@@ -93,10 +93,10 @@ async function fetchProjectJson<T>(
   if (!response.ok) {
     throw new Error(`Failed to fetch ${path}`);
   }
-  return ensureQueryValue(
-    (await response.json()) as T | undefined,
-    [path, project],
-  );
+  return ensureQueryValue((await response.json()) as T | undefined, [
+    path,
+    project,
+  ]);
 }
 
 function invalidateProjectQueries(
@@ -148,11 +148,7 @@ export function useProjectDataStatus(
     }
     previousDataVersionRef.current = dataVersion;
     invalidateProjectQueries(queryClient, options?.invalidateKeys ?? []);
-  }, [
-    options?.invalidateKeys,
-    queryClient,
-    statusQuery.data?.dataVersion,
-  ]);
+  }, [options?.invalidateKeys, queryClient, statusQuery.data?.dataVersion]);
 
   return statusQuery.data;
 }
@@ -169,7 +165,9 @@ export function useProjectTrajectories(
     queryKey: queryKeys.trajectories.all(project),
     queryFn: async () =>
       dedupeTrajectoriesById(
-        await fetchProjectJson<Trajectory[]>("/api/trajectories", project),
+        await fetchProjectJson<Trajectory[]>("/api/trajectories", project, {
+          bust: true,
+        }),
       ),
     initialData:
       initialData && initialData.length > 0
@@ -242,7 +240,7 @@ export function useProjectCompare(
     sortedIds.length > 0
       ? queryKeys.compare.byIds(project, sortedIds)
       : options?.environment
-        ? [...queryKeys.compare.all(project), options.environment] as const
+        ? ([...queryKeys.compare.all(project), options.environment] as const)
         : queryKeys.compare.full(project);
 
   useProjectDataStatus(project, {
@@ -268,10 +266,7 @@ export function useProjectCompare(
   });
 }
 
-export function useProjectSetups(
-  project: string,
-  initialData?: Trajectory[],
-) {
+export function useProjectSetups(project: string, initialData?: Trajectory[]) {
   const query = useProjectCompare(project, {
     initialData,
   });
@@ -294,8 +289,10 @@ export function useProjectDifficulty(
 
   return useQuery({
     queryKey: queryKeys.difficulty.all(project),
-    queryFn: () => fetchProjectJson<DifficultyCell[]>("/api/difficulty", project),
-    initialData: initialData && initialData.length > 0 ? initialData : undefined,
+    queryFn: () =>
+      fetchProjectJson<DifficultyCell[]>("/api/difficulty", project),
+    initialData:
+      initialData && initialData.length > 0 ? initialData : undefined,
     staleTime: 0,
     refetchOnMount: true,
   });
@@ -314,7 +311,8 @@ export function useProjectPortfolio(
 
   return useQuery({
     queryKey: queryKeys.portfolio.all(project),
-    queryFn: () => fetchProjectJson<PortfolioResponse>("/api/portfolio", project),
+    queryFn: () =>
+      fetchProjectJson<PortfolioResponse>("/api/portfolio", project),
     initialData,
     staleTime: 0,
     refetchOnMount: true,
@@ -336,7 +334,8 @@ export function useProjectEnvironments(
         "/api/environments",
         project,
       ),
-    initialData: initialData && initialData.length > 0 ? initialData : undefined,
+    initialData:
+      initialData && initialData.length > 0 ? initialData : undefined,
     staleTime: 0,
     refetchOnMount: true,
   });
@@ -353,7 +352,8 @@ export function useProjectSchema(
   return useQuery({
     queryKey: queryKeys.schema.all(project),
     queryFn: () => fetchProjectJson<SchemaColumn[]>("/api/schema", project),
-    initialData: initialData && initialData.length > 0 ? initialData : undefined,
+    initialData:
+      initialData && initialData.length > 0 ? initialData : undefined,
     staleTime: 0,
     refetchOnMount: true,
   });
@@ -392,20 +392,28 @@ export function useProjectTrajectoryDetail(
   trajectoryId: string,
   initialData?: Trajectory,
 ) {
+  const queryClient = useQueryClient();
+  const queryKey = queryKeys.trajectories.detail(project, trajectoryId);
+
   useProjectDataStatus(project, {
-    invalidateKeys: [queryKeys.trajectories.detail(project, trajectoryId)],
+    invalidateKeys: [queryKey],
   });
 
   const trajectoryQuery = useQuery({
-    queryKey: queryKeys.trajectories.detail(project, trajectoryId),
+    queryKey,
     queryFn: async (): Promise<Trajectory | null> => {
       const response = await fetch(
         buildProjectUrl(
           `/api/trajectories/${encodeURIComponent(trajectoryId)}`,
           project,
+          { bust: true },
         ),
       );
       if (response.status === 404) {
+        const existing = queryClient.getQueryData<Trajectory | null>(queryKey);
+        if (existing) {
+          return existing;
+        }
         return null;
       }
       if (!response.ok) {
@@ -414,6 +422,7 @@ export function useProjectTrajectoryDetail(
       return (await response.json()) as Trajectory;
     },
     initialData,
+    refetchOnMount: initialData?.sessionEndReason ? false : true,
     refetchInterval: (query) => {
       const trajectory = query.state.data;
       if (!trajectory || trajectory.sessionEndReason) {

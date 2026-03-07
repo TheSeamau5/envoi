@@ -34,21 +34,21 @@ export async function GET(request: NextRequest) {
       ? Number(searchParams.get("offset"))
       : undefined;
 
-    const fresh = searchParams.has("bust");
+    const bustRequested = searchParams.has("bust");
     const trajectories = await getAllTrajectories({
       environment,
       model,
       limit,
       offset,
-      fresh,
+      fresh: false,
       project,
     });
     const status = await readProjectDataStatus(project, {
-      forceCheck: fresh,
-      mode: fresh ? "force" : "cached",
+      forceCheck: bustRequested,
+      mode: bustRequested ? "fresh" : "cached",
     });
     console.log(
-      `[api/trajectories] project=${project} fresh=${fresh} environment=${environment ?? "all"} model=${model ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
+      `[api/trajectories] project=${project} bust=${bustRequested} environment=${environment ?? "all"} model=${model ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
     );
 
     return NextResponse.json(trajectories, {

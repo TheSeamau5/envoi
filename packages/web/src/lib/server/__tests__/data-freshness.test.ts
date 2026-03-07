@@ -69,44 +69,29 @@ describe("server data freshness readers", () => {
     expect(trajectories[0]?.sandboxProvider).toBe("modal");
   });
 
-  it("repairs active trajectory duration and score from raw trace and logs", async () => {
-    queryMock.mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM trajectories s")) {
-        return [
-          {
-            trajectory_id: "traj-live",
-            environment: "c_compiler",
-            agent_model: "gpt-5.3-codex",
-            agent: "codex",
-            started_at: "2026-03-06T20:45:14.000Z",
-            ended_at: "2026-03-06T21:16:50.852Z",
-            total_parts: 381,
-            total_turns: 2,
-            total_tokens: 1234,
-            session_end_reason: undefined,
-            task_params: "{}",
-            suites: "{}",
-            sandbox_id: "sb-123",
-            sandbox_provider: "modal",
-            eval_count: 0,
-          },
-        ];
-      }
-      if (sql.includes("SELECT\n        timestamp,\n        part,\n        session_end_reason,\n        eval_events_delta")) {
-        return [
-          {
-            timestamp: "2026-03-06T21:16:50.852Z",
-            part: 380,
-            session_end_reason: undefined,
-            eval_events_delta: '[{\"status\":\"completed\",\"passed\":921,\"failed\":2364,\"total\":3285}]',
-          },
-        ];
-      }
-      if (sql.includes("SELECT MAX(ts) AS log_ended_at")) {
-        return [{"log_ended_at": "2026-03-06T23:14:56.424Z"}];
-      }
-      return [];
-    });
+  it("uses materialized table data directly for active trajectories without per-file reads", async () => {
+    queryMock.mockResolvedValue([
+      {
+        trajectory_id: "traj-live",
+        environment: "c_compiler",
+        agent_model: "gpt-5.3-codex",
+        agent: "codex",
+        started_at: "2026-03-06T20:45:14.000Z",
+        ended_at: "2026-03-06T21:16:50.852Z",
+        total_parts: 381,
+        total_turns: 2,
+        total_tokens: 1234,
+        session_end_reason: undefined,
+        task_params: "{}",
+        suites: "{}",
+        sandbox_id: "sb-123",
+        sandbox_provider: "modal",
+        best_passed: 921,
+        best_failed: 2364,
+        best_total: 3285,
+        eval_count: 1,
+      },
+    ]);
 
     const { getAllTrajectories } = await import("../data");
     const trajectories = await getAllTrajectories({
@@ -114,9 +99,11 @@ describe("server data freshness readers", () => {
       fresh: true,
     });
 
-    expect(trajectories[0]?.duration).toBe("2h 29m");
+    expect(trajectories[0]?.duration).toBe("32m");
     expect(trajectories[0]?.finalPassed).toBe(921);
     expect(trajectories[0]?.totalParts).toBe(381);
+    // Only one query to the trajectories table — no per-trajectory parquet reads
+    expect(queryMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns sandbox metadata from the materialized trajectories table", async () => {

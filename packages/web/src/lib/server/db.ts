@@ -11,7 +11,15 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { cookies } from "next/headers";
 import { clearCache } from "./cache";
@@ -89,7 +97,10 @@ type ProjectDataState = {
 };
 
 const summaryRevisionStates = new Map<string, SummaryRevisionState>();
-const summaryRevisionInFlight = new Map<string, Promise<SummaryRevisionStatus>>();
+const summaryRevisionInFlight = new Map<
+  string,
+  Promise<SummaryRevisionStatus>
+>();
 const projectDataStates = new Map<string, ProjectDataState>();
 
 function dbPath(project: string): string {
@@ -211,9 +222,7 @@ function readErrorStatusCode(error: unknown): number | undefined {
     : undefined;
 }
 
-function buildSummaryRevisionStatus(
-  project: string,
-): SummaryRevisionStatus {
+function buildSummaryRevisionStatus(project: string): SummaryRevisionStatus {
   const state = getSummaryRevisionState(project);
   const inSync =
     !!state.loadedRevision &&
@@ -568,11 +577,7 @@ async function fetchSummaryManifestFromS3(
   } catch (error) {
     const name = readErrorName(error);
     const statusCode = readErrorStatusCode(error);
-    if (
-      name === "NoSuchKey" ||
-      name === "NotFound" ||
-      statusCode === 404
-    ) {
+    if (name === "NoSuchKey" || name === "NotFound" || statusCode === 404) {
       state.hasManifest = false;
       state.manifest = undefined;
       state.manifestEtag = undefined;
@@ -681,14 +686,29 @@ function spawnS3Sync(
   dest: string,
   include: string,
 ): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(
       "aws",
       ["s3", "sync", source, dest, "--exclude", "*", "--include", include],
       { stdio: ["ignore", "pipe", "pipe"], env: awsEnv() },
     );
-    child.on("close", () => resolve());
-    child.on("error", () => resolve());
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const details = stderr.trim();
+      reject(
+        new Error(
+          `[db] aws s3 sync failed include=${include} exitCode=${code ?? "unknown"}${details ? ` stderr=${details}` : ""}`,
+        ),
+      );
+    });
+    child.on("error", (error) => reject(error));
   });
 }
 
@@ -739,6 +759,10 @@ async function syncFromS3(
 async function startRawTraceSync(
   project: string,
   force: boolean,
+  options?: {
+    refreshTables?: boolean;
+    rethrowErrors?: boolean;
+  },
 ): Promise<void> {
   const state = getProjectDataState(project);
   const now = Date.now();
@@ -762,31 +786,39 @@ async function startRawTraceSync(
 
   syncInFlight.add(project);
   const startedAt = Date.now();
-  console.log(`[db] Raw sync start project=${project} force=${force}`);
+  const refreshTables = options?.refreshTables !== false;
+  console.log(
+    `[db] Raw sync start project=${project} force=${force} refreshTables=${refreshTables}`,
+  );
   const task = (async () => {
     await syncFromS3(project, {
       summaries: false,
     });
     markProjectRawSync(project);
     lastSyncTime.set(project, Date.now());
-    const inst = await getDb(project);
-    await refreshProjectTables(inst, project, { allowPartial: true });
-    markProjectTableRefresh(project);
-    clearCache();
+    if (refreshTables) {
+      const inst = await getDb(project);
+      await refreshProjectTables(inst, project, { allowPartial: true });
+      markProjectTableRefresh(project);
+      clearCache();
+    }
     console.log(
-      `[db] Raw sync done project=${project} force=${force} durationMs=${Date.now() - startedAt}`,
+      `[db] Raw sync done project=${project} force=${force} refreshTables=${refreshTables} durationMs=${Date.now() - startedAt}`,
     );
-  })()
-    .catch((error) => {
-      console.warn("[db] Background sync failed:", error);
-    })
-    .finally(() => {
-      syncInFlight.delete(project);
-      rawSyncPromises.delete(project);
-    });
+  })().finally(() => {
+    syncInFlight.delete(project);
+    rawSyncPromises.delete(project);
+  });
 
   rawSyncPromises.set(project, task);
-  await task;
+  try {
+    await task;
+  } catch (error) {
+    console.warn("[db] Background sync failed:", error);
+    if (options?.rethrowErrors === true) {
+      throw error;
+    }
+  }
 }
 
 async function hasLocalCache(project: string): Promise<boolean> {
@@ -818,6 +850,16 @@ async function ensureSynced(project: string): Promise<void> {
 
   if (await hasLocalCache(project)) {
     console.log(`[db] ensureSynced project=${project} localCache=hit`);
+    if (!lastSyncTime.has(project)) {
+      console.log(
+        `[db] ensureSynced project=${project} action=boot-sync-blocking`,
+      );
+      await startRawTraceSync(project, false, {
+        refreshTables: false,
+        rethrowErrors: true,
+      });
+      return;
+    }
     // Data exists locally — serve it now, maybe sync in background
     const lastSync = lastSyncTime.get(project) ?? 0;
     if (
@@ -1248,10 +1290,7 @@ async function rebuildTrajectoriesFromTraceFiles(
       `);
       const logSummaryRows = await logSummaryResult.getRowObjectsJson();
       const logEndedAt = logSummaryRows[0]?.log_ended_at;
-      if (
-        logEndedAt !== undefined
-        && String(logEndedAt) > endedAt
-      ) {
+      if (logEndedAt !== undefined && String(logEndedAt) > endedAt) {
         endedAt = String(logEndedAt);
       }
     }
@@ -1393,7 +1432,51 @@ async function createAnalyticsViews(
     await conn.run(`DROP TABLE IF EXISTS ${nextTrajectoriesTable}`);
     await conn.run(`DROP TABLE IF EXISTS ${nextEvaluationsTable}`);
 
-    if (hasRawTraces) {
+    // Build trajectories from both summary and raw traces, then merge.
+    // Raw traces are fresher (have live data for active runs) but may not
+    // include all trajectories if S3 sync is still in progress. The summary
+    // has the complete set from S3. Merge: raw wins when both exist.
+    const rawTable = `${nextTrajectoriesTable}_raw`;
+    const summaryTable = `${nextTrajectoriesTable}_summary`;
+    await conn.run(`DROP TABLE IF EXISTS ${rawTable}`);
+    await conn.run(`DROP TABLE IF EXISTS ${summaryTable}`);
+
+    if (hasRawTraces && hasTrajectorySummary) {
+      const summaryPath = sqlLiteral(trajectorySummaryPath(project));
+      await rebuildTrajectoriesFromTraceFiles(project, rawTable, conn);
+      await conn.run(`
+        CREATE TABLE ${summaryTable} AS
+        SELECT
+          trajectory_id,
+          environment,
+          agent_model,
+          agent,
+          started_at,
+          ended_at,
+          total_parts,
+          total_turns,
+          total_tokens,
+          session_end_reason,
+          task_params,
+          suites,
+          NULL::VARCHAR AS sandbox_id,
+          NULL::VARCHAR AS sandbox_provider,
+          0 AS best_passed,
+          0 AS best_failed,
+          0 AS best_total,
+          0 AS eval_count
+        FROM read_parquet('${summaryPath}')
+      `);
+      await conn.run(`
+        CREATE TABLE ${nextTrajectoriesTable} AS
+        SELECT * FROM ${rawTable}
+        UNION ALL
+        SELECT * FROM ${summaryTable}
+        WHERE trajectory_id NOT IN (SELECT trajectory_id FROM ${rawTable})
+      `);
+      await conn.run(`DROP TABLE IF EXISTS ${rawTable}`);
+      await conn.run(`DROP TABLE IF EXISTS ${summaryTable}`);
+    } else if (hasRawTraces) {
       await rebuildTrajectoriesFromTraceFiles(
         project,
         nextTrajectoriesTable,
@@ -1417,7 +1500,11 @@ async function createAnalyticsViews(
           task_params,
           suites,
           NULL::VARCHAR AS sandbox_id,
-          NULL::VARCHAR AS sandbox_provider
+          NULL::VARCHAR AS sandbox_provider,
+          0 AS best_passed,
+          0 AS best_failed,
+          0 AS best_total,
+          0 AS eval_count
         FROM read_parquet('${summaryPath}')
       `);
     } else {

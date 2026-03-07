@@ -24,8 +24,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     const { id } = await params;
-    const fresh = request.nextUrl.searchParams.has("bust");
-    const trajectory = await getTrajectoryById(id, { fresh, project });
+    const trajectory = await getTrajectoryById(id, { fresh: false, project });
 
     if (!trajectory) {
       return NextResponse.json(
@@ -35,7 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     console.log(
-      `[api/trajectory-detail] project=${project} id=${id} fresh=${fresh} commits=${trajectory.commits.length} durationMs=${Date.now() - startedAt}`,
+      `[api/trajectory-detail] project=${project} id=${id} commits=${trajectory.commits.length} durationMs=${Date.now() - startedAt}`,
     );
 
     return NextResponse.json(trajectory);

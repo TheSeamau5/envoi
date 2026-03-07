@@ -11,6 +11,9 @@ sandbox_mode = "workspace-write"
 web_search = "live"
 project_root_markers = [".git"]
 
+[sandbox_workspace_write]
+network_access = true
+
 [features]
 multi_agent = true
 unified_exec = true

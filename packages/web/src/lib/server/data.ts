@@ -397,54 +397,28 @@ export async function getAllTrajectories(opts?: {
       }
 
       const rawRows = await query(sql, project);
-      const trajectories = await Promise.all(rawRows.map(async (row) => {
+      return rawRows.map((row) => {
         const summaryRow = toSummaryRow(row);
-        let finalScore = (
+        const finalScore =
           row.best_passed !== undefined && row.best_passed !== null
             ? {
                 passed: Number(row.best_passed ?? 0),
                 failed: Number(row.best_failed ?? 0),
                 total: Number(row.best_total ?? 0),
               }
-            : deriveScoreFromSuites(summaryRow.suites)
-        );
-        let endedAt = String(row.ended_at ?? "");
-        let totalParts = Number(row.total_parts ?? 0);
-        let sessionEndReason = summaryRow.session_end_reason;
-
-        if (!sessionEndReason) {
-          const liveMetrics = await loadLiveTrajectoryMetrics(
-            summaryRow.trajectory_id,
-            project,
-          );
-          if (liveMetrics?.endedAt) {
-            endedAt = liveMetrics.endedAt;
-          }
-          if (typeof liveMetrics?.totalParts === "number") {
-            totalParts = liveMetrics.totalParts;
-          }
-          if (liveMetrics?.sessionEndReason) {
-            sessionEndReason = liveMetrics.sessionEndReason;
-          }
-          if (
-            liveMetrics?.score &&
-            liveMetrics.score.total > 0
-          ) {
-            finalScore = liveMetrics.score;
-          }
-        }
+            : deriveScoreFromSuites(summaryRow.suites);
 
         const trajectory = summaryRowToTrajectory(
           summaryRow,
           finalScore,
-          endedAt,
+          String(row.ended_at ?? ""),
           Number(row.eval_count ?? 0),
         );
-        trajectory.totalParts = totalParts;
-        trajectory.sessionEndReason = sessionEndReason ?? undefined;
+        trajectory.totalParts = Number(row.total_parts ?? 0);
+        trajectory.sessionEndReason =
+          summaryRow.session_end_reason ?? undefined;
         return trajectory;
-      }));
-      return trajectories;
+      });
     },
   });
 }
