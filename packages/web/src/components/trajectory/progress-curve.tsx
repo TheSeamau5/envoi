@@ -79,14 +79,14 @@ function buildLinePath(
   yMax: number,
   totalMinutes: number,
 ): string {
-  return commits
-    .map((commit, pointIndex) => {
-      const cmd = pointIndex === 0 ? "M" : "L";
-      const xPos = timeToX(commit.minutesElapsed, totalMinutes);
-      const yPos = toY(getYValue(commit, activeSuite), yMax);
-      return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
-    })
-    .join(" ");
+  const originX = timeToX(0, totalMinutes).toFixed(1);
+  const originY = toY(0, yMax).toFixed(1);
+  const segments = commits.map((commit) => {
+    const xPos = timeToX(commit.minutesElapsed, totalMinutes);
+    const yPos = toY(getYValue(commit, activeSuite), yMax);
+    return `L${xPos.toFixed(1)},${yPos.toFixed(1)}`;
+  });
+  return [`M${originX},${originY}`, ...segments].join(" ");
 }
 
 /** Build SVG area path (filled under the curve) up to a given index */
@@ -102,22 +102,22 @@ function buildAreaPath(
     return "";
   }
 
+  const originX = timeToX(0, totalMinutes).toFixed(1);
+  const bottomY = toY(0, yMax);
+  const originY = bottomY.toFixed(1);
+
   const lineSegments = subset
-    .map((commit, pointIndex) => {
-      const cmd = pointIndex === 0 ? "M" : "L";
+    .map((commit) => {
       const xPos = timeToX(commit.minutesElapsed, totalMinutes);
       const yPos = toY(getYValue(commit, activeSuite), yMax);
-      return `${cmd}${xPos.toFixed(1)},${yPos.toFixed(1)}`;
+      return `L${xPos.toFixed(1)},${yPos.toFixed(1)}`;
     })
     .join(" ");
 
-  const bottomY = toY(0, yMax);
   const lastSubset = subset[subset.length - 1];
-  const firstSubset = subset[0];
   const lastX = timeToX(lastSubset?.minutesElapsed ?? 0, totalMinutes);
-  const firstX = timeToX(firstSubset?.minutesElapsed ?? 0, totalMinutes);
 
-  return `${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} L${firstX.toFixed(1)},${bottomY.toFixed(1)} Z`;
+  return `M${originX},${originY} ${lineSegments} L${lastX.toFixed(1)},${bottomY.toFixed(1)} Z`;
 }
 
 /** Generate Y-axis tick values */
