@@ -1,11 +1,9 @@
 import { PageHeader, ShellRow } from "@/components/page-shell";
 
-function PulseBar({
-  className,
-}: {
-  className: string;
-}) {
-  return <div className={`animate-pulse rounded bg-envoi-surface ${className}`} />;
+function PulseBar({ className }: { className: string }) {
+  return (
+    <div className={`animate-pulse rounded bg-envoi-surface ${className}`} />
+  );
 }
 
 /** Cold-load skeleton for the trajectory list page. */
@@ -18,11 +16,8 @@ export function TrajectoryListSkeleton() {
       />
       <div className="flex shrink-0 items-center border-b border-envoi-border bg-envoi-surface px-3.5 py-1.5">
         <PulseBar className="h-3 w-[260px]" />
-        <PulseBar className="ml-3 h-3 w-[64px]" />
-        <PulseBar className="ml-3 h-3 w-[48px]" />
-        <PulseBar className="ml-3 h-3 w-[40px]" />
         <PulseBar className="ml-3 h-3 w-35" />
-        <PulseBar className="ml-3 h-3 w-[80px]" />
+        <PulseBar className="ml-3 h-3 w-[112px]" />
         <PulseBar className="ml-3 h-3 flex-1" />
         <PulseBar className="ml-3 h-3 w-[72px]" />
       </div>
@@ -33,11 +28,8 @@ export function TrajectoryListSkeleton() {
             className="flex items-center gap-3 border-b border-envoi-border-light py-2.5"
           >
             <PulseBar className="h-3 w-[220px]" />
-            <PulseBar className="h-3 w-[56px]" />
-            <PulseBar className="h-3 w-[40px]" />
-            <PulseBar className="h-3 w-[32px]" />
             <PulseBar className="h-3 w-[120px]" />
-            <PulseBar className="h-3 w-[72px]" />
+            <PulseBar className="h-3 w-[96px]" />
             <PulseBar className="h-3 flex-1" />
             <PulseBar className="h-3 w-[56px]" />
           </div>
@@ -51,7 +43,10 @@ export function TrajectoryListSkeleton() {
 export function CompareShellSkeleton() {
   return (
     <div className="flex w-full min-w-0 flex-1 flex-col overflow-hidden">
-      <PageHeader title="Compare" right={<span>Loading compare data...</span>} />
+      <PageHeader
+        title="Compare"
+        right={<span>Loading compare data...</span>}
+      />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex w-70 shrink-0 flex-col border-r border-envoi-border">
           <ShellRow>
@@ -143,7 +138,10 @@ export function QueryPageSkeleton() {
         </ShellRow>
         <div className="flex-1 overflow-hidden px-3 py-2">
           {Array.from({ length: 8 }).map((_, index) => (
-            <div key={index} className="border-b border-envoi-border-light py-2">
+            <div
+              key={index}
+              className="border-b border-envoi-border-light py-2"
+            >
               <PulseBar className="h-3 w-36" />
             </div>
           ))}
@@ -165,7 +163,10 @@ export function QueryPageSkeleton() {
         </ShellRow>
         <div className="flex-1 overflow-hidden px-3 py-2">
           {Array.from({ length: 10 }).map((_, index) => (
-            <div key={index} className="border-b border-envoi-border-light py-2">
+            <div
+              key={index}
+              className="border-b border-envoi-border-light py-2"
+            >
               <PulseBar className="h-3 w-28" />
             </div>
           ))}

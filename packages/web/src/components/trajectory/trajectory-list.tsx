@@ -26,12 +26,9 @@ type TrajectoryListProps = {
 /** Fixed column widths — shared between header and rows for alignment */
 const COL = {
   id: "w-[260px] shrink-0",
-  target: "w-[64px] shrink-0",
-  lang: "w-[48px] shrink-0",
-  nl: "w-[40px] shrink-0",
   started: "w-35 shrink-0",
-  duration: "w-[80px] shrink-0",
-  score: "flex-1 min-w-[200px]",
+  duration: "w-[112px] shrink-0",
+  score: "flex-1 min-w-0",
   evals: "w-[72px] shrink-0",
 } as const;
 
@@ -51,10 +48,9 @@ function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
     deduped.set(trace.id, trace);
   }
   if (duplicateIds.size > 0) {
-    console.warn(
-      "[trajectory-list] deduped duplicate trajectory ids",
-      [...duplicateIds.values()],
-    );
+    console.warn("[trajectory-list] deduped duplicate trajectory ids", [
+      ...duplicateIds.values(),
+    ]);
   }
   return [...deduped.values()];
 }
@@ -126,8 +122,7 @@ export function TrajectoryList({
     () => needsYear(trajectories.map((trace) => trace.startedAt)),
     [trajectories],
   );
-  const showSkeleton =
-    trajectories.length === 0 && trajectoriesQuery.isPending;
+  const showSkeleton = trajectories.length === 0 && trajectoriesQuery.isPending;
 
   if (showSkeleton) {
     return <TrajectoryListSkeleton />;
@@ -145,13 +140,6 @@ export function TrajectoryList({
         <span className={`${COL.id} ${CELL_BORDER} ${HEADER_STYLE} pl-0`}>
           ID
         </span>
-        <span className={`${COL.target} ${CELL_BORDER} ${HEADER_STYLE}`}>
-          Target
-        </span>
-        <span className={`${COL.lang} ${CELL_BORDER} ${HEADER_STYLE}`}>
-          Lang
-        </span>
-        <span className={`${COL.nl} ${CELL_BORDER} ${HEADER_STYLE}`}>NL</span>
         <span className={`${COL.started} ${CELL_BORDER} ${HEADER_STYLE}`}>
           Started
         </span>
@@ -237,27 +225,6 @@ export function TrajectoryList({
                           </span>
                         </span>
 
-                        {/* Target */}
-                        <span
-                          className={`${COL.target} ${CELL_BORDER} truncate text-[12px] text-envoi-text-dim`}
-                        >
-                          {(trace.params.target ?? "").split("-")[0]}
-                        </span>
-
-                        {/* Impl Language */}
-                        <span
-                          className={`${COL.lang} ${CELL_BORDER} truncate text-[12px] text-envoi-text-dim`}
-                        >
-                          {trace.params.implLang ?? ""}
-                        </span>
-
-                        {/* Natural Language */}
-                        <span
-                          className={`${COL.nl} ${CELL_BORDER} truncate text-[12px] text-envoi-text-dim`}
-                        >
-                          {trace.params.lang ?? ""}
-                        </span>
-
                         {/* Date started */}
                         <span
                           className={`${COL.started} ${CELL_BORDER} whitespace-nowrap font-mono text-[12px] text-envoi-text-muted`}
@@ -274,18 +241,18 @@ export function TrajectoryList({
 
                         {/* Progress bar + score */}
                         <div
-                          className={`${COL.score} ${CELL_BORDER} flex items-center gap-2`}
+                          className={`${COL.score} ${CELL_BORDER} flex min-w-0 items-center gap-3`}
                         >
-                          <div className="h-1 w-35 shrink-0 rounded-full bg-envoi-border-light">
+                          <div className="h-1 min-w-0 flex-1 rounded-full bg-envoi-border-light">
                             <div
                               className="h-full rounded-full bg-envoi-accent"
                               style={{ width: `${pct}%` }}
                             />
                           </div>
-                          <span className="whitespace-nowrap text-[13px] font-semibold text-envoi-text">
+                          <span className="shrink-0 whitespace-nowrap text-[13px] font-semibold text-envoi-text">
                             {finalPassed}
                           </span>
-                          <span className="whitespace-nowrap text-[13px] text-envoi-text-dim">
+                          <span className="shrink-0 whitespace-nowrap text-[13px] text-envoi-text-dim">
                             {formatPercent(finalPassed, totalTests)}
                           </span>
                         </div>
