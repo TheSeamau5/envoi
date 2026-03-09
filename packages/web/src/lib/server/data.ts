@@ -392,8 +392,8 @@ export async function getTrajectoryByIdForServing(
     return getMockTrajectoryById(id);
   }
 
+  const uri = await traceUri(id, project);
   try {
-    const uri = await traceUri(id, project);
     const rawRows = await query(
       `
       SELECT * EXCLUDE (eval_events_delta)
@@ -418,6 +418,15 @@ export async function getTrajectoryByIdForServing(
     const evalsByPart = groupEvalsByPart(evalRows);
     return reconstructTrajectory(injectEvalData(rawRows, evalsByPart));
   } catch (error) {
+    // Local cache file may be corrupt (synced mid-write). Retry from S3.
+    if (!uri.startsWith("s3://")) {
+      try {
+        const s3Uri = await freshTraceUri(id, project);
+        return await loadTrajectoryFromRawUri(s3Uri, project);
+      } catch {
+        // fall through to error log
+      }
+    }
     console.error(
       `[data] loadTrajectoryForServing failed id=${id}:`,
       error instanceof Error ? error.message : error,

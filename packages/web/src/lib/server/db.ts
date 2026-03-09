@@ -1521,6 +1521,11 @@ async function rebuildTrajectoriesFromTraceFiles(
       console.warn(
         `[db] Skipping unreadable trace parquet path=${file}: ${formatError(fileError)}`,
       );
+      // Delete corrupt file so next S3 sync re-downloads a fresh copy
+      try {
+        await rm(file);
+        console.warn(`[db] Deleted corrupt trace parquet path=${file}`);
+      } catch {}
       continue;
     }
   }
