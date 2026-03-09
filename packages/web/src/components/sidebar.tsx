@@ -10,10 +10,9 @@ import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  BarChart3,
   GitCommitHorizontal,
+  BarChart3,
   Grid3x3,
-  LayoutDashboard,
   Terminal,
   Settings2,
   PanelLeftClose,
@@ -28,11 +27,10 @@ import {
 } from "@/components/ui/tooltip";
 
 const NAV_ITEMS = [
+  { href: "trajectory", label: "Trajectories", icon: GitCommitHorizontal },
   { href: "compare", label: "Compare", icon: BarChart3 },
   { href: "setups", label: "Setups", icon: Settings2 },
-  { href: "trajectory", label: "Trajectories", icon: GitCommitHorizontal },
   { href: "difficulty", label: "Difficulty", icon: Grid3x3 },
-  { href: "portfolio", label: "Portfolio", icon: LayoutDashboard },
   { href: "query", label: "Query", icon: Terminal },
 ] as const;
 

@@ -7,7 +7,6 @@ import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import { Providers } from "@/components/providers";
-import { readLayoutCookies } from "@/lib/cookies";
 
 const monoFont = localFont({
   src: [
@@ -32,12 +31,10 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const { chatHasMessages } = await readLayoutCookies();
-
   return (
     <html lang="en" className={monoFont.variable}>
       <body className="font-mono antialiased">
-        <Providers initialChatHasMessages={chatHasMessages}>
+        <Providers>
           <div className="flex h-screen overflow-hidden">{children}</div>
         </Providers>
       </body>

@@ -26,7 +26,6 @@ import { computeTotalTests } from "@/lib/constants";
 import { useProjectCompare, useProjectTrajectories } from "@/lib/project-data";
 import { setCompareTraceColorsCookie } from "@/lib/cookies.client";
 import { usePersistedState } from "@/lib/storage";
-import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 
 type SortKey = "score" | "date";
 
@@ -155,12 +154,6 @@ export function CompareProvider({
     () => [...selectedIds].sort(),
     [selectedIds],
   );
-
-  useChatPageContext({
-    page: "compare",
-    project,
-    selectedIds,
-  });
 
   /**
    * Fetch full trajectory data for all selected IDs.

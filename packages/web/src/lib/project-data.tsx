@@ -9,9 +9,6 @@ import {
 import type {
   CodeSnapshot,
   DifficultyCell,
-  ParetoPoint,
-  PortfolioEnvironmentRow,
-  PortfolioRow,
   SchemaColumn,
   Trajectory,
   TrajectoryLogRow,
@@ -39,12 +36,6 @@ export type ProjectDataStatus = {
   lastTableRefreshAt?: string;
   rawSyncInFlight: boolean;
   summarySyncInFlight: boolean;
-};
-
-type PortfolioResponse = {
-  rows: PortfolioRow[];
-  environmentRows: PortfolioEnvironmentRow[];
-  paretoPoints: ParetoPoint[];
 };
 
 function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
@@ -294,27 +285,6 @@ export function useProjectDifficulty(
       fetchProjectJson<DifficultyCell[]>("/api/difficulty", project),
     initialData:
       initialData && initialData.length > 0 ? initialData : undefined,
-    staleTime: 0,
-    refetchOnMount: true,
-  });
-}
-
-export function useProjectPortfolio(
-  project: string,
-  initialData?: PortfolioResponse,
-) {
-  useProjectDataStatus(project, {
-    invalidateKeys: [
-      queryKeys.portfolio.all(project),
-      queryKeys.environments.all(project),
-    ],
-  });
-
-  return useQuery({
-    queryKey: queryKeys.portfolio.all(project),
-    queryFn: () =>
-      fetchProjectJson<PortfolioResponse>("/api/portfolio", project),
-    initialData,
     staleTime: 0,
     refetchOnMount: true,
   });

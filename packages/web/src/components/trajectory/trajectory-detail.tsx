@@ -15,13 +15,7 @@
 import { useState, useCallback, useRef, useMemo } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useSpring, animated } from "@react-spring/web";
-import type {
-  Trajectory,
-  Suite,
-  Commit,
-  Step,
-  ChangedFile,
-} from "@/lib/types";
+import type { Trajectory, Suite, Commit, Step, ChangedFile } from "@/lib/types";
 import { SUITES as DEFAULT_SUITES, computeTotalTests } from "@/lib/constants";
 import { usePersistedState } from "@/lib/storage";
 import { T } from "@/lib/tokens";
@@ -31,7 +25,6 @@ import {
   useProjectTrajectoryLogs,
 } from "@/lib/project-data";
 import { resolveTrajectoryLogs } from "@/lib/trajectory-log-mapping";
-import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 import {
   Tooltip,
   TooltipContent,
@@ -75,12 +68,6 @@ export function TrajectoryDetail({
   const { commits } = trajectory;
   const suites: Suite[] = trajectory.suites ?? DEFAULT_SUITES;
   const totalTests = computeTotalTests(suites);
-
-  useChatPageContext({
-    page: "trajectory",
-    project,
-    trajectoryId: trajectory.id,
-  });
 
   /** Selected commit index */
   const [selectedIndex, setSelectedIndex] = useState(0);

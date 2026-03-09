@@ -30,9 +30,6 @@ export const queryKeys = {
   difficulty: {
     all: (project: string) => ["difficulty", project] as const,
   },
-  portfolio: {
-    all: (project: string) => ["portfolio", project] as const,
-  },
   revision: {
     status: (project: string) => ["revision", project] as const,
   },

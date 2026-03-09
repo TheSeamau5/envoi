@@ -15,7 +15,6 @@ const COOKIE_DIVIDER_PCT = "envoi:detail-divider-pct";
 const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
-const COOKIE_CHAT_HAS_MESSAGES = "envoi:chat-has-messages";
 const COOKIE_COMPARE_TRACE_COLORS = "envoi:compare-trace-colors";
 
 /** Parse a compare trace-color map from a cookie payload. */
@@ -61,7 +60,6 @@ export type LayoutCookies = {
   dividerPct: number;
   sidebarCollapsed: boolean;
   groupByTurn: boolean;
-  chatHasMessages: boolean;
   compareTraceColors: Record<string, number>;
   project?: string;
 };
@@ -114,16 +112,6 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
-  let chatHasMessages = false;
-  try {
-    const chatHasMessagesCookie = jar.get(COOKIE_CHAT_HAS_MESSAGES);
-    if (chatHasMessagesCookie) {
-      chatHasMessages = chatHasMessagesCookie.value === "true";
-    }
-  } catch {
-    // cookie unavailable — use default
-  }
-
   let project: string | undefined;
   try {
     const projectCookie = jar.get(COOKIE_PROJECT);
@@ -150,7 +138,6 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     dividerPct,
     sidebarCollapsed,
     groupByTurn,
-    chatHasMessages,
     compareTraceColors,
     project,
   };
