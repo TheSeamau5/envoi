@@ -17,7 +17,7 @@ from envoi_code.utils.helpers import tprint
 
 print = tprint
 
-EVALUATION_CONCURRENCY = max(1, int(os.environ.get("EVALUATION_CONCURRENCY", "1")))
+EVALUATION_CONCURRENCY = max(1, int(os.environ.get("EVALUATION_CONCURRENCY", "4")))
 EVALUATION_DEFAULT_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("EVALUATION_TIMEOUT_SECONDS", "7200"))
 )

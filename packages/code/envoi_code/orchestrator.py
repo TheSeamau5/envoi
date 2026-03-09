@@ -177,6 +177,9 @@ SHUTDOWN_GRACE_SECONDS = max(0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "30
 EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
     0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "30"))
 )
+AGENT_INACTIVITY_TIMEOUT_SECONDS = max(
+    60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "900"))
+)
 
 
 print = tprint
@@ -881,6 +884,7 @@ class EvaluationScheduler:
         self.tasks: set[asyncio.Task[None]] = set()
         self.seen_commits: set[str] = set(agent_trace.evaluations.keys())
         self.semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
+        self.retried_commits: set[str] = set()
 
         for evaluation in agent_trace.evaluations.values():
             if evaluation.status in {"queued", "running"}:
@@ -1088,21 +1092,31 @@ class EvaluationScheduler:
                 queued_at=queued_at,
             )
             self.agent_trace.evaluations[commit] = evaluation
-        evaluation.status = "running"
-        evaluation.started_at = datetime.now(UTC).isoformat()
-        self.emit_event(evaluation)
-
         async with self.semaphore:
+            evaluation.status = "running"
+            evaluation.started_at = datetime.now(UTC).isoformat()
+            self.emit_event(evaluation)
+
             run_payload: dict[str, Any] | None = None
             started_mono = time.monotonic()
+            eval_hard_timeout = self.test_timeout_seconds + 300
             try:
-                run_payload = await run_commit_evaluation(
-                    sandbox=self.sandbox,
-                    commit=commit,
-                    test_paths=self.test_paths,
-                    timeout_seconds=self.test_timeout_seconds,
+                run_payload = await asyncio.wait_for(
+                    run_commit_evaluation(
+                        sandbox=self.sandbox,
+                        commit=commit,
+                        test_paths=self.test_paths,
+                        timeout_seconds=self.test_timeout_seconds,
+                    ),
+                    timeout=eval_hard_timeout,
                 )
                 self.apply_result(evaluation, run_payload)
+            except asyncio.TimeoutError:
+                evaluation.status = "failed"
+                evaluation.error = (
+                    f"Evaluation hard timeout after {eval_hard_timeout}s "
+                    f"(sandbox timeout was {self.test_timeout_seconds}s)"
+                )
             except Exception as eval_error:
                 self.apply_failure(
                     evaluation,
@@ -1179,6 +1193,38 @@ class EvaluationScheduler:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+    def retry_failed_evaluations(self) -> int:
+        """Re-queue failed evaluations for a single retry. Returns count."""
+        retried = 0
+        for commit, evaluation in list(self.agent_trace.evaluations.items()):
+            if evaluation.status != "failed":
+                continue
+            if commit in self.retried_commits:
+                continue
+            self.retried_commits.add(commit)
+            new_eval = EvaluationRecord(
+                eval_id=uuid.uuid4().hex,
+                commit=commit,
+                part=evaluation.part,
+                trigger_turn=evaluation.trigger_turn,
+                status="queued",
+                queued_at=datetime.now(UTC).isoformat(),
+            )
+            self.agent_trace.evaluations[commit] = new_eval
+            self.emit_event(new_eval)
+            task = asyncio.create_task(
+                self.run_one(
+                    commit,
+                    new_eval.part,
+                    new_eval.trigger_turn or 0,
+                    new_eval.queued_at,
+                ),
+            )
+            self.tasks.add(task)
+            task.add_done_callback(self.on_done)
+            retried += 1
+        return retried
 
 
 # ---------------------------------------------------------------------------
@@ -2892,17 +2938,49 @@ async def run_turn_loop(
         )
 
         try:
-            turn_outcome = await agent_backend.run_turn(
-                prompt_text=prompt_text,
-                timeout=turn_timeout_seconds,
-                current_turn=turn_count,
-                remaining_parts_budget=remaining_parts_budget,
-                global_part_count=part_count,
-                global_max_parts=max_parts or 0,
-                global_max_turns=max_turns or 0,
-                global_elapsed_seconds=int(max(0, elapsed)),
-                on_stream_part=stream_part_cb,
+            turn_task = asyncio.create_task(
+                agent_backend.run_turn(
+                    prompt_text=prompt_text,
+                    timeout=turn_timeout_seconds,
+                    current_turn=turn_count,
+                    remaining_parts_budget=remaining_parts_budget,
+                    global_part_count=part_count,
+                    global_max_parts=max_parts or 0,
+                    global_max_turns=max_turns or 0,
+                    global_elapsed_seconds=int(max(0, elapsed)),
+                    on_stream_part=stream_part_cb,
+                )
             )
+            inactivity_anchor = time.monotonic()
+            inactivity_seen_parts = stream_part_counter[0]
+            while not turn_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(turn_task), timeout=60)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except AgentFatalError:
+                    raise
+                except Exception:
+                    pass
+                if turn_task.done():
+                    break
+                current_parts = stream_part_counter[0]
+                if current_parts != inactivity_seen_parts:
+                    inactivity_anchor = time.monotonic()
+                    inactivity_seen_parts = current_parts
+                elif time.monotonic() - inactivity_anchor > AGENT_INACTIVITY_TIMEOUT_SECONDS:
+                    builtins.print(
+                        f"[watchdog] agent inactive for "
+                        f"{AGENT_INACTIVITY_TIMEOUT_SECONDS}s "
+                        f"with no new parts — cancelling turn",
+                        flush=True,
+                    )
+                    turn_task.cancel()
+                    break
+            try:
+                turn_outcome = await turn_task
+            except asyncio.CancelledError:
+                turn_outcome = None
         except AgentFatalError as fatal_error:
             stop_reason = normalize_run_stop_reason(
                 fatal_error.stop_reason,
@@ -2973,6 +3051,10 @@ async def run_turn_loop(
 
         consecutive_turn_failures = 0
         agent_backend.on_turn_complete(turn_outcome)
+
+        retried = evaluator.retry_failed_evaluations()
+        if retried:
+            print(f"[watchdog] re-queued {retried} failed evaluation(s)")
 
         response = turn_outcome.response
         session_id = turn_outcome.session_id
