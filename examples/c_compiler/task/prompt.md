@@ -49,6 +49,20 @@ Never move on from a broken test. If something fails, stay on it until it passes
 
 Your tests accumulate. By the end, you should have a large collection of small C programs that cover every feature you have implemented. This is your regression suite. Run it constantly.
 
+## CRITICAL: Bootstrap First
+
+Your FIRST priority — before anything else — is to get a minimal compiler that passes at least one test. Do this in your first turn:
+
+1. Create `Cargo.toml`, `build.sh`, and a minimal `src/main.rs`
+2. The minimal compiler must: read a `.c` file, parse `int main() { return <number>; }`, and emit x86-64 assembly that returns that number as the exit code
+3. Use `as` to assemble and `gcc` to link — that's allowed
+4. Run `./build.sh && ./cc tests/return_0.c -o /tmp/test && /tmp/test; echo $?` and verify it works
+5. End your turn here. You will receive test results and can continue from there.
+
+Do NOT write a preprocessor, do NOT write a semantic analyzer, do NOT write a type system. Just get `return <number>` working end-to-end first. Everything else comes later, one feature at a time.
+
+If you write more than 500 lines of Rust before passing your first test, you are doing it wrong. Stop and simplify.
+
 ## One Thing at a Time
 
 Do NOT try to implement multiple features in parallel. Do NOT do a big refactor while also adding a new feature. Do NOT move to the next thing when the current thing is broken.

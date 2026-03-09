@@ -661,6 +661,7 @@ def build_commit_evaluation_command(
     eval_repo_dir: str,
     test_paths: list[str] | None = None,
     timeout_seconds: int | None = None,
+    clone_from_bundle: bool = False,
 ) -> str:
     repo_dir_json = json.dumps(eval_repo_dir)
     envoi_url_json = json.dumps(EVALUATION_ENVOI_URL)
@@ -679,19 +680,27 @@ def build_commit_evaluation_command(
         eval_timeout_seconds_json=eval_timeout_seconds_json,
         marker_json=marker_json,
     )
+    if clone_from_bundle:
+        bundle_path = f"/tmp/repo-{commit[:12]}.bundle"
+        quoted_bundle = shlex.quote(bundle_path)
+        clone_cmd = f'git clone -q {quoted_bundle} "$repo_dir"\n'
+        cleanup_cmd = f'rm -f {quoted_bundle}\nrm -rf "$repo_dir"\n'
+    else:
+        clone_cmd = 'git clone -q /workspace "$repo_dir"\n'
+        cleanup_cmd = 'rm -rf "$repo_dir"\n'
     return (
         "set -euo pipefail\n"
         f"repo_dir={quoted_repo_dir}\n"
         'rm -rf "$repo_dir"\n'
-        'git clone -q /workspace "$repo_dir"\n'
+        f"{clone_cmd}"
         'cd "$repo_dir"\n'
         f"git checkout -q {quoted_commit}\n"
         "python3 - <<'PY'\n"
         f"{python_script}"
         "PY\n"
         "status=$?\n"
-        "cd /workspace\n"
-        'rm -rf "$repo_dir"\n'
+        "cd /tmp\n"
+        f"{cleanup_cmd}"
         "exit $status\n"
     )
 
@@ -744,6 +753,7 @@ async def run_commit_evaluation(
     commit: str,
     test_paths: list[str] | None = None,
     timeout_seconds: int | None = None,
+    clone_from_bundle: bool = False,
 ) -> dict[str, Any]:
     eval_repo_dir = f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
     resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
@@ -752,6 +762,7 @@ async def run_commit_evaluation(
         eval_repo_dir=eval_repo_dir,
         test_paths=test_paths,
         timeout_seconds=resolved_timeout,
+        clone_from_bundle=clone_from_bundle,
     )
     exit_code, stdout, stderr = (
         await sandbox.run(

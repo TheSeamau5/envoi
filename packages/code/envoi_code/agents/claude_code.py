@@ -569,7 +569,7 @@ async def run_claude_code_turn(
                 else:
                     print(
                         f"[{ts()}] ?? {type(message).__name__}: "
-                        f"{repr(message)[:200]}",
+                        f"{repr(message)}",
                         file=sys.stderr, flush=True,
                     )
 
@@ -887,7 +887,7 @@ try:
                 if stripped:
                     tprint(
                         "[claude-code][stderr] "
-                        + truncate_text(stripped, limit=500)
+                        + stripped
                     )
 
             response = await self.run_client(

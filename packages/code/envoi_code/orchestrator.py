@@ -48,6 +48,7 @@ from envoi.logging import (
 
 from envoi_code.agents import get_agent_backends
 from envoi_code.agents.base import Agent, AgentFatalError, AgentSetupContext
+from envoi_code.agents.setup import run_workspace_init
 from envoi_code.models import (
     AgentTrace,
     EnvoiCall,
@@ -105,9 +106,11 @@ from envoi_code.utils.feedback_helpers import (
 )
 from envoi_code.utils.git import get_git_commit
 from envoi_code.utils.helpers import (
+    environment_upload_items,
     load_environment_files,
     tprint,
     truncate_text,
+    upload_files_parallel,
 )
 from envoi_code.utils.parsing import (
     count_meaningful_parts,
@@ -862,6 +865,7 @@ class EvaluationScheduler:
         self,
         *,
         sandbox: Sandbox,
+        agent_sandbox: Sandbox,
         agent_trace: AgentTrace,
         trajectory_id: str,
         project: str,
@@ -873,6 +877,7 @@ class EvaluationScheduler:
         on_winner: (Callable[[str, EvaluationRecord], Awaitable[None] | None] | None) = None,
     ) -> None:
         self.sandbox = sandbox
+        self.agent_sandbox = agent_sandbox
         self.agent_trace = agent_trace
         self.trajectory_id = trajectory_id
         self.project = project
@@ -1107,12 +1112,22 @@ class EvaluationScheduler:
             )
             eval_hard_timeout = resolved_test_timeout + 300
             try:
+                uses_separate_sandbox = (
+                    self.agent_sandbox is not self.sandbox
+                )
+                if uses_separate_sandbox:
+                    await transfer_repo_to_eval_sandbox(
+                        agent_sandbox=self.agent_sandbox,
+                        eval_sandbox=self.sandbox,
+                        commit=commit,
+                    )
                 run_payload = await asyncio.wait_for(
                     run_commit_evaluation(
                         sandbox=self.sandbox,
                         commit=commit,
                         test_paths=self.test_paths,
                         timeout_seconds=self.test_timeout_seconds,
+                        clone_from_bundle=uses_separate_sandbox,
                     ),
                     timeout=eval_hard_timeout,
                 )
@@ -2678,6 +2693,7 @@ def print_turn_end_summary(
 async def run_turn_loop(
     *,
     sandbox: Sandbox,
+    eval_sandbox: Sandbox | None,
     agent_backend: Agent,
     agent_trace: AgentTrace,
     trajectory_id: str,
@@ -2769,7 +2785,8 @@ async def run_turn_loop(
             print(f"[eval] winner interrupt failed: {kill_error}")
 
     evaluator = EvaluationScheduler(
-        sandbox=sandbox,
+        sandbox=eval_sandbox if eval_sandbox is not None else sandbox,
+        agent_sandbox=sandbox,
         agent_trace=agent_trace,
         trajectory_id=trajectory_id,
         project=project,
@@ -3250,6 +3267,51 @@ async def run_turn_loop(
     )
 
 
+async def transfer_repo_to_eval_sandbox(
+    *,
+    agent_sandbox: Sandbox,
+    eval_sandbox: Sandbox,
+    commit: str,
+) -> None:
+    """Bundle the workspace repo on the agent sandbox and transfer it to the eval sandbox."""
+    bundle_path = f"/tmp/repo-{commit[:12]}.bundle"
+    b64_path = f"{bundle_path}.b64"
+    result = await agent_sandbox.run(
+        f"git -C /workspace bundle create {bundle_path} --all",
+        quiet=True,
+        timeout=60,
+    )
+    if result.exit_code != 0:
+        raise RuntimeError(
+            f"git bundle failed (exit {result.exit_code}): {result.stderr}"
+        )
+    bundle_bytes = await agent_sandbox.read_file_bytes(bundle_path)
+    encoded = base64.b64encode(bundle_bytes).decode("ascii")
+    await eval_sandbox.write_file(b64_path, encoded, ensure_dir=False)
+    await eval_sandbox.run(
+        f"base64 -d {b64_path} > {bundle_path} && rm -f {b64_path}",
+        quiet=True,
+        timeout=60,
+    )
+    await agent_sandbox.run(f"rm -f {bundle_path}", quiet=True, timeout=10)
+
+
+async def setup_eval_sandbox(
+    eval_sandbox: Sandbox,
+    env_files: EnvironmentFiles,
+    runtime_env: dict[str, str],
+) -> None:
+    """Upload environment files and start the envoi runtime on the eval sandbox."""
+    if env_files:
+        py, c, txt, sh = env_files
+        await upload_files_parallel(
+            eval_sandbox,
+            environment_upload_items(py, c, txt, sh),
+            log_upload=False,
+        )
+    await run_workspace_init(eval_sandbox, runtime_env=runtime_env)
+
+
 async def execute_trajectory_main(
     *,
     trajectory_id: str,
@@ -3300,11 +3362,33 @@ async def execute_trajectory_main(
         min_cpu=sandbox_min_cpu,
         min_memory_mb=sandbox_min_memory_mb,
     )
-    print("[orchestrator] creating sandbox...", flush=True)
-    launch_result = await create_sandbox(sandbox_provider, config)
+    print("[orchestrator] creating sandboxes (agent + eval)...", flush=True)
+    eval_config = SandboxConfig(
+        timeout=sandbox_timeout_seconds,
+        image_requirements=agent_cls.image_requirements(),
+        environment_dockerfile=str(env_path / dockerfile_rel_path),
+        environment_docker_context_dir=str(env_path),
+        environment_docker_build_args=docker_build_args,
+        cpu=sandbox_cpu_request,
+        memory_mb=sandbox_memory_mb_request,
+        min_cpu=sandbox_min_cpu,
+        min_memory_mb=sandbox_min_memory_mb,
+    )
+    launch_result, eval_launch_result = await asyncio.gather(
+        create_sandbox(sandbox_provider, config),
+        create_sandbox(sandbox_provider, eval_config),
+    )
     sandbox = launch_result.sandbox
+    eval_sandbox = eval_launch_result.sandbox
     resolution = launch_result.resolution
-    print(f"[orchestrator] sandbox created (provider={resolution.provider})", flush=True)
+    print(
+        f"[orchestrator] agent sandbox created (provider={resolution.provider})",
+        flush=True,
+    )
+    print(
+        f"[orchestrator] eval sandbox created id={eval_sandbox.sandbox_id}",
+        flush=True,
+    )
     for warning in resolution.warnings:
         print(f"[sandbox][{resolution.provider}] {warning}")
     run_metadata["sandbox_resolution"] = {
@@ -3347,8 +3431,13 @@ async def execute_trajectory_main(
         runtime_env=runtime_env,
     )
     print("[orchestrator] starting agent setup...", flush=True)
+    eval_sandbox_setup_task = asyncio.create_task(
+        setup_eval_sandbox(eval_sandbox, env_files, runtime_env),
+    )
     await agent_backend.setup(sandbox, setup_context)
     print("[orchestrator] agent setup complete", flush=True)
+    await eval_sandbox_setup_task
+    print("[orchestrator] eval sandbox setup complete", flush=True)
 
     latest_git_commit: str | None = None
     resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
@@ -3414,6 +3503,7 @@ async def execute_trajectory_main(
     print("[orchestrator] entering turn loop", flush=True)
     loop_result = await run_turn_loop(
         sandbox=sandbox,
+        eval_sandbox=eval_sandbox,
         agent_backend=agent_backend,
         agent_trace=agent_trace,
         trajectory_id=trajectory_id,
@@ -3446,6 +3536,7 @@ async def execute_trajectory_main(
 
     return TrajectoryExecutionResult(
         sandbox=sandbox,
+        eval_sandbox=eval_sandbox,
         agent_trace=agent_trace,
         agent_backend=agent_backend,
         evaluator=loop_result.evaluator,
@@ -3697,6 +3788,12 @@ async def finalize_trajectory_run(
         except Exception:
             pass
 
+    if eval_sandbox is not None:
+        try:
+            await eval_sandbox.terminate()
+        except Exception:
+            pass
+
     if (sandbox is None or agent_trace is None) and structured_logs:
         try:
             await flush_logs(force=True)
@@ -3838,6 +3935,7 @@ async def run_trajectory(
     task_params_loaded = prepared.task_params_loaded
 
     sandbox: Sandbox | None = None
+    eval_sandbox: Sandbox | None = None
     agent_trace: AgentTrace | None = None
     agent_backend: Agent | None = None
     evaluator: EvaluationScheduler | None = None
@@ -3888,6 +3986,7 @@ async def run_trajectory(
             flush_logs=logs_runtime.flush,
         )
         sandbox = execution_result.sandbox
+        eval_sandbox = execution_result.eval_sandbox
         agent_trace = execution_result.agent_trace
         agent_backend = execution_result.agent_backend
         evaluator = execution_result.evaluator

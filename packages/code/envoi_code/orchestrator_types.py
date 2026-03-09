@@ -52,6 +52,7 @@ class TurnLoopResult(BaseModel):
 
 class TrajectoryExecutionResult(BaseModel):
     sandbox: Any
+    eval_sandbox: Any
     agent_trace: AgentTrace
     agent_backend: Any
     evaluator: Any
