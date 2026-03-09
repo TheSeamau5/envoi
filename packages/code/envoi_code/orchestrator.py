@@ -84,6 +84,7 @@ from envoi_code.utils.advisor import (
 from envoi_code.utils.diagnostics import enrich_evaluation_payload
 from envoi_code.utils.evaluation import (
     EVALUATION_CONCURRENCY,
+    EVALUATION_DEFAULT_TIMEOUT_SECONDS,
     extract_leaf_paths,
     normalize_test_paths,
     run_commit_evaluation,
@@ -178,7 +179,7 @@ EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
     0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "30"))
 )
 AGENT_INACTIVITY_TIMEOUT_SECONDS = max(
-    60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "900"))
+    60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "1800"))
 )
 
 
@@ -1099,7 +1100,12 @@ class EvaluationScheduler:
 
             run_payload: dict[str, Any] | None = None
             started_mono = time.monotonic()
-            eval_hard_timeout = self.test_timeout_seconds + 300
+            resolved_test_timeout = (
+                self.test_timeout_seconds
+                if isinstance(self.test_timeout_seconds, int) and self.test_timeout_seconds > 0
+                else EVALUATION_DEFAULT_TIMEOUT_SECONDS
+            )
+            eval_hard_timeout = resolved_test_timeout + 300
             try:
                 run_payload = await asyncio.wait_for(
                     run_commit_evaluation(
@@ -2937,6 +2943,7 @@ async def run_turn_loop(
             schedule_commit_evaluation=evaluator.schedule,
         )
 
+        watchdog_cancelled = False
         try:
             turn_task = asyncio.create_task(
                 agent_backend.run_turn(
@@ -2976,6 +2983,7 @@ async def run_turn_loop(
                         flush=True,
                     )
                     turn_task.cancel()
+                    watchdog_cancelled = True
                     break
             try:
                 turn_outcome = await turn_task
@@ -3002,6 +3010,19 @@ async def run_turn_loop(
                 break
             if not turn_record.parts:
                 agent_trace.turns.pop()
+
+            # Watchdog cancellation: retry on the SAME session to preserve
+            # agent context. Don't count as a turn failure.
+            if watchdog_cancelled:
+                print("[watchdog] retrying on same session after inactivity cancellation")
+                prompt_text = build_followup_prompt(
+                    tracker,
+                    elapsed_seconds=time.monotonic() - start_time,
+                    timeout_seconds=timeout_seconds,
+                    consecutive_no_progress_turns=consecutive_no_progress_turns,
+                )
+                continue
+
             consecutive_turn_failures += 1
             recovery_limit_label = (
                 str(TURN_RECOVERY_RETRIES)

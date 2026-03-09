@@ -10,6 +10,7 @@ import {
   getTrajectoryByIdForServing,
   getTrajectoryLogsById,
 } from "./data";
+import { refreshData } from "./db";
 import { publishLiveRevisionEvent } from "./live-events";
 import { getTrajectorySandboxLiveness } from "./sandbox-liveness";
 import {
@@ -283,6 +284,7 @@ async function refreshProjectSnapshot(
     return snapshot;
   }
 
+  await refreshData(project.name);
   const snapshot = await publishProjectSnapshot(project, sourceRevision);
   snapshotStore.snapshots.set(project.name, snapshot);
   if (current?.manifest.revision !== snapshot.manifest.revision) {

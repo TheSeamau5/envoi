@@ -135,6 +135,7 @@ async def run_claude_code_turn(
             ThinkingBlock,
             ToolResultBlock,
             ToolUseBlock,
+            UserMessage,
         )
         from claude_agent_sdk.types import StreamEvent
     except ImportError as exc:
@@ -218,10 +219,12 @@ async def run_claude_code_turn(
                 msg_count += 1
 
                 if isinstance(message, SystemMessage):
-                    print(
-                        f"[{ts()}] system: {message.subtype}",
-                        file=sys.stderr, flush=True,
-                    )
+                    # Only log meaningful system events, not heartbeats.
+                    if message.subtype not in ("task_progress",):
+                        print(
+                            f"[{ts()}] system: {message.subtype}",
+                            file=sys.stderr, flush=True,
+                        )
                     if (
                         message.subtype == "init"
                         and "session_id" in message.data
@@ -236,11 +239,7 @@ async def run_claude_code_turn(
                         block_info = event_data.get("content_block", {})
                         btype = block_info.get("type", "")
                         if btype == "tool_use":
-                            tool_name = block_info.get("name", "?")
-                            print(
-                                f"[{ts()}] >> tool: {tool_name}",
-                                file=sys.stderr, flush=True,
-                            )
+                            pass  # logged when AssistantMessage arrives
                         elif btype == "text":
                             stream_text_buffer = ""
                             stream_text_chars_printed = 0
@@ -304,14 +303,17 @@ async def run_claude_code_turn(
                         )
 
                 elif isinstance(message, AssistantMessage):
-                    block_types = [
-                        type(b).__name__ for b in message.content
-                    ]
-                    print(
-                        f"[{ts()}] assistant: {block_types}"
-                        f"{' ERROR=' + message.error if message.error else ''}",
-                        file=sys.stderr, flush=True,
-                    )
+                    # Only log the assistant header when there's an error;
+                    # individual tool/text blocks are logged below.
+                    if message.error:
+                        block_types = [
+                            type(b).__name__ for b in message.content
+                        ]
+                        print(
+                            f"[{ts()}] assistant: {block_types}"
+                            f" ERROR={message.error}",
+                            file=sys.stderr, flush=True,
+                        )
                     message_dict: dict[str, Any] = {
                         "role": "assistant",
                         "content": [],
@@ -524,6 +526,45 @@ async def run_claude_code_turn(
                         f"{msg_count} messages streamed",
                         file=sys.stderr, flush=True,
                     )
+
+                elif isinstance(message, UserMessage):
+                    # Tool results flowing back to the model.
+                    # The SDK handles these internally; we just log
+                    # and record them for trace completeness.
+                    message_dict = {
+                        "role": "user",
+                        "content": [],
+                    }
+                    if isinstance(message.content, list):
+                        for block in message.content:
+                            if isinstance(block, ToolResultBlock):
+                                result_content = str(
+                                    block.content or ""
+                                )
+                                is_error = block.is_error or False
+                                message_dict["content"].append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.tool_use_id,
+                                    "content": result_content[:500],
+                                    "is_error": is_error,
+                                })
+                                if is_error:
+                                    print(
+                                        f"[{ts()}] tool error: "
+                                        f"{result_content[:200]}",
+                                        file=sys.stderr, flush=True,
+                                    )
+                            elif isinstance(block, TextBlock):
+                                message_dict["content"].append({
+                                    "type": "text",
+                                    "text": block.text[:500],
+                                })
+                    elif isinstance(message.content, str):
+                        message_dict["content"].append({
+                            "type": "text",
+                            "text": message.content[:500],
+                        })
+                    messages.append(message_dict)
 
                 else:
                     print(
