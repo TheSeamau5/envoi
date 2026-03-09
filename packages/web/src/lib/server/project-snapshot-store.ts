@@ -359,9 +359,19 @@ export async function getTrajectoryDetailFromSnapshot(
 ): Promise<Trajectory | undefined> {
   const snapshot = await ensureProjectSnapshot(project);
   const existing = snapshot.details.get(trajectoryId);
-  if (existing) {
+  if (existing && existing.sessionEndReason) {
     return existing;
   }
+
+  // For live trajectories, read directly from parquet for fresh data.
+  if (existing && !existing.sessionEndReason) {
+    const fresh = await getTrajectoryByIdForServing(trajectoryId, project);
+    if (fresh) {
+      snapshot.details.set(trajectoryId, fresh);
+    }
+    return fresh ?? existing;
+  }
+
   const detail = await readServingDetail(snapshot.manifest, trajectoryId);
   if (detail) {
     snapshot.details.set(trajectoryId, detail);
