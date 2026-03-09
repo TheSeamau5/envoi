@@ -191,4 +191,37 @@ describe("raw trace sync startup behavior", () => {
     expect(inst).toBeDefined();
     expect(duckCreateMock).toHaveBeenCalled();
   });
+
+  it("skips unreadable trace parquet files without failing startup", async () => {
+    await writeTraceFile(tempRoot, project, "traj-a");
+    await writeTraceFile(tempRoot, project, "traj-b");
+
+    spawnMock.mockImplementation(() => {
+      const child = makeChild();
+      setTimeout(() => {
+        child.emit("close", 0);
+      }, 10);
+      return child;
+    });
+
+    duckRunMock.mockImplementation(async (...args: [string?]) => {
+      const sql = String(args[0] ?? "");
+      if (
+        sql.includes("parquet_schema('") &&
+        sql.includes("traj-a/trace.parquet")
+      ) {
+        throw new Error("Invalid Error: TProtocolException: Invalid data");
+      }
+      return {
+        getRowObjectsJson: async () => [],
+      };
+    });
+
+    process.chdir(tempRoot);
+    const db = await import("../db");
+
+    const inst = await db.getDb(project);
+    expect(inst).toBeDefined();
+    expect(duckCreateMock).toHaveBeenCalled();
+  });
 });

@@ -67,13 +67,21 @@ export async function getTrajectorySandboxLiveness(
   return cached(
     `sandbox-status:${meta.sandboxId}`,
     async () => {
-      const pythonExecutable = await resolvePythonExecutable();
-      const { stdout } = await execFileAsync(
-        pythonExecutable,
-        [SCRIPT_PATH, meta.sandboxProvider ?? "", meta.sandboxId ?? ""],
-        { timeout: 10_000 },
-      );
-      return JSON.parse(stdout.trim()) as SandboxLivenessResult;
+      try {
+        const pythonExecutable = await resolvePythonExecutable();
+        const { stdout } = await execFileAsync(
+          pythonExecutable,
+          [SCRIPT_PATH, meta.sandboxProvider ?? "", meta.sandboxId ?? ""],
+          { timeout: 10_000 },
+        );
+        return JSON.parse(stdout.trim()) as SandboxLivenessResult;
+      } catch (error) {
+        return {
+          running: false,
+          reason: "sandbox_status_unavailable",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     },
     STATUS_CACHE_TTL_MS,
   );

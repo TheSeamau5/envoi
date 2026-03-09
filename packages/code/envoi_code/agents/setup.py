@@ -90,6 +90,7 @@ async def run_workspace_init(
     runtime_env: dict[str, str] | None = None,
 ) -> None:
     """Start the envoi runtime and initialize the workspace git repo."""
+    builtins.print("[setup] writing workspace init script...", flush=True)
     await sandbox.write_file(
         "/tmp/workspace_init.sh",
         build_workspace_init_script(runtime_env),
@@ -101,6 +102,7 @@ async def run_workspace_init(
         if stripped and stripped.startswith("[setup]"):
             builtins.print(stripped, flush=True)
 
+    builtins.print("[setup] executing workspace init script (timeout=300s)...", flush=True)
     result = await sandbox.run(
         "bash /tmp/workspace_init.sh",
         timeout=300,

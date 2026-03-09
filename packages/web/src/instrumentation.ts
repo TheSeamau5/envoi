@@ -17,5 +17,10 @@ export async function register(): Promise<void> {
   const { warmProjectSnapshotStore } = await import(
     "@/lib/server/project-snapshot-store"
   );
-  await warmProjectSnapshotStore();
+  void warmProjectSnapshotStore().catch((error: unknown) => {
+    console.warn(
+      "[instrumentation] background snapshot warm failed:",
+      error instanceof Error ? error.message : error,
+    );
+  });
 }

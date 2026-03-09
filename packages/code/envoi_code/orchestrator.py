@@ -3197,9 +3197,11 @@ async def execute_trajectory_main(
         min_cpu=sandbox_min_cpu,
         min_memory_mb=sandbox_min_memory_mb,
     )
+    print("[orchestrator] creating sandbox...", flush=True)
     launch_result = await create_sandbox(sandbox_provider, config)
     sandbox = launch_result.sandbox
     resolution = launch_result.resolution
+    print(f"[orchestrator] sandbox created (provider={resolution.provider})", flush=True)
     for warning in resolution.warnings:
         print(f"[sandbox][{resolution.provider}] {warning}")
     run_metadata["sandbox_resolution"] = {
@@ -3241,7 +3243,9 @@ async def execute_trajectory_main(
         workspace_gitignore=WORKSPACE_GITIGNORE,
         runtime_env=runtime_env,
     )
+    print("[orchestrator] starting agent setup...", flush=True)
     await agent_backend.setup(sandbox, setup_context)
+    print("[orchestrator] agent setup complete", flush=True)
 
     latest_git_commit: str | None = None
     resume_commit = get_trace_latest_commit(existing_trace) if existing_trace else None
@@ -3254,11 +3258,13 @@ async def execute_trajectory_main(
         )
         latest_git_commit = resume_commit
 
+    print("[orchestrator] creating session...", flush=True)
     session_id = await agent_backend.create_session(trajectory_id)
     if not session_id:
         raise RuntimeError(
             f"Failed to create session for agent={agent_name}",
         )
+    print(f"[orchestrator] session created id={session_id}", flush=True)
     update_log_context(session_id=session_id)
 
     if existing_trace is not None:
@@ -3302,6 +3308,7 @@ async def execute_trajectory_main(
         sandbox,
         selected_test_paths=selected_test_paths,
     )
+    print("[orchestrator] entering turn loop", flush=True)
     loop_result = await run_turn_loop(
         sandbox=sandbox,
         agent_backend=agent_backend,

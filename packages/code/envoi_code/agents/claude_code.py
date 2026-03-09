@@ -753,9 +753,11 @@ try:
                     ),
                 )
 
+            builtins.print("[setup] uploading agent scripts...", flush=True)
             await upload_files_parallel(
                 sandbox, setup_uploads, log_upload=True,
             )
+            builtins.print("[setup] agent scripts uploaded", flush=True)
 
             if ctx.env_files:
                 py, c, txt, sh = ctx.env_files
@@ -770,16 +772,20 @@ try:
                     flush=True,
                 )
 
+            builtins.print("[setup] running workspace init...", flush=True)
             await run_workspace_init(
                 sandbox,
                 runtime_env=ctx.runtime_env,
             )
+            builtins.print("[setup] workspace init complete", flush=True)
 
             # Store API key for the sandbox-side script to read
+            builtins.print("[setup] writing API key...", flush=True)
             await sandbox.run(
                 f"echo {json.dumps(self.api_key)} > /tmp/anthropic_api_key.txt",
                 quiet=True,
             )
+            builtins.print("[setup] API key written", flush=True)
 
         async def create_session(
             self,

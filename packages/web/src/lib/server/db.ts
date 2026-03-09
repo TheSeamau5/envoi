@@ -1290,229 +1290,239 @@ async function rebuildTrajectoriesFromTraceFiles(
     await conn.run(createEvaluationsSchemaSql(evaluationsTable));
   }
   for (const file of files) {
-    const logsFile = path.join(path.dirname(file), "logs.parquet");
-    const hasLogs = await pathExists(logsFile);
-    // Detect available columns — older parquet files may lack sandbox_id etc.
-    const colResult = await conn.run(
-      `SELECT name FROM parquet_schema('${file}')`,
-    );
-    const colRows = await colResult.getRowObjectsJson();
-    const columns = new Set(colRows.map((row) => String(row.name)));
-    const hasSandboxId = columns.has("sandbox_id");
-    const hasSandboxProvider = columns.has("sandbox_provider");
+    try {
+      const logsFile = path.join(path.dirname(file), "logs.parquet");
+      const hasLogs = await pathExists(logsFile);
+      // Detect available columns — older parquet files may lack sandbox_id etc.
+      const colResult = await conn.run(
+        `SELECT name FROM parquet_schema('${file}')`,
+      );
+      const colRows = await colResult.getRowObjectsJson();
+      const columns = new Set(colRows.map((row) => String(row.name)));
+      const hasSandboxId = columns.has("sandbox_id");
+      const hasSandboxProvider = columns.has("sandbox_provider");
 
-    const traceSummaryResult = await conn.run(`
-      SELECT
-        trajectory_id,
-        environment,
-        agent_model,
-        MIN(agent) AS agent,
-        MIN(started_at) AS started_at,
-        MAX(timestamp) AS trace_ended_at,
-        MAX(part) + 1 AS total_parts,
-        MAX(turn) AS total_turns,
-        SUM(content_token_estimate) AS total_tokens,
-        MAX(session_end_reason) AS session_end_reason,
-        MIN(task_params) AS task_params,
-        arg_max(suites, part) AS suites,
-        ${hasSandboxId ? "arg_max(sandbox_id, part)" : "NULL"} AS sandbox_id,
-        ${hasSandboxProvider ? "arg_max(sandbox_provider, part)" : "NULL"} AS sandbox_provider
-      FROM read_parquet('${file}')
-      GROUP BY trajectory_id, environment, agent_model
-    `);
-    const traceSummaryRows = await traceSummaryResult.getRowObjectsJson();
-    const traceSummaryRow = traceSummaryRows[0];
-    if (!traceSummaryRow) {
-      continue;
-    }
-
-    let endedAt = String(traceSummaryRow.trace_ended_at ?? "");
-    if (hasLogs) {
-      const logSummaryResult = await conn.run(`
-        SELECT MAX(ts) AS log_ended_at
-        FROM read_parquet('${logsFile}')
+      const traceSummaryResult = await conn.run(`
+        SELECT
+          trajectory_id,
+          environment,
+          agent_model,
+          MIN(agent) AS agent,
+          MIN(started_at) AS started_at,
+          MAX(timestamp) AS trace_ended_at,
+          MAX(part) + 1 AS total_parts,
+          MAX(turn) AS total_turns,
+          SUM(content_token_estimate) AS total_tokens,
+          MAX(session_end_reason) AS session_end_reason,
+          MIN(task_params) AS task_params,
+          arg_max(suites, part) AS suites,
+          ${hasSandboxId ? "arg_max(sandbox_id, part)" : "NULL"} AS sandbox_id,
+          ${hasSandboxProvider ? "arg_max(sandbox_provider, part)" : "NULL"} AS sandbox_provider
+        FROM read_parquet('${file}')
+        GROUP BY trajectory_id, environment, agent_model
       `);
-      const logSummaryRows = await logSummaryResult.getRowObjectsJson();
-      const logEndedAt = logSummaryRows[0]?.log_ended_at;
-      if (logEndedAt !== undefined && String(logEndedAt) > endedAt) {
-        endedAt = String(logEndedAt);
+      const traceSummaryRows = await traceSummaryResult.getRowObjectsJson();
+      const traceSummaryRow = traceSummaryRows[0];
+      if (!traceSummaryRow) {
+        continue;
       }
-    }
-    // Compute best eval scores and populate evaluations table by streaming
-    // eval rows one at a time. The full eval_events_delta column can be
-    // 100-300 MB, exceeding the 960MB DuckDB limit. We get part numbers first,
-    // then read each row individually (parquet predicate pushdown).
-    // Skip entirely if the parquet lacks eval_events_delta (older format).
-    const hasEvalColumn = columns.has("eval_events_delta");
-    const trajectoryId = String(traceSummaryRow.trajectory_id ?? "");
-    const environment = String(traceSummaryRow.environment ?? "");
-    const agentModel = String(traceSummaryRow.agent_model ?? "");
-    let bestPassed = 0;
-    let bestFailed = 0;
-    let bestTotal = 0;
-    let evalCount = 0;
-    if (hasEvalColumn && loadEvalScores) {
-      try {
-        const partsResult = await conn.run(`
-          SELECT part
-          FROM read_parquet('${file}')
-          WHERE eval_events_delta IS NOT NULL
-            AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
-          ORDER BY part
-        `);
-        const partsRows = await partsResult.getRowObjectsJson();
 
-        for (const partRow of partsRows) {
-          const partNum = Number(partRow.part);
-          const rowResult = await conn.run(`
-            SELECT eval_events_delta, turn
+      let endedAt = String(traceSummaryRow.trace_ended_at ?? "");
+      if (hasLogs) {
+        const logSummaryResult = await conn.run(`
+          SELECT MAX(ts) AS log_ended_at
+          FROM read_parquet('${logsFile}')
+        `);
+        const logSummaryRows = await logSummaryResult.getRowObjectsJson();
+        const logEndedAt = logSummaryRows[0]?.log_ended_at;
+        if (logEndedAt !== undefined && String(logEndedAt) > endedAt) {
+          endedAt = String(logEndedAt);
+        }
+      }
+      // Compute best eval scores and populate evaluations table by streaming
+      // eval rows one at a time. The full eval_events_delta column can be
+      // 100-300 MB, exceeding the 960MB DuckDB limit. We get part numbers first,
+      // then read each row individually (parquet predicate pushdown).
+      // Skip entirely if the parquet lacks eval_events_delta (older format).
+      const hasEvalColumn = columns.has("eval_events_delta");
+      const trajectoryId = String(traceSummaryRow.trajectory_id ?? "");
+      const environment = String(traceSummaryRow.environment ?? "");
+      const agentModel = String(traceSummaryRow.agent_model ?? "");
+      let bestPassed = 0;
+      let bestFailed = 0;
+      let bestTotal = 0;
+      let evalCount = 0;
+      if (hasEvalColumn && loadEvalScores) {
+        try {
+          const partsResult = await conn.run(`
+            SELECT part
             FROM read_parquet('${file}')
-            WHERE part = ${partNum}
-            LIMIT 1
+            WHERE eval_events_delta IS NOT NULL
+              AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
+            ORDER BY part
           `);
-          const rowData = await rowResult.getRowObjectsJson();
-          const rawEvents = rowData[0]?.eval_events_delta;
-          const turn =
-            rowData[0]?.turn != undefined ? Number(rowData[0].turn) : undefined;
-          if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
-            continue;
-          }
-          try {
-            const events = JSON.parse(rawEvents);
-            if (!Array.isArray(events)) {
+          const partsRows = await partsResult.getRowObjectsJson();
+
+          for (const partRow of partsRows) {
+            const partNum = Number(partRow.part);
+            const rowResult = await conn.run(`
+              SELECT eval_events_delta, turn
+              FROM read_parquet('${file}')
+              WHERE part = ${partNum}
+              LIMIT 1
+            `);
+            const rowData = await rowResult.getRowObjectsJson();
+            const rawEvents = rowData[0]?.eval_events_delta;
+            const turn =
+              rowData[0]?.turn != undefined
+                ? Number(rowData[0].turn)
+                : undefined;
+            if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
               continue;
             }
-            for (const event of events) {
-              if (typeof event !== "object" || event === null) {
+            try {
+              const events = JSON.parse(rawEvents);
+              if (!Array.isArray(events)) {
                 continue;
               }
-              const status = "status" in event ? String(event.status) : "";
-              const passed =
-                "passed" in event && typeof event.passed === "number"
-                  ? event.passed
-                  : 0;
-              const failed =
-                "failed" in event && typeof event.failed === "number"
-                  ? event.failed
-                  : 0;
-              const total =
-                "total" in event && typeof event.total === "number"
-                  ? event.total
-                  : 0;
-              const evalId =
-                "eval_id" in event && typeof event.eval_id === "string"
-                  ? event.eval_id
-                  : "";
-              const targetCommit =
-                "target_commit" in event &&
-                typeof event.target_commit === "string"
-                  ? event.target_commit
-                  : "";
-              const suiteResults =
-                "suite_results" in event
-                  ? JSON.stringify(event.suite_results ?? {})
-                  : "{}";
-              const finishedAt =
-                "finished_at" in event && typeof event.finished_at === "string"
-                  ? event.finished_at
-                  : undefined;
+              for (const event of events) {
+                if (typeof event !== "object" || event === null) {
+                  continue;
+                }
+                const status = "status" in event ? String(event.status) : "";
+                const passed =
+                  "passed" in event && typeof event.passed === "number"
+                    ? event.passed
+                    : 0;
+                const failed =
+                  "failed" in event && typeof event.failed === "number"
+                    ? event.failed
+                    : 0;
+                const total =
+                  "total" in event && typeof event.total === "number"
+                    ? event.total
+                    : 0;
+                const evalId =
+                  "eval_id" in event && typeof event.eval_id === "string"
+                    ? event.eval_id
+                    : "";
+                const targetCommit =
+                  "target_commit" in event &&
+                  typeof event.target_commit === "string"
+                    ? event.target_commit
+                    : "";
+                const suiteResults =
+                  "suite_results" in event
+                    ? JSON.stringify(event.suite_results ?? {})
+                    : "{}";
+                const finishedAt =
+                  "finished_at" in event &&
+                  typeof event.finished_at === "string"
+                    ? event.finished_at
+                    : undefined;
 
-              if (evaluationsTable && evalId) {
-                await conn.run(`
-                  INSERT INTO ${evaluationsTable} VALUES (
-                    '${sqlLiteral(trajectoryId)}',
-                    '${sqlLiteral(environment)}',
-                    '${sqlLiteral(agentModel)}',
-                    ${partNum},
-                    ${turn ?? "NULL"},
-                    '${sqlLiteral(targetCommit)}',
-                    '${sqlLiteral(evalId)}',
-                    '${sqlLiteral(status)}',
-                    ${passed},
-                    ${failed},
-                    ${total},
-                    '${sqlLiteral(targetCommit)}',
-                    '${sqlLiteral(suiteResults)}',
-                    ${finishedAt ? `'${sqlLiteral(finishedAt)}'` : "NULL"}
-                  )
-                `);
-              }
+                if (evaluationsTable && evalId) {
+                  await conn.run(`
+                    INSERT INTO ${evaluationsTable} VALUES (
+                      '${sqlLiteral(trajectoryId)}',
+                      '${sqlLiteral(environment)}',
+                      '${sqlLiteral(agentModel)}',
+                      ${partNum},
+                      ${turn ?? "NULL"},
+                      '${sqlLiteral(targetCommit)}',
+                      '${sqlLiteral(evalId)}',
+                      '${sqlLiteral(status)}',
+                      ${passed},
+                      ${failed},
+                      ${total},
+                      '${sqlLiteral(targetCommit)}',
+                      '${sqlLiteral(suiteResults)}',
+                      ${finishedAt ? `'${sqlLiteral(finishedAt)}'` : "NULL"}
+                    )
+                  `);
+                }
 
-              if (status === "completed") {
-                evalCount++;
-                if (passed > bestPassed || total > bestTotal) {
-                  bestPassed = passed;
-                  bestFailed = failed;
-                  bestTotal = total;
+                if (status === "completed") {
+                  evalCount++;
+                  if (passed > bestPassed || total > bestTotal) {
+                    bestPassed = passed;
+                    bestFailed = failed;
+                    bestTotal = total;
+                  }
                 }
               }
+            } catch {
+              continue;
             }
-          } catch {
-            continue;
           }
+        } catch (scoreError) {
+          console.warn(
+            `[db] eval score query failed for ${file}:`,
+            formatError(scoreError),
+          );
         }
-      } catch (scoreError) {
-        console.warn(
-          `[db] eval score query failed for ${file}:`,
-          formatError(scoreError),
-        );
       }
+
+      const values = {
+        trajectory_id: String(traceSummaryRow.trajectory_id ?? ""),
+        environment: String(traceSummaryRow.environment ?? ""),
+        agent_model: String(traceSummaryRow.agent_model ?? ""),
+        agent: String(traceSummaryRow.agent ?? ""),
+        started_at: String(traceSummaryRow.started_at ?? ""),
+        ended_at: endedAt,
+        total_parts: Number(traceSummaryRow.total_parts ?? 0),
+        total_turns: Number(traceSummaryRow.total_turns ?? 0),
+        total_tokens: Number(traceSummaryRow.total_tokens ?? 0),
+        session_end_reason:
+          traceSummaryRow.session_end_reason != undefined
+            ? String(traceSummaryRow.session_end_reason)
+            : "",
+        task_params:
+          traceSummaryRow.task_params != undefined
+            ? String(traceSummaryRow.task_params)
+            : "",
+        suites:
+          traceSummaryRow.suites != undefined
+            ? String(traceSummaryRow.suites)
+            : "",
+        sandbox_id:
+          traceSummaryRow.sandbox_id != undefined
+            ? String(traceSummaryRow.sandbox_id)
+            : "",
+        sandbox_provider:
+          traceSummaryRow.sandbox_provider != undefined
+            ? String(traceSummaryRow.sandbox_provider)
+            : "",
+      };
+
+      await conn.run(`
+        INSERT INTO ${targetTable} VALUES (
+          '${sqlLiteral(values.trajectory_id)}',
+          '${sqlLiteral(values.environment)}',
+          '${sqlLiteral(values.agent_model)}',
+          '${sqlLiteral(values.agent)}',
+          '${sqlLiteral(values.started_at)}',
+          '${sqlLiteral(values.ended_at)}',
+          ${values.total_parts},
+          ${values.total_turns},
+          ${values.total_tokens},
+          ${values.session_end_reason ? `'${sqlLiteral(values.session_end_reason)}'` : "NULL"},
+          ${values.task_params ? `'${sqlLiteral(values.task_params)}'` : "NULL"},
+          ${values.suites ? `'${sqlLiteral(values.suites)}'` : "NULL"},
+          ${values.sandbox_id ? `'${sqlLiteral(values.sandbox_id)}'` : "NULL"},
+          ${values.sandbox_provider ? `'${sqlLiteral(values.sandbox_provider)}'` : "NULL"},
+          ${bestPassed > 0 ? bestPassed : "NULL"},
+          ${bestFailed > 0 ? bestFailed : "NULL"},
+          ${bestTotal > 0 ? bestTotal : "NULL"},
+          ${evalCount}
+        )
+      `);
+    } catch (fileError) {
+      console.warn(
+        `[db] Skipping unreadable trace parquet path=${file}: ${formatError(fileError)}`,
+      );
+      continue;
     }
-
-    const values = {
-      trajectory_id: String(traceSummaryRow.trajectory_id ?? ""),
-      environment: String(traceSummaryRow.environment ?? ""),
-      agent_model: String(traceSummaryRow.agent_model ?? ""),
-      agent: String(traceSummaryRow.agent ?? ""),
-      started_at: String(traceSummaryRow.started_at ?? ""),
-      ended_at: endedAt,
-      total_parts: Number(traceSummaryRow.total_parts ?? 0),
-      total_turns: Number(traceSummaryRow.total_turns ?? 0),
-      total_tokens: Number(traceSummaryRow.total_tokens ?? 0),
-      session_end_reason:
-        traceSummaryRow.session_end_reason != undefined
-          ? String(traceSummaryRow.session_end_reason)
-          : "",
-      task_params:
-        traceSummaryRow.task_params != undefined
-          ? String(traceSummaryRow.task_params)
-          : "",
-      suites:
-        traceSummaryRow.suites != undefined
-          ? String(traceSummaryRow.suites)
-          : "",
-      sandbox_id:
-        traceSummaryRow.sandbox_id != undefined
-          ? String(traceSummaryRow.sandbox_id)
-          : "",
-      sandbox_provider:
-        traceSummaryRow.sandbox_provider != undefined
-          ? String(traceSummaryRow.sandbox_provider)
-          : "",
-    };
-
-    await conn.run(`
-      INSERT INTO ${targetTable} VALUES (
-        '${sqlLiteral(values.trajectory_id)}',
-        '${sqlLiteral(values.environment)}',
-        '${sqlLiteral(values.agent_model)}',
-        '${sqlLiteral(values.agent)}',
-        '${sqlLiteral(values.started_at)}',
-        '${sqlLiteral(values.ended_at)}',
-        ${values.total_parts},
-        ${values.total_turns},
-        ${values.total_tokens},
-        ${values.session_end_reason ? `'${sqlLiteral(values.session_end_reason)}'` : "NULL"},
-        ${values.task_params ? `'${sqlLiteral(values.task_params)}'` : "NULL"},
-        ${values.suites ? `'${sqlLiteral(values.suites)}'` : "NULL"},
-        ${values.sandbox_id ? `'${sqlLiteral(values.sandbox_id)}'` : "NULL"},
-        ${values.sandbox_provider ? `'${sqlLiteral(values.sandbox_provider)}'` : "NULL"},
-        ${bestPassed > 0 ? bestPassed : "NULL"},
-        ${bestFailed > 0 ? bestFailed : "NULL"},
-        ${bestTotal > 0 ? bestTotal : "NULL"},
-        ${evalCount}
-      )
-    `);
   }
 }
 

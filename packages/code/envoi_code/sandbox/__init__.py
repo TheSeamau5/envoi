@@ -32,6 +32,7 @@ async def create_sandbox(
     provider: str, config: SandboxConfig,
 ) -> SandboxLaunchResult:
     """Resolve provider config and create a sandbox."""
+    print(f"[sandbox] launching {provider} sandbox...", flush=True)
     if provider == "modal":
         from envoi_code.sandbox.modal import ModalSandbox
 

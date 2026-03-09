@@ -15,7 +15,6 @@ import { getTrajectorySandboxLiveness } from "./sandbox-liveness";
 import {
   computeServingSourceRevision,
   getServingProjects,
-  putServingGzipNdjson,
   putServingJson,
   readServingCompare,
   readServingCodeHistory,
@@ -52,7 +51,6 @@ const snapshotStore = (snapshotStoreGlobals.envoiSnapshotStore ??= {
 });
 
 const PROJECT_POLL_MS = 500;
-const LOG_PAGE_LIMIT = 10_000;
 
 function buildAgentSummary(
   trajectories: Trajectory[],
@@ -93,67 +91,6 @@ function buildServingTrajectorySummary(
   return {
     ...detail,
     commits: [],
-  };
-}
-
-async function buildServingArtifacts(
-  project: string,
-  revision: string,
-  trajectories: Trajectory[],
-): Promise<{
-  details: Map<string, Trajectory>;
-  refs: Record<string, ServingTrajectoryArtifacts>;
-}> {
-  const details = new Map<string, Trajectory>();
-  const refs: Record<string, ServingTrajectoryArtifacts> = {};
-
-  for (const trajectory of trajectories) {
-    const detail = await getTrajectoryByIdForServing(trajectory.id, project);
-    if (!detail) {
-      continue;
-    }
-
-    details.set(trajectory.id, detail);
-    const baseKey = `${servingRevisionPrefix(project, revision)}/trajectory/${trajectory.id}`;
-    const detailRef = await putServingJson(`${baseKey}/detail.json`, {
-      revision,
-      trajectory: detail,
-    });
-
-    const artifacts: ServingTrajectoryArtifacts = {
-      detail: detailRef,
-    };
-
-    const logs = await getTrajectoryLogsById(trajectory.id, {
-      project,
-      fresh: true,
-      fromSeq: 0,
-      limit: LOG_PAGE_LIMIT,
-    });
-    if (logs && logs.length > 0) {
-      artifacts.logs = await putServingGzipNdjson(
-        `${baseKey}/logs.ndjson.gz`,
-        logs,
-      );
-    }
-
-    const codeHistory = await getCodeHistory(trajectory.id, project);
-    if (codeHistory) {
-      artifacts.codeHistory = [
-        await putServingJson(`${baseKey}/code-history/0.json`, {
-          revision,
-          chunkIndex: 0,
-          codeHistory,
-        }),
-      ];
-    }
-
-    refs[trajectory.id] = artifacts;
-  }
-
-  return {
-    details,
-    refs,
   };
 }
 
@@ -220,18 +157,12 @@ async function publishProjectSnapshot(
 ): Promise<ServingProjectSnapshot> {
   const summaryTrajectories = await getAllTrajectories({
     project: project.name,
-    fresh: true,
   });
-  const { details, refs } = await buildServingArtifacts(
-    project.name,
-    revision,
-    summaryTrajectories,
-  );
-  const compare = summaryTrajectories
-    .map((trajectory) => details.get(trajectory.id))
-    .filter((trajectory): trajectory is Trajectory => trajectory !== undefined);
-  const trajectories = [...compare]
-    .map((trajectory) => buildServingTrajectorySummary(trajectory, trajectory))
+  const details = new Map<string, Trajectory>();
+  const refs: Record<string, ServingTrajectoryArtifacts> = {};
+  const compare = [...summaryTrajectories];
+  const trajectories = [...summaryTrajectories]
+    .map((trajectory) => buildServingTrajectorySummary(trajectory, undefined))
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
   const setups = compare;
   const publishedAt = new Date().toISOString();
@@ -434,8 +365,14 @@ export async function getTrajectoryDetailFromSnapshot(
   const detail = await readServingDetail(snapshot.manifest, trajectoryId);
   if (detail) {
     snapshot.details.set(trajectoryId, detail);
+    return detail;
   }
-  return detail;
+
+  const fallback = await getTrajectoryByIdForServing(trajectoryId, project);
+  if (fallback) {
+    snapshot.details.set(trajectoryId, fallback);
+  }
+  return fallback;
 }
 
 /** Return serving logs for a trajectory, filtered by sequence window. */
@@ -448,7 +385,12 @@ export async function getTrajectoryLogsFromSnapshot(
   const snapshot = await ensureProjectSnapshot(project);
   const payload = await readServingLogs(snapshot.manifest, trajectoryId);
   if (!payload) {
-    return undefined;
+    return getTrajectoryLogsById(trajectoryId, {
+      project,
+      fresh: false,
+      fromSeq,
+      limit,
+    });
   }
   return payload.rows.filter((row) => row.seq > fromSeq).slice(0, limit);
 }
@@ -464,7 +406,10 @@ export async function getCodeHistoryChunkFromSnapshot(
   }
   const snapshot = await ensureProjectSnapshot(project);
   const payload = await readServingCodeHistory(snapshot.manifest, trajectoryId);
-  return payload?.codeHistory;
+  if (payload) {
+    return payload.codeHistory;
+  }
+  return getCodeHistory(trajectoryId, project);
 }
 
 async function ensureProjectSnapshot(

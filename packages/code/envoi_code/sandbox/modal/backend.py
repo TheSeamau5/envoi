@@ -126,6 +126,11 @@ class ModalSandbox:
     async def create(config: SandboxConfig) -> ModalSandbox:
         """Create a new Modal sandbox from config."""
         image = ModalSandbox.build_image(config)
+        print(
+            f"[sandbox] creating Modal sandbox (cpu={config.cpu}, "
+            f"mem={config.memory_mb}MB, timeout={config.timeout}s)...",
+            flush=True,
+        )
         inner = await modal.Sandbox.create.aio(
             "bash",
             "-c",
@@ -136,6 +141,7 @@ class ModalSandbox:
             cpu=config.cpu,
             memory=config.memory_mb,
         )
+        print(f"[sandbox] sandbox ready id={inner.object_id}", flush=True)
         return ModalSandbox(inner)
 
     async def run(
