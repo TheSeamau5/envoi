@@ -10,6 +10,7 @@ const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
 const COOKIE_CHAT_HAS_MESSAGES = "envoi:chat-has-messages";
+const COOKIE_COMPARE_TRACE_COLORS = "envoi:compare-trace-colors";
 
 export type LayoutCookieKey =
   | "rightPanelOpen"
@@ -46,4 +47,12 @@ export function setProjectCookie(name: string): void {
   }
   const encoded = encodeURIComponent(trimmed);
   document.cookie = `${COOKIE_PROJECT}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
+}
+
+/** Mirror compare trace color state into a cookie for SSR/client alignment. */
+export function setCompareTraceColorsCookie(
+  colorMap: Record<string, number>,
+): void {
+  const encoded = encodeURIComponent(JSON.stringify(colorMap));
+  document.cookie = `${COOKIE_COMPARE_TRACE_COLORS}=${encoded}; path=/; max-age=31536000; SameSite=Lax`;
 }

@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const STORAGE_PREFIX = "envoi:";
 const STORAGE_EVENT = "envoi-storage";
@@ -94,10 +94,12 @@ export function usePersistedState<T>(
   const [value, setValue] = useState<T>(() =>
     resolveValue(prefixedKey, defaultValue, initialValue),
   );
+  const valueRef = useRef(value);
 
   const refreshFromStorage = useCallback(() => {
     setValue((prev) => {
       const next = resolveValue(prefixedKey, defaultValue, initialValue);
+      valueRef.current = next;
       return Object.is(prev, next) ? prev : next;
     });
   }, [prefixedKey, defaultValue, initialValue]);
@@ -140,23 +142,25 @@ export function usePersistedState<T>(
 
   const setPersistedValue = useCallback(
     (valueOrUpdater: T | ((prev: T) => T)) => {
-      setValue((prev) => {
-        const next =
-          typeof valueOrUpdater === "function"
-            ? (valueOrUpdater as (previous: T) => T)(prev)
-            : valueOrUpdater;
-        if (typeof window !== "undefined") {
-          try {
-            window.localStorage.setItem(prefixedKey, JSON.stringify(next));
-          } catch {
-            // Storage full or blocked — keep in-memory state anyway.
-          }
-          window.dispatchEvent(
-            new CustomEvent(STORAGE_EVENT, { detail: { key: prefixedKey } }),
-          );
+      const previous = valueRef.current;
+      const next =
+        typeof valueOrUpdater === "function"
+          ? (valueOrUpdater as (previous: T) => T)(previous)
+          : valueOrUpdater;
+
+      valueRef.current = next;
+      setValue(next);
+
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(prefixedKey, JSON.stringify(next));
+        } catch {
+          // Storage full or blocked — keep in-memory state anyway.
         }
-        return next;
-      });
+        window.dispatchEvent(
+          new CustomEvent(STORAGE_EVENT, { detail: { key: prefixedKey } }),
+        );
+      }
     },
     [prefixedKey],
   );

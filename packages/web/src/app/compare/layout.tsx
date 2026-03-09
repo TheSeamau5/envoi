@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { CompareProvider } from "@/components/compare/compare-context";
 import { CompareShell } from "@/components/compare/compare-shell";
+import { readLayoutCookies } from "@/lib/cookies";
 import { requireActiveProject } from "@/lib/server/project-context";
 
 export default async function CompareLayout({
@@ -10,10 +11,17 @@ export default async function CompareLayout({
 }: {
   children: ReactNode;
 }) {
-  const project = await requireActiveProject();
+  const [{ compareTraceColors }, project] = await Promise.all([
+    readLayoutCookies(),
+    requireActiveProject(),
+  ]);
 
   return (
-    <CompareProvider allTraces={[]} project={project}>
+    <CompareProvider
+      allTraces={[]}
+      initialColorMap={compareTraceColors}
+      project={project}
+    >
       <CompareShell project={project}>{children}</CompareShell>
     </CompareProvider>
   );

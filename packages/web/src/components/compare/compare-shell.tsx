@@ -70,6 +70,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
   const {
     allTraces,
     isLoadingAll,
+    isLoadingFull,
     selectedTraces,
     selectedIds,
     sortBy,
@@ -137,7 +138,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
         {/* Selection count badge */}
         <div className="ml-auto flex items-center gap-2">
           <span className="text-[12px] text-envoi-text-dim">
-            {selectedTraces.length} selected
+            {selectedIds.length} selected
           </span>
         </div>
       </div>
@@ -238,51 +239,49 @@ export function CompareShell({ children, project }: CompareShellProps) {
 
           {/* Trace list grouped by environment */}
           <div className="flex-1 overflow-y-auto">
-            {isLoadingAll && allTraces.length === 0 ? (
-              Array.from({ length: 8 }).map((_, index) => (
-                <div
-                  key={index}
-                  className="flex items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5"
-                >
-                  <div className="h-4 w-4 animate-pulse rounded-[3px] bg-envoi-surface" />
-                  <div className="min-w-0 flex-1">
-                    <div className="h-3 w-32 animate-pulse rounded bg-envoi-surface" />
-                    <div className="mt-1 h-3 w-24 animate-pulse rounded bg-envoi-surface" />
+            {isLoadingAll && allTraces.length === 0
+              ? Array.from({ length: 8 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5"
+                  >
+                    <div className="h-4 w-4 animate-pulse rounded-[3px] bg-envoi-surface" />
+                    <div className="min-w-0 flex-1">
+                      <div className="h-3 w-32 animate-pulse rounded bg-envoi-surface" />
+                      <div className="mt-1 h-3 w-24 animate-pulse rounded bg-envoi-surface" />
+                    </div>
                   </div>
-                </div>
-              ))
-            ) : (
-              [...sidebarGroups.entries()].map(([environment, traces]) => (
-                <div key={environment}>
-                  {/* Environment section header */}
-                  <div className="border-b border-envoi-border bg-envoi-bg px-3.5 py-1.5">
-                    <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
-                      {environment}
-                    </span>
-                  </div>
+                ))
+              : [...sidebarGroups.entries()].map(([environment, traces]) => (
+                  <div key={environment}>
+                    {/* Environment section header */}
+                    <div className="border-b border-envoi-border bg-envoi-bg px-3.5 py-1.5">
+                      <span className="text-[12px] font-bold uppercase tracking-[0.08em] text-envoi-text-dim">
+                        {environment}
+                      </span>
+                    </div>
 
-                  {traces.map((trace) => {
-                    const currentFlatIndex = flatIndex;
-                    flatIndex++;
-                    return (
-                      <TraceRow
-                        key={trace.id}
-                        trace={trace}
-                        project={project}
-                        flatIndex={currentFlatIndex}
-                        focusedIndex={focusedIndex}
-                        focusedRowRef={focusedRowRef}
-                        getColorIndex={getColorIndex}
-                        toggleTrace={toggleTrace}
-                        setFocusedIndex={setFocusedIndex}
-                        computeTraceTotal={computeTraceTotal}
-                        showYear={showYear}
-                      />
-                    );
-                  })}
-                </div>
-              ))
-            )}
+                    {traces.map((trace) => {
+                      const currentFlatIndex = flatIndex;
+                      flatIndex++;
+                      return (
+                        <TraceRow
+                          key={trace.id}
+                          trace={trace}
+                          project={project}
+                          flatIndex={currentFlatIndex}
+                          focusedIndex={focusedIndex}
+                          focusedRowRef={focusedRowRef}
+                          getColorIndex={getColorIndex}
+                          toggleTrace={toggleTrace}
+                          setFocusedIndex={setFocusedIndex}
+                          computeTraceTotal={computeTraceTotal}
+                          showYear={showYear}
+                        />
+                      );
+                    })}
+                  </div>
+                ))}
           </div>
         </div>
 
@@ -290,7 +289,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
         <div className="flex-1 overflow-y-auto p-4">
           {isLoadingAll && allTraces.length === 0 ? (
             <div className="h-full animate-pulse rounded border border-envoi-border bg-envoi-surface/40" />
-          ) : selectedTraces.length === 0 ? (
+          ) : selectedIds.length === 0 ? (
             <div className="flex h-full items-center justify-center">
               <div className="flex flex-col items-center gap-2">
                 <GitCompareArrows size={24} className="text-envoi-text-dim" />
@@ -299,6 +298,8 @@ export function CompareShell({ children, project }: CompareShellProps) {
                 </span>
               </div>
             </div>
+          ) : isLoadingFull && selectedTraces.length === 0 ? (
+            <div className="h-full animate-pulse rounded border border-envoi-border bg-envoi-surface/40" />
           ) : (
             <div className="flex h-full flex-col">
               <div className="min-h-0 flex-1">{children}</div>
@@ -345,11 +346,10 @@ function TraceRow({
   return (
     <div
       ref={isFocused ? focusedRowRef : undefined}
-      className="flex w-full items-center gap-2.5 border-b border-envoi-border-light px-3.5 py-2.5 text-left transition-colors hover:bg-envoi-surface"
+      className="flex w-full cursor-pointer select-none items-center gap-2 border-b border-envoi-border-light text-left transition-colors hover:bg-envoi-surface"
       style={{
         borderLeft: color ? `3px solid ${color.line}` : "3px solid transparent",
         background: color?.fill,
-        cursor: "pointer",
         outline: isFocused ? `2px solid ${T.accent}` : "none",
         outlineOffset: -2,
       }}
@@ -360,7 +360,7 @@ function TraceRow({
     >
       {/* Checkbox */}
       <span
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border"
+        className="ml-3.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border"
         style={{
           borderColor: color ? color.line : T.border,
           background: color ? color.line : "transparent",
@@ -370,7 +370,7 @@ function TraceRow({
       </span>
 
       {/* Trace info */}
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5 py-2.5">
         <span className="truncate text-[13px] font-medium text-envoi-text">
           {trace.id}
         </span>
@@ -396,7 +396,7 @@ function TraceRow({
       </div>
 
       {/* Score */}
-      <div className="flex shrink-0 flex-col items-end gap-0.5">
+      <div className="flex shrink-0 flex-col items-end gap-0.5 py-2.5">
         <span className="text-[13px] font-semibold text-envoi-text">
           {trace.finalPassed}
         </span>
@@ -408,8 +408,11 @@ function TraceRow({
       {/* Drill-down link */}
       <Link
         href={`/project/${encodeURIComponent(project)}/trajectory/${trace.id}`}
-        onClick={(event) => event.stopPropagation()}
-        className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
+        aria-label={`Open trajectory ${trace.id}`}
+        className="mr-3.5 flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded text-envoi-text-dim transition-colors hover:bg-envoi-border hover:text-envoi-text"
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
       >
         <ArrowUpRight size={12} />
       </Link>

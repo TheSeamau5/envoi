@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { CompareProvider } from "@/components/compare/compare-context";
 import { CompareShell } from "@/components/compare/compare-shell";
+import { readLayoutCookies } from "@/lib/cookies";
 import { getProjectSnapshot } from "@/lib/server/project-snapshot-store";
 
 type ProjectCompareLayoutProps = {
@@ -13,11 +14,18 @@ export default async function ProjectCompareLayout({
   params,
 }: ProjectCompareLayoutProps) {
   const { project } = await params;
-  const snapshot = await getProjectSnapshot(project);
+  const [snapshot, { compareTraceColors }] = await Promise.all([
+    getProjectSnapshot(project),
+    readLayoutCookies(),
+  ]);
   const allTraces = snapshot.trajectories;
 
   return (
-    <CompareProvider allTraces={allTraces} project={project}>
+    <CompareProvider
+      allTraces={allTraces}
+      initialColorMap={compareTraceColors}
+      project={project}
+    >
       <CompareShell project={project}>{children}</CompareShell>
     </CompareProvider>
   );

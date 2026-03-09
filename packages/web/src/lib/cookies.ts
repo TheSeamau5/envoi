@@ -16,6 +16,45 @@ const COOKIE_SIDEBAR_COLLAPSED = "envoi:sidebar-collapsed";
 const COOKIE_GROUP_BY_TURN = "envoi:trajectory-group-by-turn";
 const COOKIE_PROJECT = "envoi:project";
 const COOKIE_CHAT_HAS_MESSAGES = "envoi:chat-has-messages";
+const COOKIE_COMPARE_TRACE_COLORS = "envoi:compare-trace-colors";
+
+/** Parse a compare trace-color map from a cookie payload. */
+function parseCompareTraceColors(
+  value: string | undefined,
+): Record<string, number> {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {};
+    }
+
+    const colorMap: Record<string, number> = {};
+    for (const [traceId, colorIndex] of Object.entries(parsed)) {
+      if (
+        typeof colorIndex !== "number" ||
+        !Number.isInteger(colorIndex) ||
+        colorIndex < 0
+      ) {
+        continue;
+      }
+      if (traceId.length === 0) {
+        continue;
+      }
+      colorMap[traceId] = colorIndex;
+    }
+    return colorMap;
+  } catch {
+    return {};
+  }
+}
 
 export type LayoutCookies = {
   rightPanelOpen: boolean;
@@ -23,6 +62,7 @@ export type LayoutCookies = {
   sidebarCollapsed: boolean;
   groupByTurn: boolean;
   chatHasMessages: boolean;
+  compareTraceColors: Record<string, number>;
   project?: string;
 };
 
@@ -95,12 +135,23 @@ export async function readLayoutCookies(): Promise<LayoutCookies> {
     // cookie unavailable — use default
   }
 
+  let compareTraceColors: Record<string, number> = {};
+  try {
+    const compareTraceColorsCookie = jar.get(COOKIE_COMPARE_TRACE_COLORS);
+    compareTraceColors = parseCompareTraceColors(
+      compareTraceColorsCookie?.value,
+    );
+  } catch {
+    // cookie unavailable — use default
+  }
+
   return {
     rightPanelOpen,
     dividerPct,
     sidebarCollapsed,
     groupByTurn,
     chatHasMessages,
+    compareTraceColors,
     project,
   };
 }

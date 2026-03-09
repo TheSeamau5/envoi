@@ -23,10 +23,8 @@ import {
 import type { ReactNode } from "react";
 import type { Trajectory, Suite } from "@/lib/types";
 import { computeTotalTests } from "@/lib/constants";
-import {
-  useProjectCompare,
-  useProjectTrajectories,
-} from "@/lib/project-data";
+import { useProjectCompare, useProjectTrajectories } from "@/lib/project-data";
+import { setCompareTraceColorsCookie } from "@/lib/cookies.client";
 import { usePersistedState } from "@/lib/storage";
 import { useChatPageContext } from "@/lib/chat/use-chat-page-context";
 
@@ -110,12 +108,14 @@ const CompareContext = createContext<CompareContextValue | undefined>(
 type CompareProviderProps = {
   allTraces: Trajectory[];
   children: ReactNode;
+  initialColorMap: Record<string, number>;
   project: string;
 };
 
 export function CompareProvider({
   allTraces: initialAllTraces,
   children,
+  initialColorMap,
   project,
 }: CompareProviderProps) {
   /**
@@ -124,7 +124,14 @@ export function CompareProvider({
    */
   const [storedColorMap, setStoredColorMap] = usePersistedState<
     Record<string, number>
-  >("compare-trace-colors", {});
+  >(
+    "compare-trace-colors",
+    {},
+    {
+      initialValue: initialColorMap,
+      onChange: setCompareTraceColorsCookie,
+    },
+  );
 
   const [sortBy, setSortBy] = useState<SortKey>("score");
   const [modelFilter, setModelFilter] = useState<string>("all");
