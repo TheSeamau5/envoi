@@ -6,8 +6,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getTrajectoryLogsById } from "@/lib/server/data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
+import { getTrajectoryLogsFromSnapshot } from "@/lib/server/project-snapshot-store";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -41,12 +41,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       request.nextUrl.searchParams.get("limit"),
       2500,
     );
-    const rows = await getTrajectoryLogsById(id, {
+    const rows = await getTrajectoryLogsFromSnapshot(
       project,
+      id,
       fromSeq,
       limit,
-      fresh: false,
-    });
+    );
 
     if (rows === undefined) {
       return NextResponse.json(

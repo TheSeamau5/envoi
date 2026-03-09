@@ -40,17 +40,26 @@ type DbGlobals = {
 };
 const g = globalThis as unknown as Partial<DbGlobals>;
 const instances = (g.envoiDbInstances ??= new Map<string, DuckDBInstance>());
-const initPromises = (g.envoiDbInitPromises ??= new Map<string, Promise<DuckDBInstance>>());
+const initPromises = (g.envoiDbInitPromises ??= new Map<
+  string,
+  Promise<DuckDBInstance>
+>());
 
 /** Tracks in-flight and recently completed syncs to prevent spam. */
 const syncInFlight = (g.envoiSyncInFlight ??= new Set<string>());
-const rawSyncPromises = (g.envoiRawSyncPromises ??= new Map<string, Promise<void>>());
+const rawSyncPromises = (g.envoiRawSyncPromises ??= new Map<
+  string,
+  Promise<void>
+>());
 const lastSyncTime = (g.envoiLastSyncTime ??= new Map<string, number>());
 const SYNC_MIN_INTERVAL_MS = 30_000;
 const SUMMARY_REVISION_POLL_MS = 5_000;
 
 /** Per-project mutex for createAnalyticsViews to prevent concurrent table rebuilds. */
-const analyticsViewsLock = (g.envoiAnalyticsViewsLock ??= new Map<string, Promise<void>>());
+const analyticsViewsLock = (g.envoiAnalyticsViewsLock ??= new Map<
+  string,
+  Promise<void>
+>());
 
 const PROJECT_COOKIE = "envoi:project";
 const PROJECTS_JSON_KEY = "projects.json";
@@ -1047,6 +1056,11 @@ export async function getProjectDataStatus(
     } else {
       void ensureSummaryRevisionLoaded(activeProject, {
         forceCheck: true,
+      }).catch((error) => {
+        console.warn(
+          `[db] Summary revision refresh failed project=${activeProject}:`,
+          formatError(error),
+        );
       });
     }
   }
@@ -1257,13 +1271,20 @@ function createEvaluationsSchemaSql(tableName: string): string {
   `;
 }
 
+type RebuildTraceOptions = {
+  evaluationsTable?: string;
+  loadEvalScores?: boolean;
+};
+
 async function rebuildTrajectoriesFromTraceFiles(
   project: string,
   targetTable: string,
   conn: Awaited<ReturnType<DuckDBInstance["connect"]>>,
-  evaluationsTable?: string,
+  options?: RebuildTraceOptions,
 ): Promise<void> {
   const files = await listTraceFiles(project);
+  const evaluationsTable = options?.evaluationsTable;
+  const loadEvalScores = options?.loadEvalScores !== false;
   await conn.run(createTrajectoriesSchemaSql(targetTable));
   if (evaluationsTable) {
     await conn.run(createEvaluationsSchemaSql(evaluationsTable));
@@ -1330,116 +1351,113 @@ async function rebuildTrajectoriesFromTraceFiles(
     let bestFailed = 0;
     let bestTotal = 0;
     let evalCount = 0;
-    if (hasEvalColumn) {
-    try {
-      const partsResult = await conn.run(`
-        SELECT part
-        FROM read_parquet('${file}')
-        WHERE eval_events_delta IS NOT NULL
-          AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
-        ORDER BY part
-      `);
-      const partsRows = await partsResult.getRowObjectsJson();
-
-      for (const partRow of partsRows) {
-        const partNum = Number(partRow.part);
-        const rowResult = await conn.run(`
-          SELECT eval_events_delta, turn
+    if (hasEvalColumn && loadEvalScores) {
+      try {
+        const partsResult = await conn.run(`
+          SELECT part
           FROM read_parquet('${file}')
-          WHERE part = ${partNum}
-          LIMIT 1
+          WHERE eval_events_delta IS NOT NULL
+            AND LENGTH(CAST(eval_events_delta AS VARCHAR)) > 2
+          ORDER BY part
         `);
-        const rowData = await rowResult.getRowObjectsJson();
-        const rawEvents = rowData[0]?.eval_events_delta;
-        const turn = rowData[0]?.turn != undefined
-          ? Number(rowData[0].turn)
-          : undefined;
-        if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
-          continue;
-        }
-        try {
-          const events = JSON.parse(rawEvents);
-          if (!Array.isArray(events)) {
+        const partsRows = await partsResult.getRowObjectsJson();
+
+        for (const partRow of partsRows) {
+          const partNum = Number(partRow.part);
+          const rowResult = await conn.run(`
+            SELECT eval_events_delta, turn
+            FROM read_parquet('${file}')
+            WHERE part = ${partNum}
+            LIMIT 1
+          `);
+          const rowData = await rowResult.getRowObjectsJson();
+          const rawEvents = rowData[0]?.eval_events_delta;
+          const turn =
+            rowData[0]?.turn != undefined ? Number(rowData[0].turn) : undefined;
+          if (typeof rawEvents !== "string" || rawEvents.length <= 2) {
             continue;
           }
-          for (const event of events) {
-            if (typeof event !== "object" || event === null) {
+          try {
+            const events = JSON.parse(rawEvents);
+            if (!Array.isArray(events)) {
               continue;
             }
-            const status = "status" in event ? String(event.status) : "";
-            const passed =
-              "passed" in event && typeof event.passed === "number"
-                ? event.passed
-                : 0;
-            const failed =
-              "failed" in event && typeof event.failed === "number"
-                ? event.failed
-                : 0;
-            const total =
-              "total" in event && typeof event.total === "number"
-                ? event.total
-                : 0;
-            const evalId =
-              "eval_id" in event && typeof event.eval_id === "string"
-                ? event.eval_id
-                : "";
-            const targetCommit =
-              "target_commit" in event &&
-              typeof event.target_commit === "string"
-                ? event.target_commit
-                : "";
-            const suiteResults =
-              "suite_results" in event
-                ? JSON.stringify(event.suite_results ?? {})
-                : "{}";
-            const finishedAt =
-              "finished_at" in event &&
-              typeof event.finished_at === "string"
-                ? event.finished_at
-                : undefined;
+            for (const event of events) {
+              if (typeof event !== "object" || event === null) {
+                continue;
+              }
+              const status = "status" in event ? String(event.status) : "";
+              const passed =
+                "passed" in event && typeof event.passed === "number"
+                  ? event.passed
+                  : 0;
+              const failed =
+                "failed" in event && typeof event.failed === "number"
+                  ? event.failed
+                  : 0;
+              const total =
+                "total" in event && typeof event.total === "number"
+                  ? event.total
+                  : 0;
+              const evalId =
+                "eval_id" in event && typeof event.eval_id === "string"
+                  ? event.eval_id
+                  : "";
+              const targetCommit =
+                "target_commit" in event &&
+                typeof event.target_commit === "string"
+                  ? event.target_commit
+                  : "";
+              const suiteResults =
+                "suite_results" in event
+                  ? JSON.stringify(event.suite_results ?? {})
+                  : "{}";
+              const finishedAt =
+                "finished_at" in event && typeof event.finished_at === "string"
+                  ? event.finished_at
+                  : undefined;
 
-            // Insert into evaluations table for detail page reconstruction
-            if (evaluationsTable && evalId) {
-              await conn.run(`
-                INSERT INTO ${evaluationsTable} VALUES (
-                  '${sqlLiteral(trajectoryId)}',
-                  '${sqlLiteral(environment)}',
-                  '${sqlLiteral(agentModel)}',
-                  ${partNum},
-                  ${turn ?? "NULL"},
-                  '${sqlLiteral(targetCommit)}',
-                  '${sqlLiteral(evalId)}',
-                  '${sqlLiteral(status)}',
-                  ${passed},
-                  ${failed},
-                  ${total},
-                  '${sqlLiteral(targetCommit)}',
-                  '${sqlLiteral(suiteResults)}',
-                  ${finishedAt ? `'${sqlLiteral(finishedAt)}'` : "NULL"}
-                )
-              `);
-            }
+              if (evaluationsTable && evalId) {
+                await conn.run(`
+                  INSERT INTO ${evaluationsTable} VALUES (
+                    '${sqlLiteral(trajectoryId)}',
+                    '${sqlLiteral(environment)}',
+                    '${sqlLiteral(agentModel)}',
+                    ${partNum},
+                    ${turn ?? "NULL"},
+                    '${sqlLiteral(targetCommit)}',
+                    '${sqlLiteral(evalId)}',
+                    '${sqlLiteral(status)}',
+                    ${passed},
+                    ${failed},
+                    ${total},
+                    '${sqlLiteral(targetCommit)}',
+                    '${sqlLiteral(suiteResults)}',
+                    ${finishedAt ? `'${sqlLiteral(finishedAt)}'` : "NULL"}
+                  )
+                `);
+              }
 
-            if (status === "completed") {
-              evalCount++;
-              if (passed > bestPassed || total > bestTotal) {
-                bestPassed = passed;
-                bestFailed = failed;
-                bestTotal = total;
+              if (status === "completed") {
+                evalCount++;
+                if (passed > bestPassed || total > bestTotal) {
+                  bestPassed = passed;
+                  bestFailed = failed;
+                  bestTotal = total;
+                }
               }
             }
+          } catch {
+            continue;
           }
-        } catch {
-          continue;
         }
+      } catch (scoreError) {
+        console.warn(
+          `[db] eval score query failed for ${file}:`,
+          formatError(scoreError),
+        );
       }
-    } catch (scoreError) {
-      console.warn(
-        `[db] eval score query failed for ${file}:`,
-        formatError(scoreError),
-      );
     }
-    } // end if (hasEvalColumn)
 
     const values = {
       trajectory_id: String(traceSummaryRow.trajectory_id ?? ""),
@@ -1508,16 +1526,16 @@ async function createAnalyticsViews(
   if (existing) {
     await existing;
   }
-  let resolve: () => void;
+  let releaseLock = () => {};
   const lockPromise = new Promise<void>((res) => {
-    resolve = res;
+    releaseLock = res;
   });
   analyticsViewsLock.set(project, lockPromise);
   try {
     await createAnalyticsViewsInner(inst, project);
   } finally {
     analyticsViewsLock.delete(project);
-    resolve!();
+    releaseLock();
   }
 }
 
@@ -1527,8 +1545,11 @@ async function createAnalyticsViewsInner(
 ): Promise<void> {
   const startedAt = Date.now();
   const conn = await inst.connect();
-  const nextTrajectoriesTable = "trajectories_next";
-  const nextEvaluationsTable = "evaluations_next";
+  const refreshToken = `${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const nextTrajectoriesTable = `trajectories_next_${refreshToken}`;
+  const nextEvaluationsTable = `evaluations_next_${refreshToken}`;
   const [hasTrajectorySummary, hasEvaluationSummary] = await Promise.all([
     pathExists(trajectorySummaryPath(project)),
     pathExists(evaluationSummaryPath(project)),
@@ -1554,10 +1575,14 @@ async function createAnalyticsViewsInner(
 
     // When no evaluation summary exists, populate evaluations from raw traces.
     const evalsTarget = hasEvaluationSummary ? undefined : nextEvaluationsTable;
+    const loadEvalScores = !hasEvaluationSummary;
 
     if (hasRawTraces && hasTrajectorySummary) {
       const summaryPath = sqlLiteral(trajectorySummaryPath(project));
-      await rebuildTrajectoriesFromTraceFiles(project, rawTable, conn, evalsTarget);
+      await rebuildTrajectoriesFromTraceFiles(project, rawTable, conn, {
+        evaluationsTable: evalsTarget,
+        loadEvalScores,
+      });
       await conn.run(`
         CREATE TABLE ${summaryTable} AS
         SELECT
@@ -1595,7 +1620,10 @@ async function createAnalyticsViewsInner(
         project,
         nextTrajectoriesTable,
         conn,
-        evalsTarget,
+        {
+          evaluationsTable: evalsTarget,
+          loadEvalScores,
+        },
       );
     } else if (hasTrajectorySummary) {
       const summaryPath = sqlLiteral(trajectorySummaryPath(project));
@@ -1627,7 +1655,10 @@ async function createAnalyticsViewsInner(
         project,
         nextTrajectoriesTable,
         conn,
-        evalsTarget,
+        {
+          evaluationsTable: evalsTarget,
+          loadEvalScores,
+        },
       );
     }
 
@@ -1721,18 +1752,20 @@ async function refreshProjectTables(
   opts?: { allowPartial?: boolean },
 ): Promise<void> {
   const tasks = [
-    { name: "summary tables", run: loadSummaryTables(inst, project) },
-    { name: "analytics tables", run: createAnalyticsViews(inst, project) },
+    { name: "summary tables", run: () => loadSummaryTables(inst, project) },
+    {
+      name: "analytics tables",
+      run: () => createAnalyticsViews(inst, project),
+    },
   ] as const;
-  const results = await Promise.allSettled(tasks.map((task) => task.run));
   const failures: Array<{ name: string; reason: unknown }> = [];
-  for (let index = 0; index < results.length; index++) {
-    const result = results[index];
-    const task = tasks[index];
-    if (!result || !task || result.status !== "rejected") {
-      continue;
+
+  for (const task of tasks) {
+    try {
+      await task.run();
+    } catch (error) {
+      failures.push({ name: task.name, reason: error });
     }
-    failures.push({ name: task.name, reason: result.reason });
   }
 
   if (failures.length === 0) {
@@ -1746,7 +1779,10 @@ async function refreshProjectTables(
         formatError(failure.reason),
       );
     }
-    if (failures.length < tasks.length) {
+    const analyticsFailure = failures.find(
+      (failure) => failure.name === "analytics tables",
+    );
+    if (!analyticsFailure) {
       return;
     }
   }
@@ -1759,9 +1795,7 @@ async function refreshProjectTables(
   );
 }
 
-async function configureInstance(
-  inst: DuckDBInstance,
-): Promise<void> {
+async function configureInstance(inst: DuckDBInstance): Promise<void> {
   const cfgConn = await inst.connect();
   try {
     await cfgConn.run("SET memory_limit='960MB'");

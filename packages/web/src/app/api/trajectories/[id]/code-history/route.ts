@@ -7,8 +7,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getCodeHistory } from "@/lib/server/data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
+import { getCodeHistoryChunkFromSnapshot } from "@/lib/server/project-snapshot-store";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -23,7 +23,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     }
 
     const { id } = await params;
-    const codeHistory = await getCodeHistory(id, project);
+    const codeHistory = await getCodeHistoryChunkFromSnapshot(project, id, 0);
 
     if (codeHistory === undefined) {
       return NextResponse.json({});

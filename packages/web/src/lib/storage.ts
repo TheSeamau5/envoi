@@ -8,7 +8,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_PREFIX = "envoi:";
 const STORAGE_EVENT = "envoi-storage";
@@ -91,22 +91,9 @@ export function usePersistedState<T>(
   const initialValue = options?.initialValue;
   const onChange = options?.onChange;
 
-  // Use server-safe default for initial render to avoid hydration mismatch.
-  // LocalStorage is read after mount in the hydration effect below.
-  const [value, setValue] = useState<T>(initialValue ?? defaultValue);
-  const hydratedRef = useRef(false);
-
-  // After mount: hydrate from localStorage (runs once).
-  useEffect(() => {
-    if (hydratedRef.current) {
-      return;
-    }
-    hydratedRef.current = true;
-    const stored = readStoredValue(prefixedKey, defaultValue);
-    if (stored !== undefined) {
-      setValue(stored);
-    }
-  }, [prefixedKey, defaultValue]);
+  const [value, setValue] = useState<T>(() =>
+    resolveValue(prefixedKey, defaultValue, initialValue),
+  );
 
   const refreshFromStorage = useCallback(() => {
     setValue((prev) => {

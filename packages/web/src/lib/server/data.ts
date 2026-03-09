@@ -7,6 +7,10 @@
  * Import this module only from server components or API route handlers.
  */
 
+import { access, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import path from "node:path";
+import { promisify } from "node:util";
 import {
   isS3Configured,
   traceUri,
@@ -16,10 +20,7 @@ import {
   freshLogsUri,
   query,
 } from "./db";
-import {
-  freshnessFromBool,
-  readProjectData,
-} from "./project-data";
+import { freshnessFromBool, readProjectData } from "./project-data";
 import { sqlLiteral } from "./utils";
 import {
   reconstructTrajectory,
@@ -40,6 +41,21 @@ import type {
   SchemaColumn,
   TrajectoryLogRow,
 } from "@/lib/types";
+
+const execFileAsync = promisify(execFile);
+const EXTRACT_EVAL_ROWS_SCRIPT = path.join(
+  process.cwd(),
+  "scripts",
+  "extract_eval_rows.py",
+);
+const REPO_PYTHON = path.resolve(
+  process.cwd(),
+  "..",
+  "..",
+  ".venv",
+  "bin",
+  "python3",
+);
 
 // ---------------------------------------------------------------------------
 // Mock fallback (lazy import to avoid bundling when not needed)
@@ -190,6 +206,17 @@ type TrajectoryScore = {
   total: number;
 };
 
+const RAW_CACHE_DETAIL_LIMIT_BYTES = 100 * 1024 * 1024;
+
+async function resolvePythonExecutable(): Promise<string> {
+  try {
+    await access(REPO_PYTHON);
+    return REPO_PYTHON;
+  } catch {
+    return "python3";
+  }
+}
+
 function deriveScoreFromSuites(
   suitesValue: string | undefined,
 ): TrajectoryScore | undefined {
@@ -212,9 +239,7 @@ function deriveScoreFromSuites(
           ? value.passed
           : 0;
       const rowTotal =
-        "total" in value && typeof value.total === "number"
-          ? value.total
-          : 0;
+        "total" in value && typeof value.total === "number" ? value.total : 0;
       passed += rowPassed;
       total += rowTotal;
     }
@@ -327,6 +352,81 @@ export async function getTrajectoryById(
 }
 
 /**
+ * Reconstruct a trajectory directly from the locally cached raw trace parquet.
+ * This keeps full `eval_events_delta` available without forcing an S3 read.
+ */
+export async function getTrajectoryByIdFromRawCache(
+  id: string,
+  project?: string,
+): Promise<Trajectory | undefined> {
+  if (!isS3Configured()) {
+    return getMockTrajectoryById(id);
+  }
+  try {
+    const uri = await traceUri(id, project);
+    if (!uri.startsWith("s3://")) {
+      const info = await stat(uri);
+      if (info.size > RAW_CACHE_DETAIL_LIMIT_BYTES) {
+        return undefined;
+      }
+    }
+    return loadTrajectoryFromRawUri(uri, project);
+  } catch (error) {
+    console.error(
+      `[data] loadTrajectoryFromRawCache failed id=${id}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Build a serving-grade trajectory detail from raw cached parquet plus
+ * externally extracted eval rows, avoiding DuckDB's large eval JSON reads.
+ */
+export async function getTrajectoryByIdForServing(
+  id: string,
+  project?: string,
+): Promise<Trajectory | undefined> {
+  if (!isS3Configured()) {
+    return getMockTrajectoryById(id);
+  }
+
+  try {
+    const uri = await traceUri(id, project);
+    const rawRows = await query(
+      `
+      SELECT * EXCLUDE (eval_events_delta)
+      FROM read_parquet('${sqlLiteral(uri)}')
+      ORDER BY part
+    `,
+      project,
+    );
+    if (rawRows.length === 0) {
+      return undefined;
+    }
+
+    if (uri.startsWith("s3://")) {
+      return reconstructTrajectory(rawRows.map(toParquetRow));
+    }
+
+    const evalRows = await extractEvalRowsFromTrace(uri);
+    if (evalRows.length === 0) {
+      return reconstructTrajectory(rawRows.map(toParquetRow));
+    }
+
+    const evalsByPart = groupEvalsByPart(evalRows);
+    return reconstructTrajectory(injectEvalData(rawRows, evalsByPart));
+  } catch (error) {
+    console.error(
+      `[data] loadTrajectoryForServing failed id=${id}:`,
+      error instanceof Error ? error.message : error,
+    );
+    return undefined;
+  }
+}
+
+/**
  * Load a single trajectory from parquet + materialized evaluations.
  * Excludes eval_events_delta from the parquet read (176MB savings on large
  * files) and injects evaluation data from the materialized evaluations table.
@@ -385,6 +485,44 @@ function injectEvalData(
   });
 }
 
+async function extractEvalRowsFromTrace(
+  tracePath: string,
+): Promise<Record<string, unknown>[]> {
+  const pythonExecutable = await resolvePythonExecutable();
+  const { stdout } = await execFileAsync(pythonExecutable, [
+    EXTRACT_EVAL_ROWS_SCRIPT,
+    tracePath,
+  ]);
+  const parsed: unknown = JSON.parse(stdout);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.filter(
+    (row): row is Record<string, unknown> =>
+      typeof row === "object" && row !== null && !Array.isArray(row),
+  );
+}
+
+async function loadTrajectoryFromRawUri(
+  uri: string,
+  project?: string,
+): Promise<Trajectory | undefined> {
+  const rawRows = await query(
+    `
+    SELECT *
+    FROM read_parquet('${sqlLiteral(uri)}')
+    ORDER BY part
+  `,
+    project,
+  );
+
+  if (rawRows.length === 0) {
+    return undefined;
+  }
+
+  return reconstructTrajectory(rawRows.map(toParquetRow));
+}
+
 async function loadTrajectory(
   id: string,
   fresh: boolean,
@@ -396,24 +534,7 @@ async function loadTrajectory(
       : await traceUri(id, project);
 
     if (fresh) {
-      // Fresh read: include eval_events_delta directly from S3 parquet.
-      // The raw parquet has the most up-to-date eval data from the agent.
-      // buildEvaluationsFromRows handles deduplication and overwrite protection.
-      const rawRows = await query(
-        `
-        SELECT *
-        FROM read_parquet('${sqlLiteral(uri)}')
-        ORDER BY part
-      `,
-        project,
-      );
-
-      if (rawRows.length === 0) {
-        return undefined;
-      }
-
-      const rows = rawRows.map(toParquetRow);
-      return reconstructTrajectory(rows);
+      return loadTrajectoryFromRawUri(uri, project);
     }
 
     // Cached read: exclude eval_events_delta (5MB vs 181MB for large files)
@@ -686,9 +807,7 @@ export async function getCompareTrajectories(opts?: {
       }
 
       const results = await Promise.all(
-        ids.map((id) =>
-          loadTrajectory(id, opts?.fresh === true, project),
-        ),
+        ids.map((id) => loadTrajectory(id, opts?.fresh === true, project)),
       );
 
       return results.filter((traj): traj is Trajectory => traj !== undefined);
@@ -883,9 +1002,10 @@ export async function getTrajectoryLogsById(
     cacheKey: `trajectory-logs:${opts?.project ?? "default"}:${id}:${fromSeq}:${limit}`,
     load: async (project) => {
       try {
-        const uri = opts?.fresh === true
-          ? await freshLogsUri(id, project)
-          : await logsUri(id, project);
+        const uri =
+          opts?.fresh === true
+            ? await freshLogsUri(id, project)
+            : await logsUri(id, project);
         const sql = `
           SELECT
             seq,

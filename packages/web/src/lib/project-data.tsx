@@ -19,8 +19,8 @@ import type {
 import { queryKeys } from "@/lib/query-keys";
 import { isTrajectoryActive } from "@/lib/trajectory-state";
 
-const PROJECT_STATUS_POLL_MS = 5_000;
-const LIVE_TRAJECTORY_POLL_MS = 30_000;
+const PROJECT_STATUS_POLL_MS = 1_000;
+const LIVE_TRAJECTORY_POLL_MS = 1_000;
 
 export type ProjectDataStatus = {
   hasManifest: boolean;
@@ -126,7 +126,8 @@ export function useProjectDataStatus(
       fetchProjectJson<ProjectDataStatus>("/api/revision", project),
     enabled,
     refetchInterval: enabled ? PROJECT_STATUS_POLL_MS : false,
-    staleTime: 0,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 
   useEffect(() => {
@@ -165,16 +166,15 @@ export function useProjectTrajectories(
     queryKey: queryKeys.trajectories.all(project),
     queryFn: async () =>
       dedupeTrajectoriesById(
-        await fetchProjectJson<Trajectory[]>("/api/trajectories", project, {
-          bust: true,
-        }),
+        await fetchProjectJson<Trajectory[]>("/api/trajectories", project),
       ),
     initialData:
       initialData && initialData.length > 0
         ? dedupeTrajectoriesById(initialData)
         : undefined,
-    staleTime: 0,
-    refetchOnMount: true,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
   });
 }
 
@@ -261,8 +261,9 @@ export function useProjectCompare(
         : undefined,
     enabled: options?.enabled !== false,
     placeholderData: keepPreviousData,
-    staleTime: 0,
-    refetchOnMount: true,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
   });
 }
 
@@ -406,7 +407,6 @@ export function useProjectTrajectoryDetail(
         buildProjectUrl(
           `/api/trajectories/${encodeURIComponent(trajectoryId)}`,
           project,
-          { bust: true },
         ),
       );
       if (response.status === 404) {
@@ -422,7 +422,7 @@ export function useProjectTrajectoryDetail(
       return (await response.json()) as Trajectory;
     },
     initialData,
-    refetchOnMount: initialData?.sessionEndReason ? false : true,
+    refetchOnMount: false,
     refetchInterval: (query) => {
       const trajectory = query.state.data;
       if (!trajectory || trajectory.sessionEndReason) {
@@ -430,7 +430,8 @@ export function useProjectTrajectoryDetail(
       }
       return LIVE_TRAJECTORY_POLL_MS;
     },
-    staleTime: 0,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 
   const trajectory = trajectoryQuery.data;
@@ -470,6 +471,9 @@ export function useProjectTrajectoryCodeHistory(
       return mapped;
     },
     enabled,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
   });
 }
 
@@ -520,6 +524,8 @@ export function useProjectTrajectoryLogs(
       options?.enabled !== false && options?.isLive === true
         ? LIVE_TRAJECTORY_POLL_MS
         : false,
-    staleTime: 0,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
   });
 }

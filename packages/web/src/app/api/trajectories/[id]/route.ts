@@ -7,8 +7,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getTrajectoryById } from "@/lib/server/data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
+import { getTrajectoryDetailFromSnapshot } from "@/lib/server/project-snapshot-store";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -24,7 +24,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     const { id } = await params;
-    const trajectory = await getTrajectoryById(id, { fresh: false, project });
+    const bustRequested = request.nextUrl.searchParams.has("bust");
+    const trajectory = await getTrajectoryDetailFromSnapshot(project, id);
 
     if (!trajectory) {
       return NextResponse.json(
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     console.log(
-      `[api/trajectory-detail] project=${project} id=${id} commits=${trajectory.commits.length} durationMs=${Date.now() - startedAt}`,
+      `[api/trajectory-detail] project=${project} id=${id} bust=${bustRequested} commits=${trajectory.commits.length} durationMs=${Date.now() - startedAt}`,
     );
 
     return NextResponse.json(trajectory);

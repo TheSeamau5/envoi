@@ -8,23 +8,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import path from "node:path";
-import { getTrajectorySandboxMeta } from "@/lib/server/data";
-import { cached } from "@/lib/server/cache";
 import { getProjectFromRequest } from "@/lib/server/project-context";
-
-const execFileAsync = promisify(execFile);
-
-const SCRIPT_PATH = path.join(
-  process.cwd(),
-  "scripts",
-  "check-sandbox-status.py",
-);
-
-/** Cache sandbox status for 15 seconds to avoid hammering the provider */
-const STATUS_CACHE_TTL_MS = 15_000;
+import { getTrajectorySandboxLiveness } from "@/lib/server/sandbox-liveness";
 
 export async function GET(
   request: NextRequest,
@@ -41,47 +26,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const meta = await getTrajectorySandboxMeta(id, project);
-    if (!meta) {
-      return NextResponse.json({
-        running: false,
-        reason: "trajectory_not_found",
-      });
-    }
-
-    /** Already finished — no need to query the provider */
-    if (meta.sessionEndReason) {
-      return NextResponse.json({
-        running: false,
-        reason: meta.sessionEndReason,
-      });
-    }
-
-    /** No sandbox info — legacy trajectory without sandbox tracking */
-    if (!meta.sandboxId || !meta.sandboxProvider) {
-      return NextResponse.json({ running: false, reason: "no_sandbox_info" });
-    }
-
-    const sandboxId = meta.sandboxId;
-    const sandboxProvider = meta.sandboxProvider;
-
-    const result = await cached(
-      `sandbox-status:${sandboxId}`,
-      async () => {
-        const { stdout } = await execFileAsync(
-          "python3",
-          [SCRIPT_PATH, sandboxProvider, sandboxId],
-          { timeout: 10_000 },
-        );
-        return JSON.parse(stdout.trim()) as {
-          running: boolean;
-          exitCode?: number;
-          error?: string;
-        };
-      },
-      STATUS_CACHE_TTL_MS,
-    );
-
+    const result = await getTrajectorySandboxLiveness(project, id);
     return NextResponse.json(result);
   } catch (error) {
     console.error(`GET /api/trajectories/${id}/sandbox-status error:`, error);

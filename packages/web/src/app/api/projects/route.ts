@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createProject, getProjects } from "@/lib/server/projects";
+import { getProjectsForUi } from "@/lib/server/project-snapshot-store";
+import { createProject } from "@/lib/server/projects";
 
 /** GET /api/projects — list all projects. */
 export async function GET() {
   try {
-    const projects = await getProjects();
+    const projects = await getProjectsForUi();
     return NextResponse.json({ projects });
   } catch (error) {
     console.error("GET /api/projects error:", error);

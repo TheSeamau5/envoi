@@ -1,6 +1,6 @@
 import { readLayoutCookies } from "@/lib/cookies";
 import { TrajectoryDetailPageClient } from "@/components/trajectory/trajectory-detail-page-client";
-import { getTrajectoryById } from "@/lib/server/data";
+import { getTrajectoryDetailFromSnapshot } from "@/lib/server/project-snapshot-store";
 
 type ProjectTrajectoryDetailPageProps = {
   params: Promise<{ project: string; id: string }>;
@@ -13,7 +13,7 @@ export default async function ProjectTrajectoryDetailPage({
   const [{ rightPanelOpen, dividerPct, groupByTurn }, initialTrajectory] =
     await Promise.all([
       readLayoutCookies(),
-      getTrajectoryById(id, { project }),
+      getTrajectoryDetailFromSnapshot(project, id),
     ]);
 
   return (

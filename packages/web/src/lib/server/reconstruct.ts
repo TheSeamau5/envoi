@@ -168,8 +168,7 @@ export function buildEvaluationsFromRows(
       // (queued, running) overwrite its results. This prevents later
       // re-trigger events from destroying valid pass/fail data.
       const alreadyCompleted = rec.status === "completed" && rec.total > 0;
-      const eventStatus =
-        typeof event.status === "string" ? event.status : "";
+      const eventStatus = typeof event.status === "string" ? event.status : "";
       if (alreadyCompleted && eventStatus !== "completed") {
         continue;
       }
@@ -285,11 +284,14 @@ function deduplicateSummary(text: string): string {
   const midpoint = Math.floor(text.length / 2);
   const searchRange = Math.min(10, Math.floor(text.length / 4));
   for (let offset = 0; offset <= searchRange; offset++) {
-    const positions = offset === 0
-      ? [midpoint]
-      : [midpoint - offset, midpoint + offset];
+    const positions =
+      offset === 0 ? [midpoint] : [midpoint - offset, midpoint + offset];
     for (const splitPos of positions) {
-      if (splitPos > 0 && splitPos < text.length - 1 && text[splitPos] === " ") {
+      if (
+        splitPos > 0 &&
+        splitPos < text.length - 1 &&
+        text[splitPos] === " "
+      ) {
         if (text.slice(0, splitPos) === text.slice(splitPos + 1)) {
           return text.slice(0, splitPos);
         }
@@ -305,7 +307,7 @@ function rowToStep(row: ParquetRow, index: number): Step {
   let summary = row.summary ?? "";
   let detail = row.content ?? "";
   let reasoningContent: string | undefined =
-    row.part_type === "reasoning" ? row.content ?? undefined : undefined;
+    row.part_type === "reasoning" ? (row.content ?? undefined) : undefined;
 
   // Deduplicate reasoning text (ingestion pipeline sometimes doubles content)
   if (row.part_type === "reasoning") {
@@ -365,8 +367,7 @@ function rowToStep(row: ParquetRow, index: number): Step {
     toolOutput: row.tool_output ?? undefined,
     isError:
       row.tool_status === "error" ||
-      (row.tool_exit_code !== undefined &&
-        row.tool_exit_code !== 0),
+      (row.tool_exit_code !== undefined && row.tool_exit_code !== 0),
     errorMessage: row.tool_error ?? undefined,
     reasoningContent,
   };
@@ -388,9 +389,7 @@ function isEmptyStep(step: Step): boolean {
 // Changed files from repo_checkpoint
 // ---------------------------------------------------------------------------
 
-function extractChangedFiles(
-  checkpoint: unknown,
-): ChangedFile[] {
+function extractChangedFiles(checkpoint: unknown): ChangedFile[] {
   if (!isRecord(checkpoint)) {
     return [];
   }
@@ -408,10 +407,18 @@ function extractChangedFiles(
         if (isRecord(entry)) {
           if (typeof entry.path === "string") {
             numstatMap.set(entry.path, {
-              additions: typeof entry.added === "number" ? entry.added
-                : typeof entry.additions === "number" ? entry.additions : 0,
-              deletions: typeof entry.deleted === "number" ? entry.deleted
-                : typeof entry.deletions === "number" ? entry.deletions : 0,
+              additions:
+                typeof entry.added === "number"
+                  ? entry.added
+                  : typeof entry.additions === "number"
+                    ? entry.additions
+                    : 0,
+              deletions:
+                typeof entry.deleted === "number"
+                  ? entry.deleted
+                  : typeof entry.deletions === "number"
+                    ? entry.deletions
+                    : 0,
             });
           }
         }
@@ -547,12 +554,25 @@ function computeSuiteDeltas(
 // ---------------------------------------------------------------------------
 
 /**
- * Filter out commits with no steps and recompute sequential deltas.
- * Empty commits represent re-evaluations of unchanged code; any score
- * differences are eval noise, not agent progress.
+ * Filter out commits that have neither visible steps nor file changes and
+ * recompute sequential deltas. Pure re-evaluation commits with no code change
+ * are noise, but code-changing commits must survive even if their step list
+ * was filtered down to empty reasoning.
  */
 function filterEmptyCommits(commits: Commit[]): Commit[] {
-  const filtered = commits.filter((commit) => commit.steps.length > 0);
+  const lastCommit = commits[commits.length - 1];
+  const filtered = commits.filter((commit) => {
+    if (commit === lastCommit) {
+      return true;
+    }
+    if (commit.steps.length > 0) {
+      return true;
+    }
+    if (commit.changedFiles.length > 0) {
+      return true;
+    }
+    return Object.values(commit.codeSnapshot).some((file) => file.touched);
+  });
   if (filtered.length === 0) {
     return commits;
   }
@@ -648,7 +668,10 @@ function mergeSuitesFromEvals(
     const aggregated = new Map<string, number>();
     for (const [key, result] of Object.entries(evalRec.suiteResults)) {
       const suiteName = extractSuiteName(key);
-      aggregated.set(suiteName, (aggregated.get(suiteName) ?? 0) + result.total);
+      aggregated.set(
+        suiteName,
+        (aggregated.get(suiteName) ?? 0) + result.total,
+      );
     }
     for (const [name, total] of aggregated) {
       const existing = totals.get(name) ?? 0;
@@ -690,11 +713,14 @@ function deduplicateAllEvalsByCommit(evals: EvalRecord[]): EvalRecord[] {
     // Prefer completed over non-completed
     const existingCompleted =
       existing.status === "completed" && existing.total > 0;
-    const newCompleted =
-      evalRec.status === "completed" && evalRec.total > 0;
+    const newCompleted = evalRec.status === "completed" && evalRec.total > 0;
     if (newCompleted && !existingCompleted) {
       bestByCommit.set(evalRec.commit, evalRec);
-    } else if (newCompleted && existingCompleted && evalRec.total > existing.total) {
+    } else if (
+      newCompleted &&
+      existingCompleted &&
+      evalRec.total > existing.total
+    ) {
       bestByCommit.set(evalRec.commit, evalRec);
     }
     // If neither is completed, keep the first one (earliest part)
@@ -810,7 +836,9 @@ function parseUnifiedDiff(patchText: string): FileDiff[] {
     /** Parse hunks */
     while (lineIdx < lines.length) {
       const line = lines[lineIdx] ?? "";
-      const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+      const hunkMatch = line.match(
+        /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/,
+      );
       if (!hunkMatch) {
         lineIdx++;
         continue;
@@ -1013,7 +1041,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   // eval suite_results. Older trajectories may have partial suites in the
   // parquet (only the last eval's results). Merging across all evals ensures
   // we recover the full environment definition.
-  const suites = mergeSuitesFromEvals(parseSuites(first.suites), completedEvals);
+  const suites = mergeSuitesFromEvals(
+    parseSuites(first.suites),
+    completedEvals,
+  );
   const totalTests = suites.length > 0 ? computeTotalTests(suites) : 0;
 
   // Deduplicate evals on the same git commit. Prefer completed results
@@ -1060,9 +1091,10 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       codeSnapshot: {},
       phase: 0,
       tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
-      partRange: sortedRows.length > 0
-        ? [sortedRows[0]?.part ?? 0, lastSortedRow?.part ?? 0]
-        : undefined,
+      partRange:
+        sortedRows.length > 0
+          ? [sortedRows[0]?.part ?? 0, lastSortedRow?.part ?? 0]
+          : undefined,
     });
   } else {
     // Group rows by evaluation boundaries
@@ -1092,11 +1124,8 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       // For non-completed evals, carry forward the last known scores
       // instead of showing 0. This avoids false regressions in the UI
       // while the eval is still running.
-      const isCompleted =
-        evalRec.status === "completed" && evalRec.total > 0;
-      const effectivePassed = isCompleted
-        ? evalRec.passed
-        : prevTotalPassed;
+      const isCompleted = evalRec.status === "completed" && evalRec.total > 0;
+      const effectivePassed = isCompleted ? evalRec.passed : prevTotalPassed;
       const effectiveSuiteState = isCompleted
         ? buildSuiteState(evalRec.suiteResults)
         : prevSuiteState;
@@ -1105,10 +1134,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         prevSuiteState,
         effectiveSuiteState,
       );
-      const brokenTests = buildBrokenTests(
-        prevSuiteState,
-        effectiveSuiteState,
-      );
+      const brokenTests = buildBrokenTests(prevSuiteState, effectiveSuiteState);
 
       // Compute minutes elapsed from trajectory start.
       // Use the row timestamp (when the agent committed code), not the eval
@@ -1156,10 +1182,17 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         changedFiles: extractChangedFiles(checkpoint),
         codeSnapshot: {},
         phase: totalTests > 0 ? effectivePassed / totalTests : 0,
-        tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
-        partRange: commitRows.length > 0
-          ? [commitRows[0]?.part ?? 0, commitRows[commitRows.length - 1]?.part ?? 0]
-          : undefined,
+        tokensUsed: steps.reduce(
+          (sum, step) => sum + (step.tokensUsed ?? 0),
+          0,
+        ),
+        partRange:
+          commitRows.length > 0
+            ? [
+                commitRows[0]?.part ?? 0,
+                commitRows[commitRows.length - 1]?.part ?? 0,
+              ]
+            : undefined,
         evalId: evalRec.evalId,
         targetCommit: evalRec.commit,
       });
@@ -1181,17 +1214,26 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
       const lastCheckpoint = parseJson(
         remainingRows[remainingRows.length - 1]?.repo_checkpoint,
       );
+      const startTime = new Date(first.started_at ?? "").getTime();
+      const lastRowTime = new Date(
+        remainingRows[remainingRows.length - 1]?.timestamp ?? "",
+      ).getTime();
+      const fallbackMinutesElapsed =
+        commits[commits.length - 1]?.minutesElapsed ?? 0;
+      const minutesElapsed =
+        isNaN(startTime) || isNaN(lastRowTime)
+          ? fallbackMinutesElapsed
+          : Math.round((lastRowTime - startTime) / 60000);
 
       commits.push({
         index: commits.length,
-        hash:
-          remainingRows[remainingRows.length - 1]?.git_commit ?? "pending",
+        hash: remainingRows[remainingRows.length - 1]?.git_commit ?? "pending",
         turn: remainingRows[0]?.turn ?? commits.length,
         timestamp:
           remainingRows[remainingRows.length - 1]?.timestamp ??
           first.started_at ??
           "",
-        minutesElapsed: commits[commits.length - 1]?.minutesElapsed ?? 0,
+        minutesElapsed: Math.max(0, minutesElapsed),
         suiteState: commits[commits.length - 1]?.suiteState ?? {},
         totalPassed: prevTotalPassed,
         delta: 0,
@@ -1209,10 +1251,17 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
         changedFiles: extractChangedFiles(lastCheckpoint),
         codeSnapshot: {},
         phase: totalTests > 0 ? prevTotalPassed / totalTests : 0,
-        tokensUsed: steps.reduce((sum, step) => sum + (step.tokensUsed ?? 0), 0),
-        partRange: remainingRows.length > 0
-          ? [remainingRows[0]?.part ?? 0, remainingRows[remainingRows.length - 1]?.part ?? 0]
-          : undefined,
+        tokensUsed: steps.reduce(
+          (sum, step) => sum + (step.tokensUsed ?? 0),
+          0,
+        ),
+        partRange:
+          remainingRows.length > 0
+            ? [
+                remainingRows[0]?.part ?? 0,
+                remainingRows[remainingRows.length - 1]?.part ?? 0,
+              ]
+            : undefined,
       });
     }
   }
@@ -1261,8 +1310,7 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   const durationMinutes = lastCommit?.minutesElapsed ?? 0;
   const hours = Math.floor(durationMinutes / 60);
   const mins = durationMinutes % 60;
-  const duration =
-    hours > 0 ? `${hours} hrs ${mins} min` : `${mins} min`;
+  const duration = hours > 0 ? `${hours} hrs ${mins} min` : `${mins} min`;
 
   // Total tokens
   const totalTokens = sortedRows.reduce(
@@ -1298,7 +1346,11 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
   return {
     id: first.trajectory_id,
     model,
-    environment: deriveEnvironment(first.environment, suites, first.task_params),
+    environment: deriveEnvironment(
+      first.environment,
+      suites,
+      first.task_params,
+    ),
     commits: filteredCommits,
     totalParts:
       sortedRows.length > 0
@@ -1327,15 +1379,27 @@ export function reconstructTrajectory(rows: ParquetRow[]): Trajectory {
 
 /** Gameboy emulator suite names */
 const GAMEBOY_SUITES = new Set([
-  "acid2_dmg", "acid2_cgb",
-  "blargg_cpu", "blargg_timing", "blargg_sound", "blargg_misc",
-  "mealybug_dmg", "mealybug_cgb",
-  "mooneye_timer", "mooneye_mbc", "mooneye_acceptance",
+  "acid2_dmg",
+  "acid2_cgb",
+  "blargg_cpu",
+  "blargg_timing",
+  "blargg_sound",
+  "blargg_misc",
+  "mealybug_dmg",
+  "mealybug_cgb",
+  "mooneye_timer",
+  "mooneye_mbc",
+  "mooneye_acceptance",
   "samesuite",
 ]);
 
 /** C compiler suite names */
-const C_COMPILER_SUITES = new Set(["basics", "wacct", "c_testsuite", "torture"]);
+const C_COMPILER_SUITES = new Set([
+  "basics",
+  "wacct",
+  "c_testsuite",
+  "torture",
+]);
 
 /**
  * Derive the real environment from available data.
@@ -1348,7 +1412,11 @@ export function deriveEnvironment(
   taskParamsJson?: string,
 ): string {
   /** 1. If the raw environment is a real value (not a placeholder), use it */
-  if (rawEnvironment && rawEnvironment !== "environment" && rawEnvironment !== "") {
+  if (
+    rawEnvironment &&
+    rawEnvironment !== "environment" &&
+    rawEnvironment !== ""
+  ) {
     return rawEnvironment;
   }
 
@@ -1366,12 +1434,19 @@ export function deriveEnvironment(
   if (taskParamsJson) {
     try {
       const params = JSON.parse(taskParamsJson);
-      const advisorPrompt = params?._environment_params?.advisor_system_prompt ?? "";
+      const advisorPrompt =
+        params?._environment_params?.advisor_system_prompt ?? "";
       if (typeof advisorPrompt === "string") {
-        if (advisorPrompt.includes("Game Boy") || advisorPrompt.includes("emulator")) {
+        if (
+          advisorPrompt.includes("Game Boy") ||
+          advisorPrompt.includes("emulator")
+        ) {
           return "gameboy_emulator";
         }
-        if (advisorPrompt.includes("compiler") || advisorPrompt.includes("C compiler")) {
+        if (
+          advisorPrompt.includes("compiler") ||
+          advisorPrompt.includes("C compiler")
+        ) {
           return "c_compiler";
         }
       }
@@ -1427,7 +1502,11 @@ export function summaryRowToTrajectory(
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
   const model = agent ? `${agent}/${agentModel}` : agentModel;
-  const environment = deriveEnvironment(row.environment, suites, row.task_params);
+  const environment = deriveEnvironment(
+    row.environment,
+    suites,
+    row.task_params,
+  );
 
   /** Compute duration from started_at → ended_at timestamps */
   let durationMinutes = 0;
@@ -1526,9 +1605,7 @@ export type SummaryTableRow = {
  * Convert a materialized summary table row into a Trajectory.
  * No second query needed — final scores are pre-computed.
  */
-export function summaryTableRowToTrajectory(
-  row: SummaryTableRow,
-): Trajectory {
+export function summaryTableRowToTrajectory(row: SummaryTableRow): Trajectory {
   const suites = parseSuites(row.suites);
   const params = parseTaskParams(row.task_params);
   const passed = row.best_passed ?? row.final_passed ?? 0;
@@ -1541,11 +1618,14 @@ export function summaryTableRowToTrajectory(
     passed,
   );
 
-
   const agent = row.agent ?? "";
   const agentModel = row.agent_model ?? "";
   const model = agent ? `${agent}/${agentModel}` : agentModel;
-  const environment = deriveEnvironment(row.environment, suites, row.task_params);
+  const environment = deriveEnvironment(
+    row.environment,
+    suites,
+    row.task_params,
+  );
 
   // Compute duration from started_at and ended_at
   const startMs = new Date(row.started_at ?? "").getTime();
@@ -1642,7 +1722,9 @@ export type EvalSummaryRow = {
  * Deduplicate compare eval rows targeting the same git commit.
  * Keeps the eval with the highest total (most suites completed).
  */
-function deduplicateCompareEvalsByCommit(evals: EvalSummaryRow[]): EvalSummaryRow[] {
+function deduplicateCompareEvalsByCommit(
+  evals: EvalSummaryRow[],
+): EvalSummaryRow[] {
   const bestByCommit = new Map<string, EvalSummaryRow>();
   for (const evalRow of evals) {
     const existing = bestByCommit.get(evalRow.target_commit);
@@ -1670,12 +1752,14 @@ export function buildCompareTrajectories(
       eval_id: String(raw.eval_id ?? ""),
       target_commit: String(raw.target_commit ?? ""),
       trigger_part: Number(raw.trigger_part ?? 0),
-      trigger_turn: raw.trigger_turn != undefined ? Number(raw.trigger_turn) : undefined,
+      trigger_turn:
+        raw.trigger_turn != undefined ? Number(raw.trigger_turn) : undefined,
       status: String(raw.status ?? ""),
       passed: Number(raw.passed ?? 0),
       failed: Number(raw.failed ?? 0),
       total: Number(raw.total ?? 0),
-      suite_results: raw.suite_results != undefined ? String(raw.suite_results) : undefined,
+      suite_results:
+        raw.suite_results != undefined ? String(raw.suite_results) : undefined,
     };
     const existing = evalsByTrajectory.get(trajectoryId);
     if (existing) {
@@ -1710,7 +1794,8 @@ export function buildCompareTrajectories(
         };
       });
     const mergedSuites = mergeSuitesFromEvals(suites, evalRecordsForMerge);
-    const mergedTotalTests = mergedSuites.length > 0 ? computeTotalTests(mergedSuites) : totalTests;
+    const mergedTotalTests =
+      mergedSuites.length > 0 ? computeTotalTests(mergedSuites) : totalTests;
 
     const commits: Commit[] = [];
     let prevPassed = 0;
@@ -1818,7 +1903,9 @@ export function buildCompareTrajectories(
 }
 
 /** Validate a raw query row into a SummaryTableRow */
-export function toSummaryTableRow(row: Record<string, unknown>): SummaryTableRow {
+export function toSummaryTableRow(
+  row: Record<string, unknown>,
+): SummaryTableRow {
   return {
     trajectory_id: String(row.trajectory_id ?? ""),
     environment: String(row.environment ?? ""),
@@ -1829,14 +1916,22 @@ export function toSummaryTableRow(row: Record<string, unknown>): SummaryTableRow
     total_parts: Number(row.total_parts ?? 0),
     total_turns: Number(row.total_turns ?? 0),
     total_tokens: Number(row.total_tokens ?? 0),
-    session_end_reason: row.session_end_reason != undefined ? String(row.session_end_reason) : undefined,
-    task_params: row.task_params != undefined ? String(row.task_params) : undefined,
+    session_end_reason:
+      row.session_end_reason != undefined
+        ? String(row.session_end_reason)
+        : undefined,
+    task_params:
+      row.task_params != undefined ? String(row.task_params) : undefined,
     suites: row.suites != undefined ? String(row.suites) : undefined,
     final_passed: Number(row.final_passed ?? 0),
     final_failed: Number(row.final_failed ?? 0),
     final_total: Number(row.final_total ?? 0),
-    final_suite_results: row.final_suite_results != undefined ? String(row.final_suite_results) : undefined,
-    bundle_uri: row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
+    final_suite_results:
+      row.final_suite_results != undefined
+        ? String(row.final_suite_results)
+        : undefined,
+    bundle_uri:
+      row.bundle_uri != undefined ? String(row.bundle_uri) : undefined,
     best_passed:
       row.best_passed != undefined ? Number(row.best_passed) : undefined,
     best_failed:

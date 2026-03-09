@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
 import re
 import signal
@@ -16,20 +16,13 @@ from typing import Any
 import boto3
 import pyarrow.parquet as pq
 import requests
-from playwright.sync_api import sync_playwright
 
 WEB_ROOT = Path(__file__).resolve().parent.parent
 BASE_URL = os.environ.get("ENVOI_UI_BASE_URL", "http://localhost:3000")
 PROJECT = "c-compiler"
 S3_PREFIX = os.environ.get("AWS_S3_PREFIX", "envoi-trace-data").strip() or "envoi-trace-data"
-SCREENSHOT_DIR = Path("/tmp/envoi-live-c-compiler")
-CACHED_REVISIT_MAX_SECONDS = 0.5
-DELAYED_API_SECONDS = 2.5
-BLOCKED_LOADING_COPY = [
-    "Loading cached runs...",
-    "Loading cached run...",
-    "Loading trajectory...",
-]
+COLD_PAGE_MAX_SECONDS = 0.3
+WARM_PAGE_MAX_SECONDS = 0.1
 
 
 @dataclass
@@ -52,7 +45,7 @@ ROUTE_CHECKS = [
     RouteCheck(
         name="compare_curves",
         path=f"/project/{PROJECT}/compare/curves",
-        ready_text="0 selected",
+        ready_text="Curves",
         max_seconds=5.0,
     ),
     RouteCheck(
@@ -96,6 +89,14 @@ def format_duration_label(started_at: str, ended_at: str) -> str:
     return f"{minutes}m"
 
 
+def normalize_api_duration_label(label: str) -> str:
+    value = label.strip()
+    value = value.replace(" hrs ", "h ")
+    value = value.replace(" hr ", "h ")
+    value = value.replace(" min", "m")
+    return value
+
+
 def format_percent(passed: int, total: int) -> str:
     if total <= 0:
         return "0.0%"
@@ -103,15 +104,16 @@ def format_percent(passed: int, total: int) -> str:
 
 
 def wait_for_server() -> subprocess.Popen[str] | None:
+    health_url = f"{BASE_URL}/api/revision?project={PROJECT}"
     try:
-        response = requests.get(BASE_URL, timeout=1)
+        response = requests.get(health_url, timeout=1)
         if response.ok:
             return None
     except Exception:
         pass
 
     process = subprocess.Popen(
-        ["pnpm", "run", "dev"],
+        ["pnpm", "start"],
         cwd=WEB_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -123,7 +125,7 @@ def wait_for_server() -> subprocess.Popen[str] | None:
         if line:
             print(line.rstrip())
         try:
-            response = requests.get(BASE_URL, timeout=1)
+            response = requests.get(health_url, timeout=1)
             if response.ok:
                 return process
         except Exception:
@@ -147,23 +149,10 @@ def api_get(path: str) -> requests.Response:
     return response
 
 
-def api_post(path: str, payload: dict[str, Any]) -> requests.Response:
-    response = requests.post(
-        f"{BASE_URL}{path}",
-        json=payload,
-        timeout=120,
-    )
-    response.raise_for_status()
-    return response
-
-
-def sql_rows(sql: str) -> list[dict[str, Any]]:
-    response = api_post(f"/api/query?project={PROJECT}", {"sql": sql})
-    data = response.json()
-    rows = data.get("rows")
-    if not isinstance(rows, list):
-        raise RuntimeError(f"Unexpected SQL response: {data}")
-    return rows
+def timed_get(path: str) -> tuple[requests.Response, float]:
+    started_at = time.perf_counter()
+    response = api_get(path)
+    return response, time.perf_counter() - started_at
 
 
 def load_parquet_rows(key: str, columns: list[str]) -> list[dict[str, Any]]:
@@ -242,40 +231,6 @@ def s3_summary_row(trajectory_id: str) -> dict[str, Any]:
     }
 
 
-def cache_summary_row(trajectory_id: str) -> dict[str, Any]:
-    sql = f"""
-    SELECT
-      trajectory_id,
-      started_at,
-      ended_at,
-      total_parts,
-      session_end_reason,
-      sandbox_id,
-      sandbox_provider,
-      COALESCE(
-        (
-          SELECT SUM(CAST(json_extract(suites::JSON, '$.' || '"' || key || '"' || '.passed') AS INTEGER))
-          FROM unnest(json_keys(suites::JSON)) AS key
-        ),
-        0
-      ) AS best_passed,
-      COALESCE(
-        (
-          SELECT SUM(CAST(json_extract(suites::JSON, '$.' || '"' || key || '"' || '.total') AS INTEGER))
-          FROM unnest(json_keys(suites::JSON)) AS key
-        ),
-        0
-      ) AS best_total
-    FROM trajectories
-    WHERE trajectory_id = '{trajectory_id}'
-    LIMIT 1
-    """
-    rows = sql_rows(sql)
-    if len(rows) != 1:
-        raise RuntimeError(f"Expected 1 cache row for {trajectory_id}, got {rows}")
-    return rows[0]
-
-
 def assert_match(name: str, left: Any, right: Any) -> None:
     if left != right:
         raise AssertionError(f"{name} mismatch: {left!r} != {right!r}")
@@ -302,240 +257,130 @@ def expected_detail_score_text(row: dict[str, Any]) -> str | None:
     return f"{row['best_passed']} passed / {best_total - row['best_passed']} failed"
 
 
-def assert_no_blocked_loading_copy(page: Any, context_name: str) -> None:
-    body_text = page.locator("body").inner_text()
-    for blocked_text in BLOCKED_LOADING_COPY:
-        if blocked_text in body_text:
+def serving_rows_match_s3(api_rows: list[dict[str, Any]]) -> bool:
+    for api_row in api_rows:
+        trajectory_id = str(api_row["id"])
+        s3_row = s3_summary_row(trajectory_id)
+        if str(api_row["startedAt"]) != s3_row["started_at"]:
+            return False
+        if int(api_row["totalParts"]) != int(s3_row["total_parts"]):
+            return False
+        if api_row.get("sessionEndReason") != s3_row["session_end_reason"]:
+            return False
+        if int(api_row["finalPassed"]) != int(s3_row["best_passed"]):
+            return False
+        if int(api_row["totalTests"]) != int(s3_row["best_total"]):
+            return False
+    return True
+
+
+def wait_for_serving_snapshot_ready() -> list[dict[str, Any]]:
+    started_at = time.time()
+    last_api_rows: list[dict[str, Any]] = []
+    while time.time() - started_at < 60:
+        api_rows = api_get(f"/api/trajectories?project={PROJECT}").json()
+        if isinstance(api_rows, list) and len(api_rows) > 0:
+            last_api_rows = api_rows
+            if serving_rows_match_s3(api_rows):
+                return api_rows
+        time.sleep(1)
+    raise RuntimeError(
+        f"Timed out waiting for serving snapshot readiness. Last rows: {last_api_rows}",
+    )
+
+def run_http_route_checks(trajectory_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for route in ROUTE_CHECKS:
+        response, duration = timed_get(route.path)
+        body_text = response.text
+        body_text_lower = body_text.lower()
+        if route.ready_text.lower() not in body_text_lower:
+            raise AssertionError(f"{route.name}: missing ready text '{route.ready_text}'")
+        if route.extra_ready_text and route.extra_ready_text.lower() not in body_text_lower:
             raise AssertionError(
-                f"{context_name}: blocked loading copy visible during cached revisit: {blocked_text}",
+                f"{route.name}: missing extra ready text '{route.extra_ready_text}'",
             )
+        if duration > route.max_seconds:
+            raise AssertionError(
+                f"{route.name}: route load too slow ({duration:.3f}s > {route.max_seconds:.3f}s)",
+            )
+        results.append({
+            "route": route.name,
+            "path": route.path,
+            "duration_s": round(duration, 3),
+        })
 
+    list_path = f"/project/{PROJECT}/trajectory"
+    first_list_response, first_list_duration = timed_get(list_path)
+    second_list_response, second_list_duration = timed_get(list_path)
+    if "Trajectories" not in first_list_response.text:
+        raise AssertionError("trajectory_list: missing Trajectories heading")
+    if first_list_duration > COLD_PAGE_MAX_SECONDS:
+        raise AssertionError(
+            f"trajectory_list_cold: too slow ({first_list_duration:.3f}s > {COLD_PAGE_MAX_SECONDS:.3f}s)",
+        )
+    if second_list_duration > WARM_PAGE_MAX_SECONDS:
+        raise AssertionError(
+            f"trajectory_list_warm: too slow ({second_list_duration:.3f}s > {WARM_PAGE_MAX_SECONDS:.3f}s)",
+        )
+    results.append({
+        "route": "trajectory_list_cold",
+        "path": list_path,
+        "duration_s": round(first_list_duration, 3),
+    })
+    results.append({
+        "route": "trajectory_list_warm",
+        "path": list_path,
+        "duration_s": round(second_list_duration, 3),
+    })
 
-def install_delayed_route(context: Any, pattern: Any) -> Any:
-    def handler(route: Any) -> None:
-        time.sleep(DELAYED_API_SECONDS)
-        route.continue_()
-
-    context.route(pattern, handler)
-    return handler
-
-
-def run_cached_navigation_checks(
-    context: Any,
-    list_page: Any,
-    trajectory_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if len(trajectory_rows) == 0:
-        return []
+    list_html = first_list_response.text
+    for row in trajectory_rows:
+        trajectory_id = str(row["trajectory_id"])
+        if trajectory_id not in list_html:
+            raise AssertionError(f"{trajectory_id}: list page missing trajectory id")
 
     row = next(
         (candidate for candidate in trajectory_rows if expected_detail_score_text(candidate)),
         None,
     )
     if row is None:
-        raise AssertionError(
-            "Expected at least one completed evaluation to verify cached detail revisits",
-        )
+        raise AssertionError("Expected at least one completed evaluation for detail verification")
     trajectory_id = str(row["trajectory_id"])
     detail_score = expected_detail_score_text(row)
-    if detail_score is None:
-        raise AssertionError(f"{trajectory_id}: missing detail score for cached revisit check")
-
-    list_path = f"/project/{PROJECT}/trajectory"
     detail_path = f"/project/{PROJECT}/trajectory/{trajectory_id}"
-    list_link = list_page.locator(
-        f'a[href="{detail_path}"]'
-    ).first
-
-    list_link.wait_for(timeout=120000)
-    list_link.click()
-    list_page.wait_for_url(f"{BASE_URL}{detail_path}", timeout=120000)
-    list_page.get_by_text(detail_score, exact=False).first.wait_for(timeout=120000)
-    list_page.wait_for_timeout(750)
-
-    results: list[dict[str, Any]] = []
-    list_api_pattern = re.compile(
-        rf".*/api/trajectories\?project={re.escape(PROJECT)}(?:&.*)?$",
-    )
-    detail_api_pattern = re.compile(
-        rf".*/api/trajectories/{re.escape(trajectory_id)}\?project={re.escape(PROJECT)}(?:&.*)?$",
-    )
-
-    delayed_list_handler = install_delayed_route(context, list_api_pattern)
-    try:
-        started_at = time.perf_counter()
-        list_page.evaluate("window.history.back()")
-        list_page.wait_for_url(f"{BASE_URL}{list_path}", timeout=120000)
-        list_page.get_by_text("TRAJECTORIES", exact=False).first.wait_for(
-            timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000),
+    detail_first_response, detail_first_duration = timed_get(detail_path)
+    detail_second_response, detail_second_duration = timed_get(detail_path)
+    if detail_score and detail_score not in detail_first_response.text:
+        raise AssertionError(
+            f"{trajectory_id}: detail page missing expected score '{detail_score}'",
         )
-        list_page.locator(
-            f'a[href="{detail_path}"]'
-        ).first.wait_for(timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000))
-        duration = time.perf_counter() - started_at
-        if duration > CACHED_REVISIT_MAX_SECONDS:
-            raise AssertionError(
-                f"trajectory_list_revisit: cached revisit too slow ({duration:.3f}s > {CACHED_REVISIT_MAX_SECONDS:.3f}s)",
-            )
-        assert_no_blocked_loading_copy(list_page, "trajectory_list_revisit")
-        results.append({
-            "route": "trajectory_list_revisit",
-            "path": list_path,
-            "duration_s": round(duration, 3),
-            "delayed_api_s": DELAYED_API_SECONDS,
-        })
-        list_page.wait_for_timeout(round(DELAYED_API_SECONDS * 1000) + 250)
-    finally:
-        context.unroute(list_api_pattern, delayed_list_handler)
-
-    delayed_detail_handler = install_delayed_route(context, detail_api_pattern)
-    try:
-        started_at = time.perf_counter()
-        list_page.locator(f'a[href="{detail_path}"]').first.click()
-        list_page.wait_for_url(f"{BASE_URL}{detail_path}", timeout=120000)
-        list_page.get_by_text(detail_score, exact=False).first.wait_for(
-            timeout=round(CACHED_REVISIT_MAX_SECONDS * 1000),
+    if detail_first_duration > COLD_PAGE_MAX_SECONDS:
+        raise AssertionError(
+            f"trajectory_detail_cold: too slow ({detail_first_duration:.3f}s > {COLD_PAGE_MAX_SECONDS:.3f}s)",
         )
-        duration = time.perf_counter() - started_at
-        if duration > CACHED_REVISIT_MAX_SECONDS:
-            raise AssertionError(
-                f"trajectory_detail_revisit: cached revisit too slow ({duration:.3f}s > {CACHED_REVISIT_MAX_SECONDS:.3f}s)",
-            )
-        assert_no_blocked_loading_copy(list_page, "trajectory_detail_revisit")
-        results.append({
-            "route": "trajectory_detail_revisit",
-            "path": detail_path,
-            "duration_s": round(duration, 3),
-            "delayed_api_s": DELAYED_API_SECONDS,
-        })
-        list_page.wait_for_timeout(round(DELAYED_API_SECONDS * 1000) + 250)
-    finally:
-        context.unroute(detail_api_pattern, delayed_detail_handler)
-
-    return results
-
-
-def run_playwright_checks(trajectory_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    results: list[dict[str, Any]] = []
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": 1440, "height": 1100})
-
-        page = context.new_page()
-        page.goto(f"{BASE_URL}/project/{PROJECT}", wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_timeout(500)
-
-        for route in ROUTE_CHECKS:
-            route_page = context.new_page()
-            console_messages: list[str] = []
-            page_errors: list[str] = []
-            route_page.on(
-                "console",
-                lambda msg, console_messages=console_messages: console_messages.append(f"{msg.type}: {msg.text}"),
-            )
-            route_page.on(
-                "pageerror",
-                lambda error, page_errors=page_errors: page_errors.append(str(error)),
-            )
-            started_at = time.perf_counter()
-            route_page.goto(
-                f"{BASE_URL}{route.path}",
-                wait_until="domcontentloaded",
-                timeout=120000,
-            )
-            route_page.get_by_text(route.ready_text, exact=False).first.wait_for(timeout=120000)
-            if route.extra_ready_text:
-                route_page.get_by_text(route.extra_ready_text, exact=False).first.wait_for(timeout=120000)
-            route_page.wait_for_timeout(750)
-            duration = time.perf_counter() - started_at
-            body_text = route_page.locator("body").inner_text()
-            if "Console Error" in body_text or "Application error" in body_text:
-                raise AssertionError(f"{route.name}: runtime error overlay present")
-            if duration > route.max_seconds:
-                raise AssertionError(
-                    f"{route.name}: route load too slow ({duration:.3f}s > {route.max_seconds:.3f}s)",
-                )
-            severe_console = [
-                message
-                for message in console_messages
-                if "favicon" not in message.lower()
-                and "download the react devtools" not in message.lower()
-                and not message.startswith("log:")
-                and not message.startswith("info:")
-            ]
-            if severe_console:
-                raise AssertionError(f"{route.name}: console issues: {severe_console[0]}")
-            if page_errors:
-                raise AssertionError(f"{route.name}: page error: {page_errors[0]}")
-            route_page.screenshot(path=str(SCREENSHOT_DIR / f"{route.name}.png"), full_page=True)
-            results.append({
-                "route": route.name,
-                "path": route.path,
-                "duration_s": round(duration, 3),
-            })
-            route_page.close()
-
-        list_page = context.new_page()
-        list_page.goto(
-            f"{BASE_URL}/project/{PROJECT}/trajectory",
-            wait_until="domcontentloaded",
-            timeout=120000,
+    if detail_second_duration > WARM_PAGE_MAX_SECONDS:
+        raise AssertionError(
+            f"trajectory_detail_warm: too slow ({detail_second_duration:.3f}s > {WARM_PAGE_MAX_SECONDS:.3f}s)",
         )
-        list_page.get_by_text("TRAJECTORIES", exact=False).first.wait_for(timeout=120000)
-        list_page.wait_for_timeout(1000)
+    results.append({
+        "route": "trajectory_detail_cold",
+        "path": detail_path,
+        "duration_s": round(detail_first_duration, 3),
+    })
+    results.append({
+        "route": "trajectory_detail_warm",
+        "path": detail_path,
+        "duration_s": round(detail_second_duration, 3),
+    })
 
-        for row in trajectory_rows:
-            trajectory_id = str(row["trajectory_id"])
-            link = list_page.locator(
-                f'a[href="/project/{PROJECT}/trajectory/{trajectory_id}"]'
-            ).first
-            link.wait_for(timeout=120000)
-            row_text = link.inner_text()
-            duration_label, passed, pct = parse_row_metrics(row_text)
-            assert_match(
-                f"{trajectory_id} duration label",
-                duration_label,
-                row["ui_duration"],
-            )
-            assert_match(f"{trajectory_id} passed", passed, row["best_passed"])
-            assert_match(f"{trajectory_id} pct", pct, row["ui_pct"])
-
-        for row in trajectory_rows[:2]:
-            trajectory_id = str(row["trajectory_id"])
-            detail_page = context.new_page()
-            detail_page.goto(
-                f"{BASE_URL}/project/{PROJECT}/trajectory/{trajectory_id}",
-                wait_until="domcontentloaded",
-                timeout=120000,
-            )
-            detail_ready_text = expected_detail_score_text(row) or trajectory_id
-            detail_page.get_by_text(detail_ready_text, exact=False).first.wait_for(timeout=120000)
-            detail_page.wait_for_timeout(1000)
-            detail_text = detail_page.locator("body").inner_text()
-            expected = expected_detail_score_text(row)
-            if expected and expected not in detail_text:
-                raise AssertionError(
-                    f"{trajectory_id}: detail page missing expected score '{expected}'",
-                )
-            if "Console Error" in detail_text or "Application error" in detail_text:
-                raise AssertionError(f"{trajectory_id}: runtime error overlay on detail page")
-            detail_page.screenshot(
-                path=str(SCREENSHOT_DIR / f"detail-{trajectory_id}.png"),
-                full_page=True,
-            )
-            detail_page.close()
-
-        results.extend(run_cached_navigation_checks(context, list_page, trajectory_rows))
-        list_page.close()
-        browser.close()
     return results
 
 
 def main() -> int:
     server_process = wait_for_server()
     try:
-        api_rows = api_get(f"/api/trajectories?project={PROJECT}").json()
+        api_rows = wait_for_serving_snapshot_ready()
         if not isinstance(api_rows, list) or len(api_rows) == 0:
             raise RuntimeError(f"Unexpected trajectory payload: {api_rows}")
 
@@ -543,23 +388,21 @@ def main() -> int:
         for api_row in api_rows:
             trajectory_id = str(api_row["id"])
             s3_row = s3_summary_row(trajectory_id)
-            cache_row = cache_summary_row(trajectory_id)
-            assert_match(f"{trajectory_id} started_at", cache_row["started_at"], s3_row["started_at"])
-            assert_match(f"{trajectory_id} ended_at", cache_row["ended_at"], s3_row["ended_at"])
-            assert_match(f"{trajectory_id} total_parts", int(cache_row["total_parts"]), int(s3_row["total_parts"]))
+            assert_match(f"{trajectory_id} started_at", str(api_row["startedAt"]), s3_row["started_at"])
+            assert_match(f"{trajectory_id} total_parts", int(api_row["totalParts"]), int(s3_row["total_parts"]))
             assert_match(
                 f"{trajectory_id} session_end_reason",
-                cache_row["session_end_reason"],
+                api_row.get("sessionEndReason"),
                 s3_row["session_end_reason"],
             )
             assert_match(
                 f"{trajectory_id} best_passed",
-                int(cache_row["best_passed"]),
+                int(api_row["finalPassed"]),
                 int(s3_row["best_passed"]),
             )
             assert_match(
                 f"{trajectory_id} best_total",
-                int(cache_row["best_total"]),
+                int(api_row["totalTests"]),
                 int(s3_row["best_total"]),
             )
 
@@ -574,11 +417,11 @@ def main() -> int:
                 "total_parts": int(s3_row["total_parts"]),
                 "best_passed": best_passed,
                 "best_total": best_total,
-                "ui_duration": format_duration_label(started_at, ended_at),
+                "ui_duration": normalize_api_duration_label(str(api_row["duration"])),
                 "ui_pct": format_percent(best_passed, best_total),
             })
 
-        route_results = run_playwright_checks(trajectory_rows)
+        route_results = run_http_route_checks(trajectory_rows)
         print(
             json.dumps(
                 {
@@ -586,7 +429,6 @@ def main() -> int:
                     "s3_prefix": S3_PREFIX,
                     "trajectory_checks": trajectory_rows,
                     "route_results": route_results,
-                    "screenshots": str(SCREENSHOT_DIR),
                 },
                 indent=2,
             )

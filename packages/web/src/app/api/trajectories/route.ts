@@ -6,12 +6,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getAllTrajectories } from "@/lib/server/data";
-import {
-  buildProjectDataHeaders,
-  readProjectDataStatus,
-} from "@/lib/server/project-data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
+import { getProjectSnapshot } from "@/lib/server/project-snapshot-store";
 
 export async function GET(request: NextRequest) {
   const startedAt = Date.now();
@@ -35,24 +31,36 @@ export async function GET(request: NextRequest) {
       : undefined;
 
     const bustRequested = searchParams.has("bust");
-    const trajectories = await getAllTrajectories({
-      environment,
-      model,
-      limit,
-      offset,
-      fresh: false,
-      project,
-    });
-    const status = await readProjectDataStatus(project, {
-      forceCheck: bustRequested,
-      mode: bustRequested ? "fresh" : "cached",
-    });
+    const snapshot = await getProjectSnapshot(project);
+    let trajectories = snapshot.trajectories;
+    if (environment) {
+      trajectories = trajectories.filter(
+        (trajectory) => trajectory.environment === environment,
+      );
+    }
+    if (model) {
+      trajectories = trajectories.filter(
+        (trajectory) => trajectory.model === model,
+      );
+    }
+    if (offset) {
+      trajectories = trajectories.slice(offset);
+    }
+    if (limit) {
+      trajectories = trajectories.slice(0, limit);
+    }
     console.log(
       `[api/trajectories] project=${project} bust=${bustRequested} environment=${environment ?? "all"} model=${model ?? "all"} count=${trajectories.length} durationMs=${Date.now() - startedAt}`,
     );
 
     return NextResponse.json(trajectories, {
-      headers: buildProjectDataHeaders(status),
+      headers: {
+        "x-envoi-has-manifest": "true",
+        "x-envoi-in-sync": "true",
+        "x-envoi-s3-revision": snapshot.manifest.revision,
+        "x-envoi-loaded-revision": snapshot.manifest.revision,
+        "x-envoi-data-version": snapshot.manifest.revision,
+      },
     });
   } catch (error) {
     console.error("GET /api/trajectories error:", error);

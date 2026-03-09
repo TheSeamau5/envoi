@@ -1,5 +1,5 @@
 import { TrajectoryList } from "@/components/trajectory/trajectory-list";
-import { getAllTrajectories } from "@/lib/server/data";
+import { getProjectSnapshot } from "@/lib/server/project-snapshot-store";
 import type { Trajectory } from "@/lib/types";
 
 type ProjectTrajectoryPageProps = {
@@ -10,9 +10,8 @@ export default async function ProjectTrajectoryPage({
   params,
 }: ProjectTrajectoryPageProps) {
   const { project } = await params;
-  const trajectories = dedupeTrajectoriesById(
-    await getAllTrajectories({ project }),
-  );
+  const snapshot = await getProjectSnapshot(project);
+  const trajectories = dedupeTrajectoriesById(snapshot.trajectories);
   return <TrajectoryList trajectories={trajectories} project={project} />;
 }
 

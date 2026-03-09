@@ -15,7 +15,9 @@ import {
 // Helpers to build minimal ParquetRow fixtures
 // ---------------------------------------------------------------------------
 
-function makeRow(overrides: Partial<ParquetRow> & { part: number }): ParquetRow {
+function makeRow(
+  overrides: Partial<ParquetRow> & { part: number },
+): ParquetRow {
   return {
     trajectory_id: "test-trajectory",
     agent: "test-agent",
@@ -23,7 +25,9 @@ function makeRow(overrides: Partial<ParquetRow> & { part: number }): ParquetRow 
     started_at: "2025-01-01T00:00:00Z",
     environment: "test-env",
     part: overrides.part,
-    timestamp: overrides.timestamp ?? new Date(Date.now() + overrides.part * 1000).toISOString(),
+    timestamp:
+      overrides.timestamp ??
+      new Date(Date.now() + overrides.part * 1000).toISOString(),
     role: "assistant",
     part_type: overrides.part_type ?? "tool_call",
     summary: overrides.summary ?? `Step at part ${overrides.part}`,
@@ -33,7 +37,9 @@ function makeRow(overrides: Partial<ParquetRow> & { part: number }): ParquetRow 
   };
 }
 
-function makeEvalEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function makeEvalEvent(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     kind: "commit_async",
     eval_id: "eval-001",
@@ -456,6 +462,76 @@ describe("reconstructTrajectory", () => {
     // No evals → single fallback commit
     expect(trajectory.commits.length).toBe(1);
     expect(trajectory.commits[0]?.totalPassed).toBe(0);
+  });
+
+  it("preserves code-changing commits even when their step list is empty after filtering", () => {
+    const rows: ParquetRow[] = [
+      makeRow({
+        part: 0,
+        git_commit: "commit-001",
+        part_type: "reasoning",
+        content: "",
+        summary: "",
+        patch: [
+          "diff --git a/foo.txt b/foo.txt",
+          "--- a/foo.txt",
+          "+++ b/foo.txt",
+          "@@ -0,0 +1 @@",
+          "+first",
+        ].join("\n"),
+        repo_checkpoint: JSON.stringify({
+          changed_files: ["foo.txt"],
+        }),
+        eval_events_delta: JSON.stringify([
+          makeEvalEvent({
+            target_commit: "commit-001",
+            status: "completed",
+            passed: 1,
+            failed: 9,
+            total: 10,
+            suite_results: {
+              basics: { passed: 1, total: 10 },
+            },
+          }),
+        ]),
+      }),
+      makeRow({
+        part: 1,
+        git_commit: "commit-002",
+        part_type: "reasoning",
+        content: "",
+        summary: "",
+        patch: [
+          "diff --git a/foo.txt b/foo.txt",
+          "--- a/foo.txt",
+          "+++ b/foo.txt",
+          "@@ -1 +1,2 @@",
+          " first",
+          "+second",
+        ].join("\n"),
+        repo_checkpoint: JSON.stringify({
+          changed_files: ["foo.txt"],
+        }),
+        eval_events_delta: JSON.stringify([
+          makeEvalEvent({
+            target_commit: "commit-002",
+            status: "completed",
+            passed: 2,
+            failed: 8,
+            total: 10,
+            suite_results: {
+              basics: { passed: 2, total: 10 },
+            },
+          }),
+        ]),
+      }),
+    ];
+
+    const trajectory = reconstructTrajectory(rows);
+    expect(trajectory.commits).toHaveLength(2);
+    expect(trajectory.commits[0]?.hash).toBe("commit-001");
+    expect(trajectory.commits[1]?.hash).toBe("commit-002");
+    expect(trajectory.commits[1]?.changedFiles).toHaveLength(1);
   });
 
   it("carries forward prevTotalPassed for non-completed evals", () => {

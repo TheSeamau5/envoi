@@ -1,5 +1,5 @@
 import { SetupsClient } from "@/components/setups/setups-client";
-import { getAllTrajectories } from "@/lib/server/data";
+import { getProjectSnapshot } from "@/lib/server/project-snapshot-store";
 import type { Trajectory } from "@/lib/types";
 
 type ProjectSetupsPageProps = {
@@ -10,7 +10,8 @@ export default async function ProjectSetupsPage({
   params,
 }: ProjectSetupsPageProps) {
   const { project } = await params;
-  const allTraces = await getAllTrajectories({ project });
+  const snapshot = await getProjectSnapshot(project);
+  const allTraces = snapshot.trajectories;
   return (
     <SetupsClient
       allTraces={dedupeTrajectoriesById(allTraces)}
