@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import envoi
+from envoi.logging import make_component_logger
 from pydantic import BaseModel
 
 
@@ -60,6 +61,7 @@ arch_lock: asyncio.Lock | None = None
 case_run_semaphore: asyncio.Semaphore | None = None
 case_run_semaphore_limit: int | None = None
 reference_gcc_standard_flag_cache: str | None = None
+emit_environment_log = make_component_logger("environment")
 
 
 def session_path() -> Path:
@@ -189,6 +191,11 @@ def detect_reference_gcc_standard_flag() -> str:
     elif preferred == "c2x":
         candidates.append("c23")
 
+    emit_environment_log(
+        "reference_gcc_standard.detect.start",
+        preferred=preferred,
+        candidates=list(dict.fromkeys(candidates)),
+    )
     for candidate in dict.fromkeys(candidates):
         try:
             probe = subprocess.run(
@@ -204,9 +211,17 @@ def detect_reference_gcc_standard_flag() -> str:
 
         if probe.returncode == 0:
             reference_gcc_standard_flag_cache = candidate
+            emit_environment_log(
+                "reference_gcc_standard.detect.complete",
+                selected=candidate,
+            )
             return candidate
 
     reference_gcc_standard_flag_cache = "c2x"
+    emit_environment_log(
+        "reference_gcc_standard.detect.fallback",
+        selected=reference_gcc_standard_flag_cache,
+    )
     return reference_gcc_standard_flag_cache
 
 
@@ -456,12 +471,30 @@ async def run_case(
     case_root: Path | None = None,
 ) -> CaseResult:
     name = str(case["name"])
+    suite_name = str(case.get("suite_name") or "")
+    run_name = str(case.get("run_name") or suite_name or "suite")
     expected_stdout = str(case["expected_stdout"])
     expected_exit = int(case["expected_exit_code"])
     expect_compile_success = bool(case.get("expect_compile_success", True))
     session_root = session_path()
     case_parent = session_root if case_root is None else case_root
     case_dir = create_case_dir(case_parent, name)
+    case_started = time.monotonic()
+
+    def finalize_case(result: CaseResult) -> CaseResult:
+        emit_environment_log(
+            "suite.case.complete",
+            suite_name=suite_name or None,
+            run_name=run_name,
+            case_name=name,
+            phase=result.phase,
+            passed=result.passed,
+            failure_type=result.failure_type,
+            timed_out=result.timed_out,
+            actual_exit_code=result.actual_exit_code,
+            duration_ms=int((time.monotonic() - case_started) * 1000),
+        )
+        return result
 
     file_stem = sanitize_fragment(f"test-{name}", fallback="test", max_length=64)
     compile_inputs, c_source = prepare_case_files(
@@ -493,6 +526,24 @@ async def run_case(
             str(gcc_out_file),
         ]
     )
+    emit_environment_log(
+        "suite.case.start",
+        suite_name=suite_name or None,
+        run_name=run_name,
+        case_name=name,
+        compile_input_count=len(compile_inputs),
+        compile_inputs=[str(path.name) for path in compile_inputs],
+        link_args=extra_link_args,
+        expect_compile_success=expect_compile_success,
+    )
+    emit_environment_log(
+        "suite.case.compile.start",
+        suite_name=suite_name or None,
+        run_name=run_name,
+        case_name=name,
+        cc_command=cc_command,
+        gcc_command=gcc_command if not skip_gcc_benchmark() and expect_compile_success else None,
+    )
 
     compile_tasks = [
         run_timed_command(
@@ -523,10 +574,21 @@ async def run_case(
     compile_timed_out = command_timed_out(cc)
     binary_size_bytes = file_size(out_file)
     gcc_binary_size_bytes = file_size(gcc_out_file)
+    emit_environment_log(
+        "suite.case.compile.complete",
+        suite_name=suite_name or None,
+        run_name=run_name,
+        case_name=name,
+        cc_exit_code=cc.exit_code,
+        gcc_exit_code=gcc.exit_code if gcc is not None else None,
+        compile_time_ms=compile_time_ms,
+        gcc_compile_time_ms=gcc_compile_time_ms if gcc is not None else None,
+        timed_out=compile_timed_out,
+    )
 
     if should_benchmark_with_gcc and gcc is not None and gcc.exit_code != 0:
         reference_error = gcc.stderr or gcc.stdout or "gcc failed to compile the reference case"
-        return CaseResult(
+        return finalize_case(CaseResult(
             name=name,
             phase="compile",
             passed=False,
@@ -547,11 +609,11 @@ async def run_case(
                 "reference gcc could not compile this case "
                 "(the test inputs may be invalid C)\n" + reference_error
             ),
-        )
+        ))
 
     if not expect_compile_success:
         passed = cc.exit_code != 0 and not compile_timed_out
-        return CaseResult(
+        return finalize_case(CaseResult(
             name=name,
             phase="compile",
             passed=passed,
@@ -577,10 +639,10 @@ async def run_case(
                     else "expected compilation to fail but it succeeded"
                 )
             ),
-        )
+        ))
 
     if cc.exit_code != 0:
-        return CaseResult(
+        return finalize_case(CaseResult(
             name=name,
             phase="compile",
             passed=False,
@@ -598,11 +660,11 @@ async def run_case(
             gcc_warnings=gcc_warnings,
             timed_out=compile_timed_out,
             stderr=(cc.stderr or cc.stdout or "compilation failed"),
-        )
+        ))
 
     arch_error = await maybe_verify_arch(out_file)
     if arch_error is not None:
-        return CaseResult(
+        return finalize_case(CaseResult(
             name=name,
             phase="verify",
             passed=False,
@@ -621,7 +683,7 @@ async def run_case(
             compiler_warnings=compiler_warnings,
             gcc_warnings=gcc_warnings,
             stderr=arch_error,
-        )
+        ))
 
     run_tasks = [
         run_timed_command(
@@ -639,12 +701,30 @@ async def run_case(
                 timeout_seconds=15,
             )
         )
+    emit_environment_log(
+        "suite.case.run.start",
+        suite_name=suite_name or None,
+        run_name=run_name,
+        case_name=name,
+        output_binary=str(out_file.name),
+        reference_binary=str(gcc_out_file.name) if should_run_gcc_binary else None,
+    )
 
     run_results = await asyncio.gather(*run_tasks)
     run, run_time_ms = run_results[0]
     gcc_run_time_ms: float | None = None
     if should_run_gcc_binary:
         _, gcc_run_time_ms = run_results[1]
+    emit_environment_log(
+        "suite.case.run.complete",
+        suite_name=suite_name or None,
+        run_name=run_name,
+        case_name=name,
+        exit_code=run.exit_code,
+        run_time_ms=run_time_ms,
+        gcc_run_time_ms=gcc_run_time_ms,
+        timed_out=command_timed_out(run),
+    )
 
     actual_stdout = raw_stdout_text(run)
     normalized_actual_stdout = actual_stdout.strip()
@@ -689,7 +769,7 @@ async def run_case(
             parts.append(f"stderr:\n  {run.stderr.strip()}")
         stderr = "\n".join(parts)
 
-    return CaseResult(
+    return finalize_case(CaseResult(
         name=name,
         phase="verify",
         passed=passed,
@@ -712,7 +792,7 @@ async def run_case(
         runtime_stderr=runtime_stderr,
         timed_out=run_timed_out,
         stderr=stderr,
-    )
+    ))
 
 
 async def run_cases_parallel(
@@ -723,12 +803,34 @@ async def run_cases_parallel(
 ) -> list[CaseResult]:
     case_root = create_suite_case_root(suite_name, run_name)
     semaphore = get_case_run_semaphore()
+    suite_started = time.monotonic()
+    effective_run_name = run_name or suite_name
+    emit_environment_log(
+        "suite.run.start",
+        suite_name=suite_name,
+        run_name=effective_run_name,
+        total_cases=len(cases),
+        concurrency=max_test_concurrency(),
+    )
 
     async def run_one(case: dict) -> CaseResult:
         async with semaphore:
-            return await run_case(case, case_root=case_root)
+            case_payload = dict(case)
+            case_payload.setdefault("suite_name", suite_name)
+            case_payload.setdefault("run_name", effective_run_name)
+            return await run_case(case_payload, case_root=case_root)
 
     try:
-        return await asyncio.gather(*(run_one(case) for case in cases))
+        results = await asyncio.gather(*(run_one(case) for case in cases))
+        emit_environment_log(
+            "suite.run.complete",
+            suite_name=suite_name,
+            run_name=effective_run_name,
+            total_cases=len(results),
+            passed=sum(1 for result in results if result.passed),
+            failed=sum(1 for result in results if not result.passed),
+            duration_ms=int((time.monotonic() - suite_started) * 1000),
+        )
+        return results
     finally:
         shutil.rmtree(case_root, ignore_errors=True)

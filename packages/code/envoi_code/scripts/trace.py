@@ -510,6 +510,7 @@ def run_command(args: argparse.Namespace) -> None:
     trace_uri = artifact_uri(prefix, project, trajectory_id, "trace.parquet")
     bundle_uri = artifact_uri(prefix, project, trajectory_id, "repo.bundle")
     logs_uri = artifact_uri(prefix, project, trajectory_id, "logs.parquet")
+    eval_logs_uri = artifact_uri(prefix, project, trajectory_id, "eval_logs.parquet")
 
     part_limit_label = (
         str(args.max_parts)
@@ -542,7 +543,7 @@ def run_command(args: argparse.Namespace) -> None:
     print(
         "[launcher] io "
         f"task={args.task} env={args.env} "
-        f"trace={trace_uri} bundle={bundle_uri} logs={logs_uri}",
+        f"trace={trace_uri} bundle={bundle_uri} logs={logs_uri} eval_logs={eval_logs_uri}",
         flush=True,
     )
     print(

@@ -92,27 +92,37 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
     async def run_tests(path: str, params: str) -> object:
         started = time.monotonic()
         emit_worker_log("worker.test.start", path=path or "/")
-        parsed_params = parse_params(params)
-        execution = await execute_matched_tests(
-            path=path,
-            registry_items=environment.test_registry_items(),
-            params=parsed_params,
-            workdir=session_dir,
-            documents=None,
-        )
-        if execution is None:
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"No tests match: {path}"},
+        try:
+            parsed_params = parse_params(params)
+            execution = await execute_matched_tests(
+                path=path,
+                registry_items=environment.test_registry_items(),
+                params=parsed_params,
+                workdir=session_dir,
+                documents=None,
             )
-        matched_count, results_payload = execution
-        emit_worker_log(
-            "worker.test.complete",
-            path=path or "/",
-            matched=matched_count,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
-        return results_payload
+            if execution is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"No tests match: {path}"},
+                )
+            matched_count, results_payload = execution
+            emit_worker_log(
+                "worker.test.complete",
+                path=path or "/",
+                matched=matched_count,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            return results_payload
+        except Exception as error:
+            emit_worker_log(
+                "worker.test.failed",
+                level="error",
+                path=path or "/",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                error=str(error),
+            )
+            return JSONResponse(status_code=500, content={"error": str(error)})
 
     async def run_all_tests_handler(
         params: Annotated[str, Form()] = "{}",

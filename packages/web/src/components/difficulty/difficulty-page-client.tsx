@@ -29,8 +29,9 @@ export function DifficultyPageClient({
       ) : (
         <div className="flex-1 overflow-auto px-3.5 py-3.5">
           <p className="pb-3 max-w-180 text-[12px] leading-normal text-envoi-text-muted">
-            Each cell shows the <strong>best pass rate</strong> reached by any
-            trajectory for a test suite and model. Hover a cell for the exact
+            Each cell mirrors the <strong>per-suite best</strong> values from
+            the setup compare view: pick the strongest run for each model, then
+            show that run&apos;s suite percentages. Hover a cell for the exact
             percentage and trajectory count.
           </p>
           <DifficultyHeatmap

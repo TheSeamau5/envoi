@@ -1,12 +1,13 @@
 /**
- * Difficulty heatmap — SVG color matrix showing best pass rates per
- * (category, model), segmented by environment with section headers.
+ * Difficulty heatmap — SVG color matrix showing per-suite values from each
+ * model's representative best run, segmented by environment with section
+ * headers.
  *
  * Features:
  * - Color interpolation: red (0%) → yellow (50%) → green (100%)
  * - Frontier band: dashed border on cells in the 35-65% range (optimal training signal)
  * - Click-through: clicking a cell navigates to the trajectory list filtered by model
- * - Tooltip: shows model name, best pass rate percentage, and trajectory count
+ * - Tooltip: shows model name, pass rate percentage, and trajectory count
  *
  * Client component for hover/click interactions.
  */

@@ -2,24 +2,87 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import envoi_code.orchestrator as orchestrator
 import pytest
-from envoi_code.agents.base import AgentFatalError
+from envoi_code.agents.base import (
+    Agent,
+    AgentCredentials,
+    AgentFatalError,
+    AgentSetupContext,
+    AgentTurnOutcome,
+)
 from envoi_code.models import AgentTrace
-
-
-class FakeCommandResult:
-    def unpack(self) -> tuple[int, str, str]:
-        return 0, "", ""
+from envoi_code.sandbox.base import CommandResult, Sandbox, SandboxImageRequirements
 
 
 class FakeSandbox:
-    async def run(self, *args, **kwargs) -> FakeCommandResult:
-        return FakeCommandResult()
+    name = "fake"
+    sandbox_id = "sandbox-001"
+
+    async def run(
+        self,
+        cmd: str,
+        *,
+        timeout: int = 60,
+        quiet: bool = False,
+        stream_output: bool = False,
+        on_stdout_line: Callable[[str], Awaitable[None]] | None = None,
+        on_stderr_line: Callable[[str], Awaitable[None]] | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
+        del cmd, timeout, quiet, stream_output, cwd, env
+        if on_stdout_line is not None:
+            await on_stdout_line("")
+        if on_stderr_line is not None:
+            await on_stderr_line("")
+        return CommandResult(exit_code=0, stdout="", stderr="", duration_ms=0)
+
+    async def write_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        ensure_dir: bool = True,
+        log_upload: bool = False,
+    ) -> None:
+        del path, content, ensure_dir, log_upload
+
+    async def read_file(self, path: str) -> str:
+        del path
+        return ""
+
+    async def read_file_bytes(self, path: str) -> bytes:
+        del path
+        return b""
+
+    async def terminate(self) -> None:
+        return None
 
 
 class NullTurnAgent:
+    name = "fake-agent"
+    session_id = "sess-001"
+    log_files: list[str] = []
+
+    @staticmethod
+    def resolve_credentials(
+        auth_json_b64: str | None = None,
+    ) -> AgentCredentials:
+        del auth_json_b64
+        return AgentCredentials(api_key="")
+
+    @staticmethod
+    def resolve_model(model: str | None) -> str:
+        return model or "gpt-5"
+
+    @staticmethod
+    def image_requirements() -> SandboxImageRequirements:
+        return SandboxImageRequirements()
+
     def compute_turn_timeout(
         self,
         *,
@@ -30,30 +93,63 @@ class NullTurnAgent:
         del remaining_parts, remaining_run_seconds
         return message_timeout_seconds or 60
 
-    async def run_turn(self, **kwargs):
+    async def setup(
+        self,
+        sandbox: Sandbox,
+        ctx: AgentSetupContext,
+    ) -> None:
+        del sandbox, ctx
+
+    async def create_session(
+        self,
+        trajectory_id: str,
+    ) -> str:
+        del trajectory_id
+        return self.session_id
+
+    async def run_turn(
+        self,
+        **kwargs,
+    ) -> AgentTurnOutcome | None:
         del kwargs
         return None
+
+    def on_resume(
+        self,
+        existing_messages: list[dict[str, Any]],
+    ) -> None:
+        del existing_messages
 
     async def recover_session(
         self,
         trajectory_id: str,
         attempt: int,
-    ) -> str | None:
+    ) -> str:
         del trajectory_id, attempt
+        return ""
+
+    async def collect_crash_messages(
+        self,
+        session_id: str,
+    ) -> list[dict[str, Any]] | None:
+        del session_id
         return None
 
-    def on_turn_complete(self, turn_outcome) -> None:
-        del turn_outcome
+    async def stop(self) -> None:
+        return None
+
+    def on_turn_complete(self, outcome: AgentTurnOutcome) -> None:
+        del outcome
 
 
 class FatalStopAgent(NullTurnAgent):
-    async def run_turn(self, **kwargs):
+    async def run_turn(self, **kwargs) -> AgentTurnOutcome | None:
         del kwargs
         raise AgentFatalError("stopped", stop_reason="part_limit")
 
 
 class UsageLimitAgent(NullTurnAgent):
-    async def run_turn(self, **kwargs):
+    async def run_turn(self, **kwargs) -> AgentTurnOutcome | None:
         del kwargs
         raise AgentFatalError("Codex usage limit reached", stop_reason="agent_error")
 
@@ -66,7 +162,7 @@ class RecoveringNullTurnAgent(NullTurnAgent):
         self,
         trajectory_id: str,
         attempt: int,
-    ) -> str | None:
+    ) -> str:
         del trajectory_id
         self.recovery_attempts.append(attempt)
         return f"recovery-{attempt}"
@@ -91,13 +187,17 @@ class RecordingTimeoutAgent(NullTurnAgent):
         self.message_timeout_seconds = message_timeout_seconds
         return max(1, int(remaining_run_seconds))
 
-    async def run_turn(self, **kwargs):
+    async def run_turn(self, **kwargs) -> AgentTurnOutcome | None:
         self.seen_timeout = kwargs["timeout"]
         return None
 
 
 async def noop_flush_logs(**kwargs) -> None:
     del kwargs
+
+
+def capture_eval_log_record(record: dict[str, object]) -> None:
+    del record
 
 
 class FakeEvaluator:
@@ -147,7 +247,10 @@ def patch_turn_loop_dependencies(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator, "update_log_context", lambda **kwargs: None)
 
 
-def run_turn_loop_with_agent(agent_backend, monkeypatch) -> orchestrator.TurnLoopResult:
+def run_turn_loop_with_agent(
+    agent_backend: Agent,
+    monkeypatch,
+) -> orchestrator.TurnLoopResult:
     patch_turn_loop_dependencies(monkeypatch)
     return asyncio.run(
         orchestrator.run_turn_loop(
@@ -181,6 +284,7 @@ def run_turn_loop_with_agent(agent_backend, monkeypatch) -> orchestrator.TurnLoo
             advisor_system_prompt_override=None,
             advisor_user_prompt_prefix_override=None,
             flush_logs=noop_flush_logs,
+            capture_eval_log_record=capture_eval_log_record,
         ),
     )
 
@@ -250,6 +354,7 @@ def test_run_turn_loop_allows_unbounded_recovery_until_timeout(monkeypatch) -> N
             advisor_system_prompt_override=None,
             advisor_user_prompt_prefix_override=None,
             flush_logs=noop_flush_logs,
+            capture_eval_log_record=capture_eval_log_record,
         ),
     )
 
@@ -293,6 +398,7 @@ def test_run_turn_loop_uses_run_budget_when_message_timeout_is_unset(monkeypatch
             advisor_system_prompt_override=None,
             advisor_user_prompt_prefix_override=None,
             flush_logs=noop_flush_logs,
+            capture_eval_log_record=capture_eval_log_record,
         ),
     )
 
@@ -308,6 +414,6 @@ def test_run_trajectory_rejects_modal_timeout_above_function_ceiling() -> None:
         asyncio.run(
             orchestrator.run_trajectory(
                 project="c-compiler",
-                timeout_seconds=orchestrator.MODAL_FUNCTION_TIMEOUT_SECONDS,
+                timeout_seconds=orchestrator.MODAL_FUNCTION_TIMEOUT_SECONDS + 1,
             )
         )

@@ -84,7 +84,6 @@ from envoi_code.utils.advisor import (
 )
 from envoi_code.utils.diagnostics import enrich_evaluation_payload
 from envoi_code.utils.evaluation import (
-    EVALUATION_CONCURRENCY,
     EVALUATION_DEFAULT_TIMEOUT_SECONDS,
     extract_leaf_paths,
     normalize_test_paths,
@@ -124,6 +123,7 @@ from envoi_code.utils.storage import (
     get_s3_client,
     load_trace_snapshot,
     publish_completed_trajectory_summary,
+    save_eval_logs_parquet,
     save_logs_parquet,
     save_trace_parquet,
     trajectory_artifact_key,
@@ -179,7 +179,7 @@ LOGS_FLUSH_INTERVAL_SECONDS = max(1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SEC
 LOGS_FLUSH_BATCH_SIZE = max(1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50")))
 SHUTDOWN_GRACE_SECONDS = max(0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "300")))
 EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
-    0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "30"))
+    0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "0"))
 )
 AGENT_INACTIVITY_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "1800"))
@@ -339,6 +339,17 @@ def format_turn_eval_label(
     if has_error:
         return f"error({passed}/{total})"
     return f"{passed}/{total}"
+
+
+def resolve_sandbox_timeout_seconds(
+    *,
+    timeout_seconds: int,
+    sandbox_provider: str,
+) -> int:
+    base_timeout = timeout_seconds + SHUTDOWN_GRACE_SECONDS
+    if sandbox_provider in {"modal"}:
+        return MODAL_FUNCTION_TIMEOUT_SECONDS
+    return base_timeout
 
 
 def get_trace_latest_commit(trace: AgentTrace) -> str | None:
@@ -727,6 +738,7 @@ async def end_session(
     environment: str = "",
     task_params: dict[str, Any] | None = None,
     logs_parquet_uri: str | None = None,
+    eval_logs_parquet_uri: str | None = None,
     final_commit_hint: str | None = None,
     project: str = "default",
 ) -> None:
@@ -771,6 +783,7 @@ async def end_session(
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": None,
         "logs_parquet": logs_parquet_uri,
+        "eval_logs_parquet": eval_logs_parquet_uri,
     }
     # Persist session_end before any sandbox-dependent export steps.
     if environment:
@@ -834,6 +847,7 @@ async def end_session(
         "trace_parquet": trace_parquet_uri,
         "repo_bundle": bundle_s3_uri,
         "logs_parquet": logs_parquet_uri,
+        "eval_logs_parquet": eval_logs_parquet_uri,
     }
     if environment:
         save_trace_parquet(
@@ -863,7 +877,7 @@ async def end_session(
 
 
 class EvaluationScheduler:
-    """Manages async commit evaluations during a trajectory run."""
+    """Manages background commit evaluations through a single FIFO worker."""
 
     def __init__(
         self,
@@ -879,6 +893,9 @@ class EvaluationScheduler:
         test_timeout_seconds: int | None = None,
         should_stop: Callable[[], bool] | None = None,
         on_winner: (Callable[[str, EvaluationRecord], Awaitable[None] | None] | None) = None,
+        capture_eval_logs: (
+            Callable[[EvaluationRecord, list[dict[str, Any]]], None] | None
+        ) = None,
     ) -> None:
         self.sandbox = sandbox
         self.agent_sandbox = agent_sandbox
@@ -891,10 +908,13 @@ class EvaluationScheduler:
         self.test_timeout_seconds = test_timeout_seconds
         self.should_stop = should_stop
         self.on_winner = on_winner
-        self.tasks: set[asyncio.Task[None]] = set()
+        self.capture_eval_logs = capture_eval_logs
         self.seen_commits: set[str] = set(agent_trace.evaluations.keys())
-        self.semaphore = asyncio.Semaphore(EVALUATION_CONCURRENCY)
         self.retried_commits: set[str] = set()
+        self.pending_queue: asyncio.Queue[tuple[str, int, int, str] | None] = asyncio.Queue()
+        self.active_commit: str | None = None
+        self.worker_stop_requested = False
+        self.worker_task = asyncio.create_task(self.worker_loop())
 
         for evaluation in agent_trace.evaluations.values():
             if evaluation.status in {"queued", "running"}:
@@ -903,9 +923,37 @@ class EvaluationScheduler:
                 evaluation.completed_at = datetime.now(UTC).isoformat()
                 self.emit_event(evaluation)
 
+    def queue_depth(self) -> int:
+        return self.pending_queue.qsize()
+
+    def log_queue_state(
+        self,
+        action: str,
+        *,
+        commit: str | None = None,
+        part: int | None = None,
+        turn: int | None = None,
+        note: str | None = None,
+    ) -> None:
+        short_commit = commit[:10] if isinstance(commit, str) and commit else "none"
+        pieces = [
+            f"[eval][queue] {action}",
+            f"depth={self.queue_depth()}",
+            f"active={(self.active_commit[:10] if self.active_commit else 'none')}",
+        ]
+        if commit is not None:
+            pieces.append(f"commit={short_commit}")
+        if isinstance(part, int):
+            pieces.append(f"part={part}")
+        if isinstance(turn, int):
+            pieces.append(f"turn={turn}")
+        if isinstance(note, str) and note:
+            pieces.append(note)
+        print(" ".join(pieces), flush=True)
+
     @property
     def has_pending(self) -> bool:
-        return bool(self.tasks)
+        return self.active_commit is not None or not self.pending_queue.empty()
 
     def save(self) -> None:
         save_trace_parquet(
@@ -1062,8 +1110,22 @@ class EvaluationScheduler:
         turn: int,
     ) -> None:
         if self.should_stop is not None and self.should_stop():
+            self.log_queue_state(
+                "skip",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note="reason=winner_latched",
+            )
             return
         if commit in self.seen_commits:
+            self.log_queue_state(
+                "skip",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note="reason=duplicate_commit",
+            )
             return
         self.seen_commits.add(commit)
         queued_at = datetime.now(UTC).isoformat()
@@ -1078,11 +1140,58 @@ class EvaluationScheduler:
         )
         self.agent_trace.evaluations[commit] = evaluation
         self.emit_event(evaluation)
-        task = asyncio.create_task(
-            self.run_one(commit, part, turn, queued_at),
+        self.pending_queue.put_nowait((commit, part, turn, queued_at))
+        self.log_queue_state(
+            "enqueue",
+            commit=commit,
+            part=part,
+            turn=turn,
+            note=f"queued_at={queued_at}",
         )
-        self.tasks.add(task)
-        task.add_done_callback(self.on_done)
+
+    async def worker_loop(self) -> None:
+        self.log_queue_state("worker_start")
+        while True:
+            self.log_queue_state("await_item")
+            item = await self.pending_queue.get()
+            if item is None:
+                self.log_queue_state("stop_signal_received")
+                self.pending_queue.task_done()
+                return
+
+            commit, part, turn, queued_at = item
+            self.active_commit = commit
+            self.log_queue_state(
+                "pop",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note=f"queued_at={queued_at}",
+            )
+            try:
+                await self.run_one(commit, part, turn, queued_at)
+            except asyncio.CancelledError:
+                self.log_queue_state(
+                    "cancelled",
+                    commit=commit,
+                    part=part,
+                    turn=turn,
+                )
+                raise
+            except Exception as worker_error:
+                print(
+                    f"[eval] unexpected worker error for {commit[:10]}: {worker_error}\n"
+                    f"{traceback.format_exc()}",
+                )
+            finally:
+                self.log_queue_state(
+                    "done",
+                    commit=commit,
+                    part=part,
+                    turn=turn,
+                )
+                self.active_commit = None
+                self.pending_queue.task_done()
 
     async def run_one(
         self,
@@ -1103,130 +1212,168 @@ class EvaluationScheduler:
             )
             self.agent_trace.evaluations[commit] = evaluation
         print(
-            f"[eval] {commit[:10]} waiting for semaphore "
+            f"[eval] starting queued commit {commit[:10]} "
             f"(part={part} turn={turn})",
             flush=True,
         )
-        async with self.semaphore:
-            evaluation.status = "running"
-            evaluation.started_at = datetime.now(UTC).isoformat()
-            self.emit_event(evaluation)
+        self.log_queue_state(
+            "run_begin",
+            commit=commit,
+            part=part,
+            turn=turn,
+            note=f"queued_at={queued_at}",
+        )
+        evaluation.status = "running"
+        evaluation.started_at = datetime.now(UTC).isoformat()
+        self.emit_event(evaluation)
 
-            run_payload: dict[str, Any] | None = None
-            started_mono = time.monotonic()
-            resolved_test_timeout = (
-                self.test_timeout_seconds
-                if isinstance(self.test_timeout_seconds, int) and self.test_timeout_seconds > 0
-                else EVALUATION_DEFAULT_TIMEOUT_SECONDS
-            )
-            eval_hard_timeout = resolved_test_timeout + 300
-            try:
-                uses_separate_sandbox = (
-                    self.agent_sandbox is not self.sandbox
-                )
-                print(
-                    f"[eval] {commit[:10]} acquired semaphore, "
-                    f"separate_sandbox={uses_separate_sandbox} "
-                    f"hard_timeout={eval_hard_timeout}s "
-                    f"test_timeout={self.test_timeout_seconds}s "
-                    f"test_paths={self.test_paths}",
-                    flush=True,
-                )
-                if uses_separate_sandbox:
-                    transfer_t0 = time.monotonic()
-                    await transfer_repo_to_eval_sandbox(
-                        agent_sandbox=self.agent_sandbox,
-                        eval_sandbox=self.sandbox,
-                        commit=commit,
-                    )
-                    print(
-                        f"[eval] {commit[:10]} transfer took "
-                        f"{time.monotonic() - transfer_t0:.1f}s",
-                        flush=True,
-                    )
-                print(
-                    f"[eval] {commit[:10]} starting run_commit_evaluation "
-                    f"on {'eval' if uses_separate_sandbox else 'agent'} sandbox",
-                    flush=True,
-                )
-                run_payload = await asyncio.wait_for(
-                    run_commit_evaluation(
-                        sandbox=self.sandbox,
-                        commit=commit,
-                        test_paths=self.test_paths,
-                        timeout_seconds=self.test_timeout_seconds,
-                        clone_from_bundle=uses_separate_sandbox,
-                    ),
-                    timeout=eval_hard_timeout,
-                )
-                self.apply_result(evaluation, run_payload)
-            except TimeoutError:
-                evaluation.status = "failed"
-                evaluation.error = (
-                    f"Evaluation hard timeout after {eval_hard_timeout}s "
-                    f"(sandbox timeout was {self.test_timeout_seconds}s)"
-                )
-            except Exception as eval_error:
-                print(
-                    f"[eval] {commit[:10]} run_one error: {eval_error}\n"
-                    f"{traceback.format_exc()}",
-                    flush=True,
-                )
-                self.apply_failure(
-                    evaluation,
-                    eval_error,
-                    run_payload,
-                )
-            finally:
-                if evaluation.duration_ms is None:
-                    evaluation.duration_ms = int(
-                        (time.monotonic() - started_mono) * 1000,
-                    )
-                evaluation.completed_at = datetime.now(UTC).isoformat()
-                if evaluation.total == 0:
-                    print(
-                        f"[eval] commit {commit[:10]} "
-                        f"status={evaluation.status} tests=0 "
-                        f"error={evaluation.error or 'none'}"
-                    )
-                else:
-                    print(
-                        f"[eval] commit {commit[:10]} "
-                        f"status={evaluation.status} "
-                        f"passed={evaluation.passed}/{evaluation.total}"
-                    )
-                self.emit_event(evaluation)
-                if is_winning_evaluation(evaluation) and self.on_winner is not None:
-                    callback_result = self.on_winner(
-                        commit,
-                        evaluation,
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
-
-    def on_done(self, done_task: asyncio.Task[None]) -> None:
-        self.tasks.discard(done_task)
+        run_payload: dict[str, Any] | None = None
+        started_mono = time.monotonic()
+        resolved_test_timeout = (
+            self.test_timeout_seconds
+            if isinstance(self.test_timeout_seconds, int) and self.test_timeout_seconds > 0
+            else EVALUATION_DEFAULT_TIMEOUT_SECONDS
+        )
+        eval_hard_timeout = resolved_test_timeout + 300
         try:
-            done_task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception as task_error:
+            uses_separate_sandbox = self.agent_sandbox is not self.sandbox
             print(
-                f"[eval] unexpected task error: {task_error}\n"
-                f"{traceback.format_exc()}",
+                f"[eval] {commit[:10]} queue worker picked commit "
+                f"separate_sandbox={uses_separate_sandbox} "
+                f"hard_timeout={eval_hard_timeout}s "
+                f"test_timeout={self.test_timeout_seconds}s "
+                f"test_paths={self.test_paths}",
+                flush=True,
             )
+            if uses_separate_sandbox:
+                transfer_t0 = time.monotonic()
+                await transfer_repo_to_eval_sandbox(
+                    agent_sandbox=self.agent_sandbox,
+                    eval_sandbox=self.sandbox,
+                    commit=commit,
+                )
+                print(
+                    f"[eval] {commit[:10]} transfer took "
+                    f"{time.monotonic() - transfer_t0:.1f}s",
+                    flush=True,
+                )
+            print(
+                f"[eval] {commit[:10]} starting run_commit_evaluation "
+                f"on {'eval' if uses_separate_sandbox else 'agent'} sandbox",
+                flush=True,
+            )
+            run_payload = await asyncio.wait_for(
+                run_commit_evaluation(
+                    sandbox=self.sandbox,
+                    commit=commit,
+                    test_paths=self.test_paths,
+                    timeout_seconds=self.test_timeout_seconds,
+                    clone_from_bundle=uses_separate_sandbox,
+                ),
+                timeout=eval_hard_timeout,
+            )
+            log_records = run_payload.get("log_records")
+            if (
+                self.capture_eval_logs is not None
+                and isinstance(log_records, list)
+                and log_records
+            ):
+                self.capture_eval_logs(evaluation, log_records)
+            self.apply_result(evaluation, run_payload)
+        except TimeoutError:
+            evaluation.status = "failed"
+            evaluation.error = (
+                f"Evaluation hard timeout after {eval_hard_timeout}s "
+                f"(sandbox timeout was {self.test_timeout_seconds}s)"
+            )
+        except asyncio.CancelledError:
+            if evaluation.status != "failed":
+                evaluation.status = "failed"
+            if not evaluation.error:
+                evaluation.error = "Cancelled while evaluation was running"
+            raise
+        except Exception as eval_error:
+            print(
+                f"[eval] {commit[:10]} run_one error: {eval_error}\n"
+                f"{traceback.format_exc()}",
+                flush=True,
+            )
+            self.apply_failure(
+                evaluation,
+                eval_error,
+                run_payload,
+            )
+        finally:
+            if evaluation.duration_ms is None:
+                evaluation.duration_ms = int(
+                    (time.monotonic() - started_mono) * 1000,
+                )
+            evaluation.completed_at = datetime.now(UTC).isoformat()
+            print(
+                f"[eval] commit {commit[:10]} returned "
+                f"started_at={evaluation.started_at} "
+                f"completed_at={evaluation.completed_at} "
+                f"duration_ms={evaluation.duration_ms}",
+                flush=True,
+            )
+            if evaluation.total == 0:
+                print(
+                    f"[eval] commit {commit[:10]} "
+                    f"status={evaluation.status} tests=0 "
+                    f"error={evaluation.error or 'none'}"
+                )
+            else:
+                print(
+                    f"[eval] commit {commit[:10]} "
+                    f"status={evaluation.status} "
+                    f"passed={evaluation.passed}/{evaluation.total}"
+                )
+            self.log_queue_state(
+                "run_end",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note=(
+                    f"status={evaluation.status} "
+                    f"passed={evaluation.passed} "
+                    f"failed={evaluation.failed} "
+                    f"total={evaluation.total}"
+                ),
+            )
+            self.emit_event(evaluation)
+            if is_winning_evaluation(evaluation) and self.on_winner is not None:
+                callback_result = self.on_winner(
+                    commit,
+                    evaluation,
+                )
+                if inspect.isawaitable(callback_result):
+                    await callback_result
 
     async def wait(self) -> None:
-        while self.tasks:
-            pending = list(self.tasks)
-            if not pending:
-                break
-            await asyncio.gather(*pending, return_exceptions=True)
+        self.log_queue_state("wait_begin")
+        await self.pending_queue.join()
+        self.log_queue_state("wait_complete")
+        if self.worker_task.done():
+            try:
+                self.worker_task.result()
+            except asyncio.CancelledError:
+                return
 
     async def cancel_pending(self, *, reason: str) -> None:
         now = datetime.now(UTC).isoformat()
-        for evaluation in self.agent_trace.evaluations.values():
-            if evaluation.status == "queued":
+        self.log_queue_state("cancel_begin", note=f"reason={reason}")
+        while True:
+            try:
+                item = self.pending_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is None:
+                self.log_queue_state("discard_stop_signal")
+                self.pending_queue.task_done()
+                continue
+            commit, part, turn, _ = item
+            evaluation = self.agent_trace.evaluations.get(commit)
+            if evaluation is not None and evaluation.status == "queued":
                 evaluation.status = "failed"
                 if not evaluation.error:
                     evaluation.error = reason
@@ -1239,17 +1386,49 @@ class EvaluationScheduler:
                 if evaluation.total is None:
                     evaluation.total = 0
                 self.emit_event(evaluation)
-                continue
+            self.log_queue_state(
+                "cancel_queued",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note=f"reason={reason}",
+            )
+            self.pending_queue.task_done()
+
+        for evaluation in self.agent_trace.evaluations.values():
             if evaluation.status == "running":
                 evaluation.status = "failed"
                 if not evaluation.error:
                     evaluation.error = reason
+                self.log_queue_state(
+                    "cancel_running",
+                    commit=evaluation.commit,
+                    part=evaluation.part,
+                    turn=evaluation.trigger_turn,
+                    note=f"reason={reason}",
+                )
 
-        pending = list(self.tasks)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if not self.worker_task.done():
+            self.worker_task.cancel()
+            await asyncio.gather(self.worker_task, return_exceptions=True)
+        self.log_queue_state("cancel_complete", note=f"reason={reason}")
+
+    async def stop(self) -> None:
+        if self.worker_task.done():
+            try:
+                self.worker_task.result()
+            except asyncio.CancelledError:
+                return
+            return
+        if not self.worker_stop_requested:
+            self.worker_stop_requested = True
+            self.log_queue_state("stop_requested")
+            await self.pending_queue.put(None)
+        try:
+            await self.worker_task
+        except asyncio.CancelledError:
+            return
+        self.log_queue_state("worker_stopped")
 
     def retry_failed_evaluations(self) -> int:
         """Re-queue failed evaluations for a single retry. Returns count."""
@@ -1270,16 +1449,17 @@ class EvaluationScheduler:
             )
             self.agent_trace.evaluations[commit] = new_eval
             self.emit_event(new_eval)
-            task = asyncio.create_task(
-                self.run_one(
-                    commit,
-                    new_eval.part,
-                    new_eval.trigger_turn or 0,
-                    new_eval.queued_at,
-                ),
+            part = new_eval.part if isinstance(new_eval.part, int) else 0
+            turn = new_eval.trigger_turn if isinstance(new_eval.trigger_turn, int) else 0
+            queued_at = new_eval.queued_at or datetime.now(UTC).isoformat()
+            self.pending_queue.put_nowait((commit, part, turn, queued_at))
+            self.log_queue_state(
+                "retry_enqueue",
+                commit=commit,
+                part=part,
+                turn=turn,
+                note=f"queued_at={queued_at}",
             )
-            self.tasks.add(task)
-            task.add_done_callback(self.on_done)
             retried += 1
         return retried
 
@@ -2159,6 +2339,26 @@ def normalize_run_stop_reason(
 def start_logs_runtime(
     trajectory_id: str,
 ) -> LogsRuntime:
+    return start_structured_logs_runtime(
+        trajectory_id,
+        save_callback=save_logs_parquet,
+    )
+
+
+def start_eval_logs_runtime(
+    trajectory_id: str,
+) -> LogsRuntime:
+    return start_structured_logs_runtime(
+        trajectory_id,
+        save_callback=save_eval_logs_parquet,
+    )
+
+
+def start_structured_logs_runtime(
+    trajectory_id: str,
+    *,
+    save_callback: Callable[[str, list[dict[str, Any]]], None],
+) -> LogsRuntime:
     records: list[dict[str, Any]] = []
     logs_flush_lock = asyncio.Lock()
     last_logs_flush_count = 0
@@ -2186,7 +2386,7 @@ def start_logs_runtime(
                 return
             snapshot = list(records)
             await asyncio.to_thread(
-                save_logs_parquet,
+                save_callback,
                 trajectory_id,
                 snapshot,
             )
@@ -2237,6 +2437,24 @@ def start_logs_runtime(
         wakeup=wakeup,
         stop=stop,
     )
+
+
+def capture_structured_log_records(
+    capture: Callable[[dict[str, Any]], None],
+    records: list[dict[str, Any]],
+    *,
+    defaults: dict[str, Any] | None = None,
+) -> None:
+    if not records:
+        return
+    default_fields = defaults or {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        normalized = dict(record)
+        for key, value in default_fields.items():
+            normalized.setdefault(key, value)
+        capture(normalized)
 
 
 async def prepare_trajectory_context(
@@ -2534,6 +2752,7 @@ async def run_turn_end_evaluation_cycle(
     previous_turn_end_tests: list[EvalTestResult] | None,
     advisor_system_prompt_override: str | None,
     advisor_user_prompt_prefix_override: str | None,
+    capture_eval_log_record: Callable[[dict[str, Any]], None],
 ) -> TurnEndEvaluationOutcome:
     turn_end_eval_payload: dict[str, Any] | None = None
     turn_end_eval_payload_body: dict[str, Any] | None = None
@@ -2548,6 +2767,15 @@ async def run_turn_end_evaluation_cycle(
             sandbox=sandbox,
             test_paths=selected_test_paths,
             timeout_seconds=test_timeout_seconds,
+        )
+        capture_structured_log_records(
+            capture_eval_log_record,
+            turn_end_eval_payload.get("log_records", []),
+            defaults={
+                "git_commit": git_commit,
+                "turn": turn_count,
+                "eval_kind": "turn_end_blocking",
+            },
         )
         payload = turn_end_eval_payload.get("payload")
         if isinstance(payload, dict):
@@ -2774,6 +3002,7 @@ async def run_turn_loop(
     advisor_system_prompt_override: str | None,
     advisor_user_prompt_prefix_override: str | None,
     flush_logs: Callable[..., Awaitable[None]],
+    capture_eval_log_record: Callable[[dict[str, Any]], None],
 ) -> TurnLoopResult:
     turn_count = initial_turn_count
     part_count = initial_part_count
@@ -2836,6 +3065,22 @@ async def run_turn_loop(
         except Exception as kill_error:
             print(f"[eval] winner interrupt failed: {kill_error}")
 
+    def capture_async_eval_logs(
+        evaluation: EvaluationRecord,
+        records: list[dict[str, Any]],
+    ) -> None:
+        capture_structured_log_records(
+            capture_eval_log_record,
+            records,
+            defaults={
+                "git_commit": evaluation.commit,
+                "part": evaluation.part,
+                "turn": evaluation.trigger_turn,
+                "eval_id": evaluation.eval_id,
+                "eval_kind": evaluation.kind,
+            },
+        )
+
     evaluator = EvaluationScheduler(
         sandbox=eval_sandbox if eval_sandbox is not None else sandbox,
         agent_sandbox=sandbox,
@@ -2848,6 +3093,7 @@ async def run_turn_loop(
         test_timeout_seconds=test_timeout_seconds,
         should_stop=winner_latched,
         on_winner=on_async_winner,
+        capture_eval_logs=capture_async_eval_logs,
     )
 
     existing_winner = first_winning_commit(agent_trace.evaluations)
@@ -3235,6 +3481,7 @@ async def run_turn_loop(
             previous_turn_end_tests=previous_turn_end_tests,
             advisor_system_prompt_override=advisor_system_prompt_override,
             advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
+            capture_eval_log_record=capture_eval_log_record,
         )
 
         if (
@@ -3410,8 +3657,12 @@ async def execute_trajectory_main(
     advisor_system_prompt_override: str | None,
     advisor_user_prompt_prefix_override: str | None,
     flush_logs: Callable[..., Awaitable[None]],
+    capture_eval_log_record: Callable[[dict[str, Any]], None],
 ) -> TrajectoryExecutionResult:
-    sandbox_timeout_seconds = timeout_seconds + SHUTDOWN_GRACE_SECONDS
+    sandbox_timeout_seconds = resolve_sandbox_timeout_seconds(
+        timeout_seconds=timeout_seconds,
+        sandbox_provider=sandbox_provider,
+    )
     config = SandboxConfig(
         timeout=sandbox_timeout_seconds,
         image_requirements=agent_cls.image_requirements(),
@@ -3593,6 +3844,7 @@ async def execute_trajectory_main(
         advisor_system_prompt_override=advisor_system_prompt_override,
         advisor_user_prompt_prefix_override=advisor_user_prompt_prefix_override,
         flush_logs=flush_logs,
+        capture_eval_log_record=capture_eval_log_record,
     )
 
     return TrajectoryExecutionResult(
@@ -3692,10 +3944,15 @@ async def finalize_trajectory_run(
     environment: str,
     task_params_loaded: dict[str, Any],
     structured_logs: list[dict[str, Any]],
+    eval_structured_logs: list[dict[str, Any]],
     flush_logs: Callable[..., Awaitable[None]],
     logs_flush_task: asyncio.Task[None] | None,
     logs_flush_wakeup: asyncio.Event | None,
     logs_flush_stop: asyncio.Event | None,
+    eval_logs_flush: Callable[..., Awaitable[None]],
+    eval_logs_flush_task: asyncio.Task[None] | None,
+    eval_logs_flush_wakeup: asyncio.Event | None,
+    eval_logs_flush_stop: asyncio.Event | None,
     log_callback_token: Any,
     log_context_token: Any,
 ) -> tuple[int, int, RunStopReason, str | None]:
@@ -3706,6 +3963,15 @@ async def finalize_trajectory_run(
     if logs_flush_task is not None:
         try:
             await logs_flush_task
+        except Exception:
+            pass
+    if eval_logs_flush_stop is not None:
+        eval_logs_flush_stop.set()
+    if eval_logs_flush_wakeup is not None:
+        eval_logs_flush_wakeup.set()
+    if eval_logs_flush_task is not None:
+        try:
+            await eval_logs_flush_task
         except Exception:
             pass
 
@@ -3774,10 +4040,20 @@ async def finalize_trajectory_run(
                 )
             except Exception:
                 pass
+        finally:
+            try:
+                await evaluator.stop()
+            except Exception as stop_error:
+                print(f"[eval] failed to stop evaluator worker: {stop_error}")
 
     logs_parquet_uri = artifact_uri(
         trajectory_id,
         "logs.parquet",
+        project=project,
+    )
+    eval_logs_parquet_uri = artifact_uri(
+        trajectory_id,
+        "eval_logs.parquet",
         project=project,
     )
     if sandbox is not None and agent_trace is not None:
@@ -3822,11 +4098,22 @@ async def finalize_trajectory_run(
                 structured_logs.extend(sandbox_logs)
         except Exception as log_error:
             print(f"[logs] failed collecting sandbox logs: {log_error}")
+        if eval_sandbox is not None:
+            try:
+                eval_sandbox_logs = await collect_sandbox_structured_logs(eval_sandbox)
+                if eval_sandbox_logs:
+                    eval_structured_logs.extend(eval_sandbox_logs)
+            except Exception as log_error:
+                print(f"[eval][logs] failed collecting eval sandbox logs: {log_error}")
 
         try:
             await flush_logs(force=True)
         except Exception as flush_error:
             print(f"[logs] pre-end flush failed: {flush_error}")
+        try:
+            await eval_logs_flush(force=True)
+        except Exception as flush_error:
+            print(f"[eval][logs] pre-end flush failed: {flush_error}")
 
         try:
             await end_session(
@@ -3838,6 +4125,7 @@ async def finalize_trajectory_run(
                 environment=environment,
                 task_params=task_params_loaded,
                 logs_parquet_uri=logs_parquet_uri,
+                eval_logs_parquet_uri=eval_logs_parquet_uri,
                 final_commit_hint=latest_git_commit,
                 project=project,
             )
@@ -3861,10 +4149,19 @@ async def finalize_trajectory_run(
             await flush_logs(force=True)
         except Exception as log_save_error:
             print(f"[logs] failed saving logs.parquet: {log_save_error}")
+    if (sandbox is None or agent_trace is None) and eval_structured_logs:
+        try:
+            await eval_logs_flush(force=True)
+        except Exception as log_save_error:
+            print(f"[eval][logs] failed saving eval_logs.parquet: {log_save_error}")
     try:
         await flush_logs(force=True)
     except Exception as log_save_error:
         print(f"[logs] final flush failed: {log_save_error}")
+    try:
+        await eval_logs_flush(force=True)
+    except Exception as log_save_error:
+        print(f"[eval][logs] final flush failed: {log_save_error}")
     if log_callback_token is not None:
         reset_log_callback(log_callback_token)
     if log_context_token is not None:
@@ -3902,13 +4199,12 @@ async def run_trajectory(
     if not project_name:
         raise ValueError("project is required")
     if (
-        sandbox_provider == "modal"
-        and timeout_seconds + SHUTDOWN_GRACE_SECONDS > MODAL_FUNCTION_TIMEOUT_SECONDS
+        sandbox_provider in {"modal"}
+        and timeout_seconds > MODAL_FUNCTION_TIMEOUT_SECONDS
     ):
         raise ValueError(
             "Requested timeout exceeds the Modal function ceiling: "
             f"requested={timeout_seconds}s "
-            f"grace={SHUTDOWN_GRACE_SECONDS}s "
             f"function_timeout={MODAL_FUNCTION_TIMEOUT_SECONDS}s"
         )
     os.environ["ENVOI_PROJECT"] = project_name
@@ -3932,6 +4228,7 @@ async def run_trajectory(
         timeout_seconds=timeout_seconds,
     )
     logs_runtime = start_logs_runtime(trajectory_id)
+    eval_logs_runtime = start_eval_logs_runtime(trajectory_id)
     log_callback_token = set_log_callback(logs_runtime.capture)
     log_context_token = bind_log_context(
         component="orchestrator",
@@ -3969,7 +4266,7 @@ async def run_trajectory(
         "[run] eval "
         f"tests={test_selector} "
         f"test_timeout={test_timeout_label} "
-        f"eval_concurrency={EVALUATION_CONCURRENCY} "
+        "eval_mode=queue "
         f"advisor_model={prepared.normalized_advisor_model or 'none'} "
         f"advisor_thinking={prepared.normalized_advisor_thinking_level} "
         f"advisor_max_tokens={prepared.advisor_max_output_tokens or 'default'} "
@@ -3982,7 +4279,8 @@ async def run_trajectory(
         f"task={prepared.task_path} env={prepared.env_path} "
         f"trace={prepared.trace_s3_uri} "
         f"bundle={prepared.bundle_s3_uri} "
-        f"logs={prepared.logs_s3_uri}"
+        f"logs={prepared.logs_s3_uri} "
+        f"eval_logs={artifact_uri(trajectory_id, 'eval_logs.parquet', project=prepared.project)}"
     )
     if prepared.existing_trace is not None:
         print(
@@ -4046,6 +4344,7 @@ async def run_trajectory(
             advisor_system_prompt_override=prepared.advisor_system_prompt_override,
             advisor_user_prompt_prefix_override=prepared.advisor_user_prompt_prefix_override,
             flush_logs=logs_runtime.flush,
+            capture_eval_log_record=eval_logs_runtime.capture,
         )
         sandbox = execution_result.sandbox
         eval_sandbox = execution_result.eval_sandbox
@@ -4109,10 +4408,15 @@ async def run_trajectory(
             environment=environment,
             task_params_loaded=task_params_loaded,
             structured_logs=logs_runtime.records,
+            eval_structured_logs=eval_logs_runtime.records,
             flush_logs=logs_runtime.flush,
             logs_flush_task=logs_runtime.task,
             logs_flush_wakeup=logs_runtime.wakeup,
             logs_flush_stop=logs_runtime.stop,
+            eval_logs_flush=eval_logs_runtime.flush,
+            eval_logs_flush_task=eval_logs_runtime.task,
+            eval_logs_flush_wakeup=eval_logs_runtime.wakeup,
+            eval_logs_flush_stop=eval_logs_runtime.stop,
             log_callback_token=log_callback_token,
             log_context_token=log_context_token,
         )

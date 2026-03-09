@@ -1,9 +1,9 @@
 """S3 persistence for trace artifacts.
 
 Handles saving trace.parquet after every part (save_trace_parquet), saving
-structured logs.parquet snapshots (save_logs_parquet), loading a prior trace
-for resume (load_trace_snapshot), uploading raw files like repo.bundle
-(upload_file), and constructing S3 URIs (artifact_uri).
+structured log snapshots (save_logs_parquet / save_eval_logs_parquet), loading
+a prior trace for resume (load_trace_snapshot), uploading raw files like
+repo.bundle (upload_file), and constructing S3 URIs (artifact_uri).
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ print = tprint
 _s3_client = None
 _last_saved_trace_log_key: dict[str, tuple[int, int, str]] = {}
 _last_saved_logs_count: dict[str, int] = {}
+_last_saved_eval_logs_count: dict[str, int] = {}
 _did_warn_bucket_deprecation = False
 TRACE_SAVE_LOG_EVERY_PARTS = max(
     1, int(os.environ.get("TRACE_SAVE_LOG_EVERY_PARTS", "25"))
@@ -189,6 +190,43 @@ def save_logs_parquet(
     project: str | None = None,
 ) -> None:
     """Serialize structured logs to parquet and upload to S3."""
+    save_structured_logs_parquet(
+        trajectory_id,
+        records,
+        filename="logs.parquet",
+        count_cache=_last_saved_logs_count,
+        label="logs.parquet",
+        project=project,
+    )
+
+
+def save_eval_logs_parquet(
+    trajectory_id: str,
+    records: list[dict[str, Any]],
+    *,
+    project: str | None = None,
+) -> None:
+    """Serialize eval sandbox logs to parquet and upload to S3."""
+    save_structured_logs_parquet(
+        trajectory_id,
+        records,
+        filename="eval_logs.parquet",
+        count_cache=_last_saved_eval_logs_count,
+        label="eval_logs.parquet",
+        project=project,
+    )
+
+
+def save_structured_logs_parquet(
+    trajectory_id: str,
+    records: list[dict[str, Any]],
+    *,
+    filename: str,
+    count_cache: dict[str, int],
+    label: str,
+    project: str | None = None,
+) -> None:
+    """Serialize structured logs to parquet and upload to S3."""
     if not records:
         return
 
@@ -198,10 +236,10 @@ def save_logs_parquet(
 
     buf = io.BytesIO()
     write_logs_parquet(rows, buf)
-    upload_file(trajectory_id, "logs.parquet", buf.getvalue(), project=project)
+    upload_file(trajectory_id, filename, buf.getvalue(), project=project)
 
     count = len(rows)
-    previous_count = _last_saved_logs_count.get(trajectory_id)
+    previous_count = count_cache.get(trajectory_id)
     should_log = False
     if previous_count is None:
         should_log = True
@@ -210,8 +248,8 @@ def save_logs_parquet(
     elif count - previous_count >= LOGS_SAVE_LOG_EVERY_ROWS:
         should_log = True
     if should_log:
-        builtins.print(f"[{ts()}] [s3] saved logs.parquet (rows={count})", flush=True)
-        _last_saved_logs_count[trajectory_id] = count
+        builtins.print(f"[{ts()}] [s3] saved {label} (rows={count})", flush=True)
+        count_cache[trajectory_id] = count
 
 
 def upload_file(

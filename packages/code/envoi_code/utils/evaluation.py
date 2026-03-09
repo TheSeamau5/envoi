@@ -18,7 +18,6 @@ from envoi_code.utils.helpers import tprint
 
 print = tprint
 
-EVALUATION_CONCURRENCY = max(1, int(os.environ.get("EVALUATION_CONCURRENCY", "4")))
 EVALUATION_DEFAULT_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("EVALUATION_TIMEOUT_SECONDS", "7200"))
 )
@@ -26,6 +25,7 @@ EVALUATION_ENVOI_URL = (
     os.environ.get("EVALUATION_ENVOI_URL", "http://localhost:8000").strip()
     or "http://localhost:8000"
 )
+EVALUATION_LOG_MARKER = "__ENVOI_EVAL_LOG__"
 EVALUATION_JSON_MARKER = "__ENVOI_EVAL_JSON__"
 
 
@@ -81,6 +81,7 @@ def build_evaluation_python_script(
         "import sys\n"
         "import time\n"
         "import traceback\n"
+        "from datetime import UTC, datetime\n"
         "from pathlib import Path\n"
         "import envoi\n"
         f"repo_dir = {repo_dir_json}\n"
@@ -88,16 +89,90 @@ def build_evaluation_python_script(
         f"eval_test_paths = {eval_test_paths_json}\n"
         f"eval_timeout_seconds = int({eval_timeout_seconds_json})\n"
         f"marker = {marker_json}\n"
-        "LOG_MARKER = '__ENVOI_EVAL_LOG__'\n"
+        f"LOG_MARKER = {json.dumps(EVALUATION_LOG_MARKER)}\n"
         "MAX_MESSAGE_CHARS = 320\n"
         "MAX_TAIL_CHARS = 1200\n"
-        "def log_eval(event, **fields):\n"
-        "    payload = {'event': event}\n"
-        "    payload.update(fields)\n"
+        "def emit_eval_record(payload):\n"
         "    print(\n"
         "        LOG_MARKER + json.dumps(payload, ensure_ascii=False, default=str),\n"
         "        flush=True,\n"
         "    )\n"
+        "def normalize_record(record, **fields):\n"
+        "    payload = dict(record) if isinstance(record, dict) else {}\n"
+        "    payload.setdefault('ts', datetime.now(UTC).isoformat())\n"
+        "    payload.setdefault('component', 'evaluation')\n"
+        "    payload.setdefault('event', 'log')\n"
+        "    payload.setdefault('level', 'info')\n"
+        "    payload.setdefault('message', '')\n"
+        "    for key, value in fields.items():\n"
+        "        if value is None:\n"
+        "            continue\n"
+        "        payload[key] = value\n"
+        "    return payload\n"
+        "def log_eval(event, **fields):\n"
+        "    emit_eval_record(normalize_record({'event': event}, **fields))\n"
+        "def emit_sandbox_record(record, *, log_path, line_no):\n"
+        "    normalized = normalize_record(\n"
+        "        record,\n"
+        "        source='eval_sandbox',\n"
+        "        log_path=log_path,\n"
+        "        line_no=line_no,\n"
+        "    )\n"
+        "    emit_eval_record(normalized)\n"
+        "async def mirror_sandbox_logs(stop_event):\n"
+        "    seen_line_counts = {}\n"
+        "    for path in sorted(Path('/tmp').glob('envoi_*.jsonl')):\n"
+        "        path_key = str(path)\n"
+        "        try:\n"
+        "            seen_line_counts[path_key] = len(\n"
+        "                path.read_text(encoding='utf-8', errors='replace').splitlines()\n"
+        "            )\n"
+        "        except Exception:\n"
+        "            seen_line_counts[path_key] = 0\n"
+        "    while True:\n"
+        "        for path in sorted(Path('/tmp').glob('envoi_*.jsonl')):\n"
+        "            path_key = str(path)\n"
+        "            try:\n"
+        "                lines = path.read_text(encoding='utf-8', errors='replace').splitlines()\n"
+        "            except Exception as error:\n"
+        "                log_eval(\n"
+        "                    'sandbox.log.read_failed',\n"
+        "                    level='error',\n"
+        "                    message='Failed reading eval sandbox log file',\n"
+        "                    log_path=path_key,\n"
+        "                    error=str(error),\n"
+        "                )\n"
+        "                continue\n"
+        "            start = seen_line_counts.get(path_key, 0)\n"
+        "            if start > len(lines):\n"
+        "                start = 0\n"
+        "            for line_no, raw_line in enumerate(lines[start:], start=start + 1):\n"
+        "                text = raw_line.strip()\n"
+        "                if not text:\n"
+        "                    continue\n"
+        "                try:\n"
+        "                    parsed = json.loads(text)\n"
+        "                except json.JSONDecodeError:\n"
+        "                    emit_sandbox_record(\n"
+        "                        {\n"
+        "                            'component': 'eval_sandbox',\n"
+        "                            'event': 'sandbox.log.parse_error',\n"
+        "                            'level': 'error',\n"
+        "                            'message': 'Invalid JSON sandbox log line',\n"
+        "                            'raw': text[:1000],\n"
+        "                        },\n"
+        "                        log_path=path_key,\n"
+        "                        line_no=line_no,\n"
+        "                    )\n"
+        "                    continue\n"
+        "                emit_sandbox_record(parsed, log_path=path_key, line_no=line_no)\n"
+        "            seen_line_counts[path_key] = len(lines)\n"
+        "        if stop_event.is_set():\n"
+        "            return\n"
+        "        try:\n"
+        "            await asyncio.wait_for(stop_event.wait(), timeout=0.5)\n"
+        "        except TimeoutError:\n"
+        "            pass\n"
         "def collect_repo_snapshot(root_dir):\n"
         "    root = Path(root_dir)\n"
         "    top_entries = []\n"
@@ -606,6 +681,8 @@ def build_evaluation_python_script(
         "            cur['error'] = err if isinstance(err, str) else None\n"
         "async def main() -> None:\n"
         "    started_at = time.monotonic()\n"
+        "    sandbox_log_stop = asyncio.Event()\n"
+        "    sandbox_log_task = asyncio.create_task(mirror_sandbox_logs(sandbox_log_stop))\n"
         "    selected_paths = [\n"
         "        path.strip()\n"
         "        for path in eval_test_paths\n"
@@ -695,6 +772,7 @@ def build_evaluation_python_script(
         "                            index=index,\n"
         "                            total=selected_count,\n"
         "                            test_path=test_path,\n"
+        "                            session_id=getattr(session, 'session_id', None),\n"
         "                        )\n"
         "                        result = await session.test(test_path)\n"
         "                        passed, failed, total = collect_totals(result)\n"
@@ -704,12 +782,16 @@ def build_evaluation_python_script(
         "                            index=index,\n"
         "                            total=selected_count,\n"
         "                            test_path=test_path,\n"
+        "                            session_id=getattr(session, 'session_id', None),\n"
         "                            duration_ms=int((time.monotonic() - test_started) * 1000),\n"
         "                            passed=int(passed),\n"
         "                            failed=int(failed),\n"
         "                            total_tests=int(total),\n"
         "                            result_type=type(result).__name__,\n"
-        "                            result_keys=(sorted(result.keys())[:30] if isinstance(result, dict) else None),\n"
+        "                            result_keys=(\n"
+        "                                sorted(result.keys())[:30]\n"
+        "                                if isinstance(result, dict) else None\n"
+        "                            ),\n"
         "                        )\n"
         "                        payload['passed'] += int(passed)\n"
         "                        payload['failed'] += int(failed)\n"
@@ -739,6 +821,7 @@ def build_evaluation_python_script(
         "                        'test.start',\n"
         "                        mode='all',\n"
         "                        test_path='all',\n"
+        "                        session_id=getattr(session, 'session_id', None),\n"
         "                    )\n"
         "                    result = await session.test()\n"
         "                    passed, failed, total = collect_totals(result)\n"
@@ -746,12 +829,16 @@ def build_evaluation_python_script(
         "                        'test.done',\n"
         "                        mode='all',\n"
         "                        test_path='all',\n"
+        "                        session_id=getattr(session, 'session_id', None),\n"
         "                        duration_ms=int((time.monotonic() - run_started) * 1000),\n"
         "                        passed=int(passed),\n"
         "                        failed=int(failed),\n"
         "                        total_tests=int(total),\n"
         "                        result_type=type(result).__name__,\n"
-        "                        result_keys=(sorted(result.keys())[:30] if isinstance(result, dict) else None),\n"
+        "                        result_keys=(\n"
+        "                            sorted(result.keys())[:30]\n"
+        "                            if isinstance(result, dict) else None\n"
+        "                        ),\n"
         "                    )\n"
         "                    payload['passed'] = int(passed)\n"
         "                    payload['failed'] = int(failed)\n"
@@ -791,6 +878,11 @@ def build_evaluation_python_script(
         "            traceback=payload.get('traceback'),\n"
         "        )\n"
         "    finally:\n"
+        "        sandbox_log_stop.set()\n"
+        "        try:\n"
+        "            await asyncio.wait_for(sandbox_log_task, timeout=2.0)\n"
+        "        except Exception:\n"
+        "            pass\n"
         "        payload['duration_ms'] = int((time.monotonic() - started_at) * 1000)\n"
         "        log_eval(\n"
         "            'evaluation.done',\n"
@@ -841,10 +933,13 @@ def build_commit_evaluation_command(
     return (
         "set -euo pipefail\n"
         f"repo_dir={quoted_repo_dir}\n"
+        "echo '[eval-shell] prepare repo'\n"
         'rm -rf "$repo_dir"\n'
         f"{clone_cmd}"
+        "echo '[eval-shell] repo cloned'\n"
         'cd "$repo_dir"\n'
         f"git checkout -q {quoted_commit}\n"
+        "echo '[eval-shell] repo checked out'\n"
         "python3 -u - <<'PY'\n"
         f"{python_script}"
         "PY\n"
@@ -880,6 +975,7 @@ def build_workspace_evaluation_command(
     return (
         "set -euo pipefail\n"
         f"repo_dir={quoted_repo_dir}\n"
+        "echo '[eval-shell] using workspace repo'\n"
         "python3 -u - <<'PY'\n"
         f"{python_script}"
         "PY\n"
@@ -901,6 +997,64 @@ def parse_commit_evaluation_payload(
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def parse_evaluation_log_records(
+    stdout: str,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.startswith(EVALUATION_LOG_MARKER):
+            continue
+        raw_json = line[len(EVALUATION_LOG_MARKER) :].strip()
+        if not raw_json:
+            continue
+        try:
+            parsed = json.loads(raw_json)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
+
+
+def print_full_eval_output(
+    *,
+    short: str,
+    stdout: str,
+    stderr: str,
+    payload: dict[str, Any] | None,
+) -> None:
+    print(
+        f"[eval][{short}] full stdout begin chars={len(stdout)}",
+        flush=True,
+    )
+    if stdout:
+        for line in stdout.splitlines():
+            print(f"[eval][{short}][stdout] {line}", flush=True)
+    else:
+        print(f"[eval][{short}][stdout] (empty)", flush=True)
+    print(f"[eval][{short}] full stdout end", flush=True)
+
+    print(
+        f"[eval][{short}] full stderr begin chars={len(stderr)}",
+        flush=True,
+    )
+    if stderr:
+        for line in stderr.splitlines():
+            print(f"[eval][{short}][stderr] {line}", flush=True)
+    else:
+        print(f"[eval][{short}][stderr] (empty)", flush=True)
+    print(f"[eval][{short}] full stderr end", flush=True)
+
+    if payload is None:
+        print(f"[eval][{short}] full payload: null", flush=True)
+        return
+    print(
+        f"[eval][{short}] full payload: "
+        f"{json.dumps(payload, ensure_ascii=False, default=str, sort_keys=True)}",
+        flush=True,
+    )
 
 
 async def run_commit_evaluation(
@@ -958,10 +1112,18 @@ async def run_commit_evaluation(
         f"stderr={len(stderr)}chars",
         flush=True,
     )
-    if stderr:
-        for line in stderr.strip().splitlines()[:20]:
-            print(f"[eval][{short}] stderr: {line}", flush=True)
+    log_records = parse_evaluation_log_records(stdout)
+    print(
+        f"[eval][{short}] parsed log records={len(log_records)}",
+        flush=True,
+    )
     payload = parse_commit_evaluation_payload(stdout)
+    print_full_eval_output(
+        short=short,
+        stdout=stdout,
+        stderr=stderr,
+        payload=payload,
+    )
     if payload:
         print(
             f"[eval][{short}] payload: "
@@ -988,6 +1150,7 @@ async def run_commit_evaluation(
         "stdout": stdout,
         "stderr": stderr,
         "payload": payload,
+        "log_records": log_records,
     }
 
 
@@ -1039,10 +1202,18 @@ async def run_workspace_evaluation(
         f"stderr={len(stderr)}chars",
         flush=True,
     )
-    if stderr:
-        for line in stderr.strip().splitlines()[:20]:
-            print(f"[eval][{short}] stderr: {line}", flush=True)
+    log_records = parse_evaluation_log_records(stdout)
+    print(
+        f"[eval][{short}] parsed log records={len(log_records)}",
+        flush=True,
+    )
     payload = parse_commit_evaluation_payload(stdout)
+    print_full_eval_output(
+        short=short,
+        stdout=stdout,
+        stderr=stderr,
+        payload=payload,
+    )
     if payload:
         print(
             f"[eval][{short}] payload: "
@@ -1070,4 +1241,5 @@ async def run_workspace_evaluation(
         "stdout": stdout,
         "stderr": stderr,
         "payload": payload,
+        "log_records": log_records,
     }
