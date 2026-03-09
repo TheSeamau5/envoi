@@ -1,12 +1,12 @@
 /**
- * Difficulty heatmap — SVG color matrix showing pass rates per (category, model),
- * segmented by environment with section headers.
+ * Difficulty heatmap — SVG color matrix showing best pass rates per
+ * (category, model), segmented by environment with section headers.
  *
  * Features:
  * - Color interpolation: red (0%) → yellow (50%) → green (100%)
  * - Frontier band: dashed border on cells in the 35-65% range (optimal training signal)
  * - Click-through: clicking a cell navigates to the trajectory list filtered by model
- * - Tooltip: shows model name, pass rate percentage, and trajectory count
+ * - Tooltip: shows model name, best pass rate percentage, and trajectory count
  *
  * Client component for hover/click interactions.
  */
@@ -33,7 +33,7 @@ const CELL_W = 160;
 const CELL_H = 34;
 const GAP = 2;
 const LABEL_W = 200;
-const LABEL_H = 28;
+const LABEL_H = 44;
 const ENV_HEADER_H = 38;
 const ENV_GAP = 20;
 
@@ -70,6 +70,20 @@ function textColor(rate: number): string {
 /** Whether a pass rate falls in the frontier training band */
 function isFrontier(rate: number): boolean {
   return rate >= FRONTIER_MIN && rate <= FRONTIER_MAX;
+}
+
+function splitModelLabel(model: string): {
+  agent: string;
+  model?: string;
+} {
+  const slashIndex = model.indexOf("/");
+  if (slashIndex < 0) {
+    return { agent: model };
+  }
+  return {
+    agent: model.slice(0, slashIndex),
+    model: model.slice(slashIndex + 1),
+  };
 }
 
 type EnvironmentGroup = {
@@ -205,17 +219,29 @@ export function DifficultyHeatmap({ cells, project }: DifficultyHeatmapProps) {
         style={{ maxWidth: svgWidth }}
       >
         {/* Model labels (top) */}
-        {models.map((model, modelIndex) => (
-          <text
-            key={`model-${model}`}
-            x={LABEL_W + modelIndex * (CELL_W + GAP) + CELL_W / 2}
-            y={LABEL_H - 10}
-            textAnchor="middle"
-            style={{ fontSize: "12px", fill: T.textDim, fontWeight: 500 }}
-          >
-            {model}
-          </text>
-        ))}
+        {models.map((model, modelIndex) => {
+          const label = splitModelLabel(model);
+          const x = LABEL_W + modelIndex * (CELL_W + GAP) + CELL_W / 2;
+
+          return (
+            <text
+              key={`model-${model}`}
+              x={x}
+              y={14}
+              textAnchor="middle"
+              style={{ fontSize: "12px", fill: T.textDim, fontWeight: 500 }}
+            >
+              <tspan x={x} dy={0}>
+                {label.agent}
+              </tspan>
+              {label.model && (
+                <tspan x={x} dy="1.2em">
+                  {label.model}
+                </tspan>
+              )}
+            </text>
+          );
+        })}
 
         {/* Environment sections */}
         {envLayouts.map((group) => {
@@ -292,7 +318,7 @@ export function DifficultyHeatmap({ cells, project }: DifficultyHeatmapProps) {
                         </TooltipTrigger>
                         <TooltipContent>
                           <span className="font-semibold">{model}</span> on{" "}
-                          {group.environment}/{category}:{" "}
+                          {group.environment}/{category}: best{" "}
                           {(rate * 100).toFixed(1)}%
                           {cell ? ` (${cell.attempts} trajectories)` : ""}
                           {frontier ? " — frontier range" : ""}

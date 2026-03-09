@@ -1,29 +1,48 @@
 /**
- * Setup Compare — group trajectories by configurable dimensions and compare medians.
- * Client component: manages grouping dimensions, visibility toggles, and interactions.
+ * Setup Compare — group trajectories by configurable dimensions and compare
+ * each group's strongest run.
+ * Client component: manages grouping dimensions, visibility toggles, and
+ * interactions.
  *
- * Charts use percentage Y-axis (0–100%) so groups spanning different environments
- * are normalized. Per-suite median table is grouped by environment to prevent
- * mixing cross-environment suite data.
+ * Charts use percentage Y-axis (0–100%) so groups spanning different
+ * environments are normalized. Per-suite best table is grouped by environment
+ * to prevent mixing cross-environment suite data.
  *
  * Sidebar: Dimension chips (add/remove) + group list with eye toggles.
- * Main: Median progress curves per group, per-suite median table, group->trace breakdown.
+ * Main: best-run progress curves per group, per-suite best table, and
+ * group-to-trace breakdown.
  */
 
 "use client";
 
 import { useState, useMemo } from "react";
 import { Eye, EyeOff, X, Plus, ChevronDown, ChevronRight } from "lucide-react";
-import type { Trajectory, TrajectoryGroup, Commit, Suite } from "@/lib/types";
+import type { Trajectory, TrajectoryGroup, Suite } from "@/lib/types";
 import { GROUP_COLORS, T, SUITE_COLORS } from "@/lib/tokens";
 import { GROUPABLE_DIMENSIONS } from "@/lib/constants";
-import { groupTraces, median, formatPercent, formatDuration, computeMaxDuration, getXTicks, formatXTick } from "@/lib/utils";
+import {
+  computeBestCurve,
+  getTraceBestMinutes,
+  getTraceBestPassed,
+  getTraceBestPercent,
+  getTraceBestSuitePassed,
+  type SetupCompareCurvePoint,
+  pickBestTrace,
+} from "@/lib/setup-compare";
+import {
+  groupTraces,
+  formatPercent,
+  formatDuration,
+  computeMaxDuration,
+  getXTicks,
+  formatXTick,
+} from "@/lib/utils";
 
 type SetupCompareProps = {
   allTraces: Trajectory[];
 };
 
-/** Chart layout constants for the median curves chart */
+/** Chart layout constants for the best-curves chart */
 const VIEW_WIDTH = 900;
 const VIEW_HEIGHT = 340;
 const MARGIN = { top: 20, right: 20, bottom: 40, left: 55 };
@@ -45,51 +64,24 @@ function toYPct(pct: number): number {
   return MARGIN.top + PLOT_HEIGHT - (pct / 100) * PLOT_HEIGHT;
 }
 
-/** Compute a median progress curve from a set of traces (returns percentages) */
-type MedianPoint = {
-  minutes: number;
-  medianPct: number;
-};
-
-function computeMedianCurve(traces: Trajectory[], maxDuration: number): MedianPoint[] {
-  if (traces.length === 0) {
-    return [];
-  }
-
-  /** Sample at regular time intervals */
-  const numSamples = 48;
-  const stepMinutes = maxDuration / numSamples;
-
-  return Array.from({ length: numSamples + 1 }, (_, sampleIdx) => {
-    const targetMinutes = sampleIdx * stepMinutes;
-    const pctValues = traces.map((trace) => {
-      const eligible = trace.commits.filter(
-        (commit) => commit.minutesElapsed <= targetMinutes,
-      );
-      const lastEligible = eligible[eligible.length - 1];
-      const passed = lastEligible?.totalPassed ?? 0;
-      return trace.totalTests > 0 ? (passed / trace.totalTests) * 100 : 0;
-    });
-
-    return {
-      minutes: targetMinutes,
-      medianPct: median(pctValues),
-    };
-  });
-}
-
-/** Build SVG line path from median points */
-function buildMedianLinePath(points: MedianPoint[], maxDuration: number): string {
+/** Build SVG line path from curve points */
+function buildLinePath(
+  points: SetupCompareCurvePoint[],
+  maxDuration: number,
+): string {
   return points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.medianPct).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.passedPct).toFixed(1)}`;
     })
     .join(" ");
 }
 
-/** Build SVG area path from median points */
-function buildMedianAreaPath(points: MedianPoint[], maxDuration: number): string {
+/** Build SVG area path from curve points */
+function buildAreaPath(
+  points: SetupCompareCurvePoint[],
+  maxDuration: number,
+): string {
   if (points.length === 0) {
     return "";
   }
@@ -101,21 +93,12 @@ function buildMedianAreaPath(points: MedianPoint[], maxDuration: number): string
   const lineSegments = points
     .map((point, pointIdx) => {
       const cmd = pointIdx === 0 ? "M" : "L";
-      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.medianPct).toFixed(1)}`;
+      return `${cmd}${toX(point.minutes, maxDuration).toFixed(1)},${toYPct(point.passedPct).toFixed(1)}`;
     })
     .join(" ");
   const bottomRight = `L${toX(lastPoint.minutes, maxDuration).toFixed(1)},${toYPct(0).toFixed(1)}`;
   const bottomLeft = `L${toX(firstPoint.minutes, maxDuration).toFixed(1)},${toYPct(0).toFixed(1)}`;
   return `${lineSegments} ${bottomRight} ${bottomLeft} Z`;
-}
-
-/** Compute median final passed for a suite across traces */
-function suiteMedianFinal(traces: Trajectory[], suiteName: string): number {
-  const values = traces.map((trace) => {
-    const lastCommit = trace.commits[trace.commits.length - 1];
-    return lastCommit?.suiteState[suiteName] ?? 0;
-  });
-  return median(values);
 }
 
 /** Derive which suites belong to which environment from trace data */
@@ -140,12 +123,15 @@ function deriveEnvSuites(traces: Trajectory[]): Map<string, Suite[]> {
   return new Map(
     [...envSuiteMap.entries()]
       .sort(([envA], [envB]) => envA.localeCompare(envB))
-      .map(([env, suiteMap]) => [
-        env,
-        [...suiteMap.entries()]
-          .map(([name, total]) => ({ name, total }))
-          .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name)),
-      ] as [string, Suite[]]),
+      .map(
+        ([env, suiteMap]) =>
+          [
+            env,
+            [...suiteMap.entries()]
+              .map(([name, total]) => ({ name, total }))
+              .sort((suiteA, suiteB) => suiteA.name.localeCompare(suiteB.name)),
+          ] as [string, Suite[]],
+      ),
   );
 }
 
@@ -221,7 +207,9 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
         {/* Active dimension chips */}
         <div className="flex flex-wrap gap-1.5 border-b border-envoi-border px-3.5 py-2.5">
           {activeDimensions.map((dimKey) => {
-            const dimDef = GROUPABLE_DIMENSIONS.find((dim) => dim.key === dimKey);
+            const dimDef = GROUPABLE_DIMENSIONS.find(
+              (dim) => dim.key === dimKey,
+            );
             return (
               <button
                 key={dimKey}
@@ -258,11 +246,8 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               return undefined;
             }
             const isHidden = hiddenGroups.has(group.key);
-            const medianPct = median(
-              group.traces.map((trace) =>
-                trace.totalTests > 0 ? (trace.finalPassed / trace.totalTests) * 100 : 0,
-              ),
-            );
+            const bestTrace = pickBestTrace(group.traces);
+            const bestPct = bestTrace ? getTraceBestPercent(bestTrace) : 0;
 
             return (
               <div
@@ -285,7 +270,8 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                       {group.label}
                     </span>
                     <span className="text-[13px] text-envoi-text-dim">
-                      {group.traces.length} traces &middot; med {medianPct.toFixed(1)}%
+                      {group.traces.length} traces &middot; best{" "}
+                      {bestPct.toFixed(1)}%
                     </span>
                   </div>
 
@@ -305,10 +291,10 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
 
       {/* Main area */}
       <div className="flex flex-1 flex-col overflow-y-auto p-4">
-        {/* Median progress curves (percentage Y axis) */}
+        {/* Best progress curves (percentage Y axis) */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg p-3">
           <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-            Median Progress Curves
+            Best Progress Curves
           </div>
           <svg
             viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
@@ -381,7 +367,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               transform={`rotate(-90, 12, ${MARGIN.top + PLOT_HEIGHT / 2})`}
               style={{ fontSize: "9px", fill: T.textMuted, fontWeight: 600 }}
             >
-              MEDIAN TESTS PASSED (%)
+              BEST TESTS PASSED (%)
             </text>
 
             {/* Group curves */}
@@ -390,17 +376,18 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               if (!color) {
                 return undefined;
               }
-              const curve = computeMedianCurve(group.traces, maxDuration);
+              const bestTrace = pickBestTrace(group.traces);
+              const curve = computeBestCurve(bestTrace, maxDuration);
               const lastPoint = curve[curve.length - 1];
 
               return (
                 <g key={group.key}>
                   <path
-                    d={buildMedianAreaPath(curve, maxDuration)}
+                    d={buildAreaPath(curve, maxDuration)}
                     fill={color.fill}
                   />
                   <path
-                    d={buildMedianLinePath(curve, maxDuration)}
+                    d={buildLinePath(curve, maxDuration)}
                     fill="none"
                     stroke={color.line}
                     strokeWidth={1.5}
@@ -408,10 +395,14 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                   {lastPoint && (
                     <text
                       x={toX(lastPoint.minutes, maxDuration) + 6}
-                      y={toYPct(lastPoint.medianPct) + 3}
-                      style={{ fontSize: "10px", fill: color.line, fontWeight: 700 }}
+                      y={toYPct(lastPoint.passedPct) + 3}
+                      style={{
+                        fontSize: "10px",
+                        fill: color.line,
+                        fontWeight: 700,
+                      }}
                     >
-                      {lastPoint.medianPct.toFixed(1)}%
+                      {lastPoint.passedPct.toFixed(1)}%
                     </text>
                   )}
                 </g>
@@ -420,11 +411,11 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
           </svg>
         </div>
 
-        {/* Per-suite median table (grouped by environment) */}
+        {/* Per-suite best table (grouped by environment) */}
         <div className="mb-4 rounded border border-envoi-border bg-envoi-bg">
           <div className="border-b border-envoi-border bg-envoi-surface px-3.5 py-2.5">
             <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-envoi-text-dim">
-              Per-Suite Medians
+              Per-Suite Bests
             </span>
           </div>
 
@@ -451,7 +442,9 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                     className="h-1.5 w-1.5 rounded-full"
                     style={{ background: color.line }}
                   />
-                  {group.label.length > 16 ? group.label.slice(0, 16) + "..." : group.label}
+                  {group.label.length > 16
+                    ? group.label.slice(0, 16) + "..."
+                    : group.label}
                 </span>
               );
             })}
@@ -487,26 +480,33 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                       {suite.total}
                     </span>
                     {visibleGroups.map((group, groupIndex) => {
-                      const color = GROUP_COLORS[groupIndex % GROUP_COLORS.length];
+                      const color =
+                        GROUP_COLORS[groupIndex % GROUP_COLORS.length];
                       if (!color) {
                         return undefined;
                       }
-                      /** Only compute median from traces in this environment */
                       const envTraces = group.traces.filter(
-                        (trace) => (trace.environment || "unknown") === environment,
+                        (trace) =>
+                          (trace.environment || "unknown") === environment,
                       );
-                      if (envTraces.length === 0) {
+                      const bestEnvTrace = pickBestTrace(envTraces);
+                      if (!bestEnvTrace) {
                         return (
                           <div
                             key={`${group.key}-${suite.name}`}
                             className="flex min-w-40 flex-1 items-center gap-2 border-l border-envoi-border-light pl-4"
                           >
-                            <span className="text-[12px] text-envoi-text-dim">&mdash;</span>
+                            <span className="text-[12px] text-envoi-text-dim">
+                              &mdash;
+                            </span>
                           </div>
                         );
                       }
-                      const medianVal = suiteMedianFinal(envTraces, suite.name);
-                      const pct = (medianVal / suite.total) * 100;
+                      const bestVal = getTraceBestSuitePassed(
+                        bestEnvTrace,
+                        suite.name,
+                      );
+                      const pct = (bestVal / suite.total) * 100;
                       return (
                         <div
                           key={`${group.key}-${suite.name}`}
@@ -515,14 +515,20 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                           <div className="h-1 w-20 rounded-full bg-envoi-border-light">
                             <div
                               className="h-full rounded-full"
-                              style={{ width: `${pct}%`, background: color.line }}
+                              style={{
+                                width: `${pct}%`,
+                                background: color.line,
+                              }}
                             />
                           </div>
-                          <span className="text-[13px] font-semibold" style={{ color: color.line }}>
-                            {Math.round(medianVal)}
+                          <span
+                            className="text-[13px] font-semibold"
+                            style={{ color: color.line }}
+                          >
+                            {Math.round(bestVal)}
                           </span>
                           <span className="text-[13px] text-envoi-text-dim">
-                            {formatPercent(medianVal, suite.total)}
+                            {formatPercent(bestVal, suite.total)}
                           </span>
                         </div>
                       );
@@ -548,29 +554,32 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
               return undefined;
             }
             const isExpanded = expandedGroups.has(group.key);
-            const medianPct = median(
-              group.traces.map((trace) =>
-                trace.totalTests > 0 ? (trace.finalPassed / trace.totalTests) * 100 : 0,
-              ),
-            );
-            const lastCommits: Commit[] = group.traces
-              .map((trace) => trace.commits[trace.commits.length - 1])
-              .filter((commit): commit is Commit => commit !== undefined);
-            const medianDuration = median(
-              lastCommits.map((commit) => commit.minutesElapsed),
-            );
+            const bestTrace = pickBestTrace(group.traces);
+            const bestPct = bestTrace ? getTraceBestPercent(bestTrace) : 0;
+            const bestDurationMinutes = bestTrace
+              ? getTraceBestMinutes(bestTrace)
+              : 0;
 
             return (
-              <div key={group.key} className="border-b border-envoi-border-light">
+              <div
+                key={group.key}
+                className="border-b border-envoi-border-light"
+              >
                 {/* Group header row */}
                 <button
                   onClick={() => toggleGroupExpand(group.key)}
                   className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left transition-colors hover:bg-envoi-surface"
                 >
                   {isExpanded ? (
-                    <ChevronDown size={12} className="shrink-0 text-envoi-text-dim" />
+                    <ChevronDown
+                      size={12}
+                      className="shrink-0 text-envoi-text-dim"
+                    />
                   ) : (
-                    <ChevronRight size={12} className="shrink-0 text-envoi-text-dim" />
+                    <ChevronRight
+                      size={12}
+                      className="shrink-0 text-envoi-text-dim"
+                    />
                   )}
                   <span
                     className="h-2 w-2 shrink-0 rounded-full"
@@ -583,7 +592,8 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                     {group.traces.length} traces
                   </span>
                   <span className="text-[12px] text-envoi-text-muted">
-                    med {medianPct.toFixed(1)}% &middot; {formatDuration(Math.round(medianDuration))}
+                    best {bestPct.toFixed(1)}% &middot;{" "}
+                    {formatDuration(Math.round(bestDurationMinutes))}
                   </span>
                 </button>
 
@@ -591,10 +601,8 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                 {isExpanded && (
                   <div className="border-t border-envoi-border-light bg-envoi-surface/50">
                     {group.traces.map((trace) => {
-                      const lastTraceCommit = trace.commits[trace.commits.length - 1];
-                      const tracePct = trace.totalTests > 0
-                        ? ((lastTraceCommit?.totalPassed ?? 0) / trace.totalTests) * 100
-                        : 0;
+                      const bestPassed = getTraceBestPassed(trace);
+                      const tracePct = getTraceBestPercent(trace);
                       return (
                         <div
                           key={trace.id}
@@ -620,7 +628,7 @@ export function SetupCompare({ allTraces }: SetupCompareProps) {
                               />
                             </div>
                             <span className="text-[12px] font-semibold text-envoi-text">
-                              {lastTraceCommit?.totalPassed ?? 0}
+                              {bestPassed}
                             </span>
                             <span className="text-[13px] text-envoi-text-dim">
                               / {trace.totalTests}

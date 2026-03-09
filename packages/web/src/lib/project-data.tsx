@@ -259,14 +259,25 @@ export function useProjectCompare(
 }
 
 export function useProjectSetups(project: string, initialData?: Trajectory[]) {
+  const summariesQuery = useProjectTrajectories(project, initialData);
+  const activeSummaries = dedupeTrajectoriesById(
+    (summariesQuery.data ?? initialData ?? []).filter((trace) =>
+      isTrajectoryActive(trace),
+    ),
+  );
+  const detailIds = activeSummaries.map((trace) => trace.id).sort();
+
   const query = useProjectCompare(project, {
-    initialData,
+    ids: detailIds,
+    enabled: detailIds.length > 0,
   });
 
   return {
     ...query,
     data: dedupeTrajectoriesById(
-      (query.data ?? []).filter((trace) => isTrajectoryActive(trace)),
+      (query.data ?? activeSummaries).filter((trace) =>
+        isTrajectoryActive(trace),
+      ),
     ),
   };
 }

@@ -29,10 +29,9 @@ export function DifficultyPageClient({
       ) : (
         <div className="flex-1 overflow-auto px-3.5 py-3.5">
           <p className="pb-3 max-w-180 text-[12px] leading-normal text-envoi-text-muted">
-            Each cell shows the <strong>aggregate pass rate</strong> for a test
-            suite and model: total tests passed / total tests, pooled across all
-            trajectories. Hover a cell for the exact percentage and trajectory
-            count.
+            Each cell shows the <strong>best pass rate</strong> reached by any
+            trajectory for a test suite and model. Hover a cell for the exact
+            percentage and trajectory count.
           </p>
           <DifficultyHeatmap
             cells={difficultyQuery.data ?? []}

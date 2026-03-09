@@ -29,6 +29,8 @@ import {
   type ParquetRow,
   type TrajectorySummaryRow,
 } from "./reconstruct";
+import { buildDifficultyCells } from "@/lib/setup-compare";
+import { isTrajectoryActive } from "@/lib/trajectory-state";
 import type {
   Trajectory,
   Suite,
@@ -1123,25 +1125,12 @@ export async function executeQuery(
 // Difficulty heatmap
 // ---------------------------------------------------------------------------
 
-/** Known c_compiler suites — everything else is gameboy emulator */
-const C_COMPILER_SUITES = new Set([
-  "basics",
-  "wacct",
-  "c_testsuite",
-  "torture",
-]);
-
-/** Derive environment name from suite name */
-function suiteToEnvironment(suiteName: string): string {
-  return C_COMPILER_SUITES.has(suiteName) ? "c_compiler" : "gameboy_emulator";
-}
-
 /**
- * Get difficulty data — per-(environment, suite, model) pass rates for the heatmap.
+ * Get difficulty data — per-suite best percentages aligned with setup compare.
  *
- * Uses the `suites` column from raw parquet which contains the actual per-suite
- * pass/fail/total breakdown. The `environment` column in the parquet is a
- * placeholder ("environment"), so we derive the real environment from suite names.
+ * Each cell is derived from the representative best trace for a
+ * (environment, model) group, using the same trace-selection and per-suite
+ * snapshot semantics as the setups page.
  */
 export async function getDifficultyData(
   project?: string,
@@ -1156,61 +1145,13 @@ export async function getDifficultyData(
     cacheKey: `difficulty-data:${project ?? "default"}`,
     load: async (activeProject) => {
       try {
-        const rawRows = await query(
-          `
-          WITH snapshots AS (
-            SELECT trajectory_id, agent_model, suites::JSON AS sr
-            FROM trajectories
-            WHERE suites IS NOT NULL
-              AND LENGTH(CAST(suites AS VARCHAR)) > 5
-          ),
-          suite_entries AS (
-            SELECT
-              agent_model,
-              unnest(json_keys(sr)) AS suite_key,
-              sr
-            FROM snapshots
-          ),
-          parsed AS (
-            SELECT
-              agent_model,
-              SPLIT_PART(suite_key, '/', 2) AS suite_name,
-              CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.passed') AS DOUBLE) AS passed,
-              CAST(json_extract(sr, '$.' || '"' || suite_key || '"' || '.total') AS DOUBLE) AS total
-            FROM suite_entries
-          ),
-          aggregated AS (
-            SELECT
-              suite_name AS category,
-              agent_model AS model,
-              SUM(passed) AS total_passed,
-              SUM(total) AS total_total,
-              COUNT(*) AS attempts
-            FROM parsed
-            WHERE suite_name != '' AND suite_name != 'all'
-            GROUP BY suite_name, agent_model
-          )
-          SELECT
-            category,
-            model,
-            CASE WHEN total_total > 0 THEN total_passed / total_total ELSE 0 END AS pass_rate,
-            attempts
-          FROM aggregated
-          ORDER BY category, model
-        `,
-          activeProject,
-        );
-
-        return rawRows.map((row) => {
-          const category = String(row.category ?? "");
-          return {
-            environment: suiteToEnvironment(category),
-            category,
-            model: String(row.model ?? ""),
-            passRate: Number(row.pass_rate ?? 0),
-            attempts: Number(row.attempts ?? 0),
-          };
+        const trajectories = await getCompareTrajectories({
+          project: activeProject,
+          fresh: options?.fresh,
         });
+        return buildDifficultyCells(
+          trajectories.filter((trace) => isTrajectoryActive(trace)),
+        );
       } catch {
         return getMockDifficultyData();
       }

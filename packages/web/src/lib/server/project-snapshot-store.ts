@@ -1,9 +1,12 @@
 import type {
   CodeSnapshot,
+  DifficultyCell,
   Project,
   Trajectory,
   TrajectoryLogRow,
 } from "@/lib/types";
+import { buildDifficultyCells } from "@/lib/setup-compare";
+import { isTrajectoryActive } from "@/lib/trajectory-state";
 import {
   getAllTrajectories,
   getCodeHistory,
@@ -354,6 +357,14 @@ export async function getProjectSnapshot(
   return ensureProjectSnapshot(project);
 }
 
+function dedupeTrajectoriesById(traces: Trajectory[]): Trajectory[] {
+  const deduped = new Map<string, Trajectory>();
+  for (const trace of traces) {
+    deduped.set(trace.id, trace);
+  }
+  return [...deduped.values()];
+}
+
 /** Return the current serving detail for a trajectory. */
 export async function getTrajectoryDetailFromSnapshot(
   project: string,
@@ -385,6 +396,27 @@ export async function getTrajectoryDetailFromSnapshot(
     snapshot.details.set(trajectoryId, fallback);
   }
   return fallback;
+}
+
+/** Return difficulty cells derived from the same snapshot/detail path as setups. */
+export async function getDifficultyCellsFromSnapshot(
+  project: string,
+): Promise<DifficultyCell[]> {
+  const snapshot = await ensureProjectSnapshot(project);
+  const activeSummaries = dedupeTrajectoriesById(snapshot.setups).filter(
+    (trace) => isTrajectoryActive(trace),
+  );
+  const details = await Promise.all(
+    activeSummaries.map((trace) =>
+      getTrajectoryDetailFromSnapshot(project, trace.id),
+    ),
+  );
+
+  return buildDifficultyCells(
+    dedupeTrajectoriesById(
+      details.filter((trace): trace is Trajectory => trace !== undefined),
+    ),
+  );
 }
 
 /** Return serving logs for a trajectory, filtered by sequence window. */

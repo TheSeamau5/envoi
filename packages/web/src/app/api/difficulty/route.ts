@@ -4,8 +4,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getDifficultyData } from "@/lib/server/data";
 import { getProjectFromRequest } from "@/lib/server/project-context";
+import { getDifficultyCellsFromSnapshot } from "@/lib/server/project-snapshot-store";
 
 export async function GET(request: NextRequest) {
   try {
@@ -17,8 +17,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const fresh = request.nextUrl.searchParams.has("bust");
-    const data = await getDifficultyData(project, { fresh });
+    const data = await getDifficultyCellsFromSnapshot(project);
     return NextResponse.json(data);
   } catch (error) {
     console.error("GET /api/difficulty error:", error);

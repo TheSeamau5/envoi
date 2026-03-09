@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryMock = vi.fn(async () => []);
 const readProjectDataMock = vi.fn(
-  async (options: { project?: string; load: (project: string) => Promise<unknown> }) =>
-    options.load(options.project ?? "c-compiler"),
+  async (options: {
+    project?: string;
+    load: (project: string) => Promise<unknown>;
+  }) => options.load(options.project ?? "c-compiler"),
 );
 
 vi.mock("../project-data", () => ({
@@ -14,11 +16,15 @@ vi.mock("../project-data", () => ({
 
 vi.mock("../db", () => ({
   isS3Configured: () => true,
-  traceUri: async () => "s3://bucket/project/c-compiler/trajectories/traj-1/trace.parquet",
-  freshTraceUri: async () => "s3://bucket/project/c-compiler/trajectories/traj-1/trace.parquet",
+  traceUri: async () =>
+    "s3://bucket/project/c-compiler/trajectories/traj-1/trace.parquet",
+  freshTraceUri: async () =>
+    "s3://bucket/project/c-compiler/trajectories/traj-1/trace.parquet",
   codeSnapshotsUri: async () => undefined,
-  logsUri: async () => "s3://bucket/project/c-compiler/trajectories/traj-1/logs.parquet",
-  freshLogsUri: async () => "s3://bucket/project/c-compiler/trajectories/traj-1/logs.parquet",
+  logsUri: async () =>
+    "s3://bucket/project/c-compiler/trajectories/traj-1/logs.parquet",
+  freshLogsUri: async () =>
+    "s3://bucket/project/c-compiler/trajectories/traj-1/logs.parquet",
   query: queryMock,
 }));
 
@@ -166,30 +172,6 @@ describe("server data freshness readers", () => {
     expect(trajectories).toHaveLength(1);
     expect(trajectories[0]?.id).toBe("traj-1");
     expect(trajectories[0]?.commits).toHaveLength(1);
-  });
-
-  it("derives difficulty cells from the unified trajectories table", async () => {
-    queryMock.mockResolvedValue([
-      {
-        category: "basics",
-        model: "codex/gpt-5.3-codex",
-        pass_rate: 0.5,
-        attempts: 4,
-      },
-    ]);
-
-    const { getDifficultyData } = await import("../data");
-    const cells = await getDifficultyData("c-compiler", { fresh: true });
-
-    expect(cells).toEqual([
-      {
-        environment: "c_compiler",
-        category: "basics",
-        model: "codex/gpt-5.3-codex",
-        passRate: 0.5,
-        attempts: 4,
-      },
-    ]);
   });
 
   it("derives portfolio environment rows from unified trajectory data", async () => {
