@@ -40,4 +40,31 @@ async def build_compiler(submission: envoi.Documents) -> None:
     reset_runner_state()
     build = await envoi.run("chmod +x build.sh && ./build.sh", timeout_seconds=300)
     if build.exit_code != 0:
-        raise RuntimeError(f"Build failed (exit {build.exit_code}).\n{build.stderr}")
+        diagnostics = await envoi.run(
+            "\n".join(
+                [
+                    "echo '[env] pwd'; pwd",
+                    "echo '[env] ls -la'; ls -la",
+                    "echo '[env] src files'; find src -maxdepth 2 -type f | sort 2>/dev/null || true",
+                    "echo '[env] build.sh'; sed -n '1,200p' build.sh 2>/dev/null || true",
+                    "echo '[env] Cargo.toml'; sed -n '1,200p' Cargo.toml 2>/dev/null || true",
+                ]
+            ),
+            timeout_seconds=30,
+        )
+        raise RuntimeError(
+            "\n".join(
+                [
+                    f"Build failed (exit {build.exit_code}).",
+                    "",
+                    "[build stdout]",
+                    build.stdout or "(empty)",
+                    "",
+                    "[build stderr]",
+                    build.stderr or "(empty)",
+                    "",
+                    "[workspace diagnostics]",
+                    diagnostics.stdout or diagnostics.stderr or "(empty)",
+                ]
+            )
+        )

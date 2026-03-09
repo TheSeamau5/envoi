@@ -16,6 +16,7 @@
 import {
   createContext,
   useContext,
+  useRef,
   useState,
   useMemo,
   useCallback,
@@ -98,6 +99,7 @@ type CompareContextValue = {
   selectedIds: string[];
   loadingIds: Set<string>;
   computeTraceTotal: (trace: Trajectory) => number;
+  computeTracePassed: (trace: Trajectory) => number;
 };
 
 const CompareContext = createContext<CompareContextValue | undefined>(
@@ -194,11 +196,54 @@ export function CompareProvider({
     return allTraces.filter((trace) => trace.model === modelFilter);
   }, [allTraces, modelFilter]);
 
+  /**
+   * Persistent score cache — accumulates scores from full trajectory data.
+   * Once we see real numbers, they stay forever (scores never regress to 0).
+   * Returns a new Map reference on each update so downstream memos re-run.
+   */
+  const scoreCacheRef = useRef(
+    new Map<string, { passed: number; total: number }>(),
+  );
+  const scoreSnapshot = useMemo(() => {
+    for (const trajectory of Object.values(fullTrajectories)) {
+      const lastCommit =
+        trajectory.commits?.[trajectory.commits.length - 1];
+      if (!lastCommit) {
+        continue;
+      }
+      const fromSuites = trajectory.suites
+        ? computeTotalTests(trajectory.suites)
+        : 0;
+      const fromLastCommit =
+        lastCommit.totalPassed + lastCommit.feedback.totalFailed;
+      scoreCacheRef.current.set(trajectory.id, {
+        passed: lastCommit.totalPassed,
+        total: Math.max(
+          fromSuites,
+          trajectory.totalTests,
+          fromLastCommit,
+          trajectory.finalPassed,
+        ),
+      });
+    }
+    return new Map(scoreCacheRef.current);
+  }, [fullTrajectories]);
+
+  /** Resolve passed count using scoreSnapshot, falling back to finalPassed */
+  const resolvePassed = useCallback(
+    (trace: Trajectory): number => {
+      return scoreSnapshot.get(trace.id)?.passed ?? trace.finalPassed;
+    },
+    [scoreSnapshot],
+  );
+
   /** Group filtered + sorted traces by environment for sidebar rendering */
   const sidebarGroups = useMemo(() => {
     const sorted = [...filteredTraces];
     if (sortBy === "score") {
-      sorted.sort((traceA, traceB) => traceB.finalPassed - traceA.finalPassed);
+      sorted.sort(
+        (traceA, traceB) => resolvePassed(traceB) - resolvePassed(traceA),
+      );
     } else {
       sorted.sort(
         (traceA, traceB) =>
@@ -220,7 +265,7 @@ export function CompareProvider({
     return new Map(
       [...envMap.entries()].sort(([envA], [envB]) => envA.localeCompare(envB)),
     );
-  }, [filteredTraces, sortBy]);
+  }, [filteredTraces, sortBy, resolvePassed]);
 
   /** Flat sorted list for keyboard navigation */
   const flatSortedTraces = useMemo(() => {
@@ -306,9 +351,29 @@ export function CompareProvider({
   );
 
   /** Compute total tests for a trace */
-  const computeTraceTotal = useCallback((trace: Trajectory): number => {
-    return trace.suites ? computeTotalTests(trace.suites) : trace.totalTests;
-  }, []);
+  const computeTraceTotal = useCallback(
+    (trace: Trajectory): number => {
+      const cached = scoreSnapshot.get(trace.id);
+      if (cached) {
+        return cached.total;
+      }
+      const fromSuites = trace.suites ? computeTotalTests(trace.suites) : 0;
+      return Math.max(fromSuites, trace.totalTests, trace.finalPassed);
+    },
+    [scoreSnapshot],
+  );
+
+  /** Compute passed count for a trace */
+  const computeTracePassed = useCallback(
+    (trace: Trajectory): number => {
+      const cached = scoreSnapshot.get(trace.id);
+      if (cached) {
+        return cached.passed;
+      }
+      return trace.finalPassed;
+    },
+    [scoreSnapshot],
+  );
 
   /** Keyboard handler for sidebar navigation */
   const handleSidebarKeyDown = useCallback(
@@ -378,6 +443,7 @@ export function CompareProvider({
       selectedIds,
       loadingIds,
       computeTraceTotal,
+      computeTracePassed,
     }),
     [
       allTraces,
@@ -400,6 +466,7 @@ export function CompareProvider({
       selectedIds,
       loadingIds,
       computeTraceTotal,
+      computeTracePassed,
     ],
   );
 

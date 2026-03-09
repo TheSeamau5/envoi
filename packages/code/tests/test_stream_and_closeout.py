@@ -144,6 +144,7 @@ def test_finalize_trajectory_run_persists_minimal_session_end_before_shutdown(
             trajectory_id="traj-001",
             project="c-compiler",
             sandbox=None,
+            eval_sandbox=None,
             agent_trace=trace,
             evaluator=None,
             part_count=0,

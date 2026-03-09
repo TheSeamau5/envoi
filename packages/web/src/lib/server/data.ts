@@ -309,14 +309,16 @@ export async function getAllTrajectories(opts?: {
       const rawRows = await query(sql, project);
       return rawRows.map((row) => {
         const summaryRow = toSummaryRow(row);
-        const finalScore =
-          row.best_passed !== undefined && row.best_passed !== null
-            ? {
-                passed: Number(row.best_passed ?? 0),
-                failed: Number(row.best_failed ?? 0),
-                total: Number(row.best_total ?? 0),
-              }
-            : deriveScoreFromSuites(summaryRow.suites);
+        const bestPassed = Number(row.best_passed ?? 0);
+        const bestTotal = Number(row.best_total ?? 0);
+        const hasBestScore = bestPassed > 0 || bestTotal > 0;
+        const finalScore = hasBestScore
+          ? {
+              passed: bestPassed,
+              failed: Number(row.best_failed ?? 0),
+              total: bestTotal,
+            }
+          : deriveScoreFromSuites(summaryRow.suites);
 
         const trajectory = summaryRowToTrajectory(
           summaryRow,

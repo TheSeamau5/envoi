@@ -95,6 +95,9 @@ export function groupTraces(traces: Trajectory[], dimensions: string[]): Traject
 
 /** Format a number as a percentage string */
 export function formatPercent(value: number, total: number): string {
+  if (total <= 0) {
+    return "0.0%";
+  }
   return `${((value / total) * 100).toFixed(1)}%`;
 }
 

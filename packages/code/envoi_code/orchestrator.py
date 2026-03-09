@@ -184,6 +184,10 @@ EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
 AGENT_INACTIVITY_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "1800"))
 )
+EVALUATION_RETRY_FAILED = os.environ.get(
+    "EVALUATION_RETRY_FAILED",
+    "0",
+).strip().lower() in {"1", "true", "yes"}
 
 
 print = tprint
@@ -1030,7 +1034,7 @@ class EvaluationScheduler:
     ) -> None:
         """Apply an exception result, salvaging partial output."""
         evaluation.status = "failed"
-        evaluation.error = str(error)
+        evaluation.error = f"{error}\n{traceback.format_exc()}"
         evaluation.passed = 0
         evaluation.failed = 0
         evaluation.total = 0
@@ -1098,6 +1102,11 @@ class EvaluationScheduler:
                 queued_at=queued_at,
             )
             self.agent_trace.evaluations[commit] = evaluation
+        print(
+            f"[eval] {commit[:10]} waiting for semaphore "
+            f"(part={part} turn={turn})",
+            flush=True,
+        )
         async with self.semaphore:
             evaluation.status = "running"
             evaluation.started_at = datetime.now(UTC).isoformat()
@@ -1115,12 +1124,31 @@ class EvaluationScheduler:
                 uses_separate_sandbox = (
                     self.agent_sandbox is not self.sandbox
                 )
+                print(
+                    f"[eval] {commit[:10]} acquired semaphore, "
+                    f"separate_sandbox={uses_separate_sandbox} "
+                    f"hard_timeout={eval_hard_timeout}s "
+                    f"test_timeout={self.test_timeout_seconds}s "
+                    f"test_paths={self.test_paths}",
+                    flush=True,
+                )
                 if uses_separate_sandbox:
+                    transfer_t0 = time.monotonic()
                     await transfer_repo_to_eval_sandbox(
                         agent_sandbox=self.agent_sandbox,
                         eval_sandbox=self.sandbox,
                         commit=commit,
                     )
+                    print(
+                        f"[eval] {commit[:10]} transfer took "
+                        f"{time.monotonic() - transfer_t0:.1f}s",
+                        flush=True,
+                    )
+                print(
+                    f"[eval] {commit[:10]} starting run_commit_evaluation "
+                    f"on {'eval' if uses_separate_sandbox else 'agent'} sandbox",
+                    flush=True,
+                )
                 run_payload = await asyncio.wait_for(
                     run_commit_evaluation(
                         sandbox=self.sandbox,
@@ -1132,13 +1160,18 @@ class EvaluationScheduler:
                     timeout=eval_hard_timeout,
                 )
                 self.apply_result(evaluation, run_payload)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 evaluation.status = "failed"
                 evaluation.error = (
                     f"Evaluation hard timeout after {eval_hard_timeout}s "
                     f"(sandbox timeout was {self.test_timeout_seconds}s)"
                 )
             except Exception as eval_error:
+                print(
+                    f"[eval] {commit[:10]} run_one error: {eval_error}\n"
+                    f"{traceback.format_exc()}",
+                    flush=True,
+                )
                 self.apply_failure(
                     evaluation,
                     eval_error,
@@ -1178,7 +1211,10 @@ class EvaluationScheduler:
         except asyncio.CancelledError:
             return
         except Exception as task_error:
-            print(f"[eval] unexpected task error: {task_error}")
+            print(
+                f"[eval] unexpected task error: {task_error}\n"
+                f"{traceback.format_exc()}",
+            )
 
     async def wait(self) -> None:
         while self.tasks:
@@ -1264,6 +1300,13 @@ def build_followup_prompt(
 ) -> str:
     """Build the re-injection prompt with current test status."""
     sections: list[str] = [continue_prompt]
+    sections.append(
+        "TURN DISCIPLINE: End the turn after a coherent batch of work so the "
+        "evaluator can run and return full-suite feedback. Do not stay in one "
+        "turn indefinitely. If you have a buildable checkpoint, a partial fix, "
+        "or enough new evidence to benefit from evaluator feedback, stop and "
+        "yield the turn now."
+    )
 
     # Time/budget awareness
     remaining_seconds = max(0, timeout_seconds - elapsed_seconds)
@@ -2250,6 +2293,15 @@ async def prepare_trajectory_context(
         model=resolved_model,
     )
     prompt = resolved_task.prompt
+    prompt += (
+        "\n\n"
+        "Turn discipline requirement:\n"
+        "- End your turn after a meaningful batch of work so envoi can run the "
+        "full-suite evaluation and give you feedback.\n"
+        "- Do not stay in one turn indefinitely.\n"
+        "- If the workspace is buildable, or you have a partial fix worth "
+        "checking, stop and yield the turn."
+    )
     task_params_loaded = dict(resolved_task.task_params)
 
     environment_params_module = load_environment_params_module(env_path)
@@ -2599,7 +2651,7 @@ async def run_turn_end_evaluation_cycle(
     except Exception as turn_end_eval_error:
         turn_end_feedback = "Turn-end full evaluation failed:\n" + str(turn_end_eval_error)
         turn_end_has_error = True
-        print(f"[eval] turn_end failed: {turn_end_eval_error}")
+        print(f"[eval] turn_end failed: {turn_end_eval_error}\n{traceback.format_exc()}")
 
     return TurnEndEvaluationOutcome(
         feedback=turn_end_feedback,
@@ -2980,7 +3032,7 @@ async def run_turn_loop(
             while not turn_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=60)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except (TimeoutError, asyncio.CancelledError):
                     pass
                 except AgentFatalError:
                     raise
@@ -3090,9 +3142,10 @@ async def run_turn_loop(
         consecutive_turn_failures = 0
         agent_backend.on_turn_complete(turn_outcome)
 
-        retried = evaluator.retry_failed_evaluations()
-        if retried:
-            print(f"[watchdog] re-queued {retried} failed evaluation(s)")
+        if EVALUATION_RETRY_FAILED:
+            retried = evaluator.retry_failed_evaluations()
+            if retried:
+                print(f"[watchdog] re-queued {retried} failed evaluation(s)")
 
         response = turn_outcome.response
         session_id = turn_outcome.session_id
@@ -3274,8 +3327,10 @@ async def transfer_repo_to_eval_sandbox(
     commit: str,
 ) -> None:
     """Bundle the workspace repo on the agent sandbox and transfer it to the eval sandbox."""
+    short = commit[:10]
     bundle_path = f"/tmp/repo-{commit[:12]}.bundle"
     b64_path = f"{bundle_path}.b64"
+    print(f"[eval] transfer {short}: creating bundle on agent sandbox", flush=True)
     result = await agent_sandbox.run(
         f"git -C /workspace bundle create {bundle_path} --all",
         quiet=True,
@@ -3285,7 +3340,12 @@ async def transfer_repo_to_eval_sandbox(
         raise RuntimeError(
             f"git bundle failed (exit {result.exit_code}): {result.stderr}"
         )
+    print(f"[eval] transfer {short}: reading bundle bytes", flush=True)
     bundle_bytes = await agent_sandbox.read_file_bytes(bundle_path)
+    print(
+        f"[eval] transfer {short}: writing {len(bundle_bytes)} bytes to eval sandbox",
+        flush=True,
+    )
     encoded = base64.b64encode(bundle_bytes).decode("ascii")
     await eval_sandbox.write_file(b64_path, encoded, ensure_dir=False)
     await eval_sandbox.run(
@@ -3294,6 +3354,7 @@ async def transfer_repo_to_eval_sandbox(
         timeout=60,
     )
     await agent_sandbox.run(f"rm -f {bundle_path}", quiet=True, timeout=10)
+    print(f"[eval] transfer {short}: done", flush=True)
 
 
 async def setup_eval_sandbox(
@@ -3621,6 +3682,7 @@ async def finalize_trajectory_run(
     trajectory_id: str,
     project: str,
     sandbox: Sandbox | None,
+    eval_sandbox: Sandbox | None,
     agent_trace: AgentTrace | None,
     evaluator: EvaluationScheduler | None,
     part_count: int,
@@ -4037,6 +4099,7 @@ async def run_trajectory(
             trajectory_id=trajectory_id,
             project=prepared.project,
             sandbox=sandbox,
+            eval_sandbox=eval_sandbox,
             agent_trace=agent_trace,
             evaluator=evaluator,
             part_count=part_count,

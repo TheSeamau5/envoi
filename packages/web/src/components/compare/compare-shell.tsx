@@ -87,6 +87,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
     getColorIndex,
     clearSelection,
     computeTraceTotal,
+    computeTracePassed,
   } = useCompare();
 
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -276,6 +277,7 @@ export function CompareShell({ children, project }: CompareShellProps) {
                           toggleTrace={toggleTrace}
                           setFocusedIndex={setFocusedIndex}
                           computeTraceTotal={computeTraceTotal}
+                          computeTracePassed={computeTracePassed}
                           showYear={showYear}
                         />
                       );
@@ -322,6 +324,7 @@ function TraceRow({
   toggleTrace,
   setFocusedIndex,
   computeTraceTotal,
+  computeTracePassed,
   showYear,
 }: {
   trace: Trajectory;
@@ -333,6 +336,7 @@ function TraceRow({
   toggleTrace: (id: string) => void;
   setFocusedIndex: (index: number) => void;
   computeTraceTotal: (trace: Trajectory) => number;
+  computeTracePassed: (trace: Trajectory) => number;
   showYear: boolean;
 }) {
   const colorIdx = getColorIndex(trace.id);
@@ -342,6 +346,7 @@ function TraceRow({
     ? TRACE_COLORS[colorIdx % TRACE_COLORS.length]
     : undefined;
   const traceTotal = computeTraceTotal(trace);
+  const tracePassed = computeTracePassed(trace);
 
   return (
     <div
@@ -387,7 +392,7 @@ function TraceRow({
             style={{
               width:
                 traceTotal > 0
-                  ? `${(trace.finalPassed / traceTotal) * 100}%`
+                  ? `${(tracePassed / traceTotal) * 100}%`
                   : "0%",
               background: isSelected && color ? color.line : T.textDim,
             }}
@@ -398,10 +403,10 @@ function TraceRow({
       {/* Score */}
       <div className="flex shrink-0 flex-col items-end gap-0.5 py-2.5">
         <span className="text-[13px] font-semibold text-envoi-text">
-          {trace.finalPassed}
+          {tracePassed}
         </span>
         <span className="text-[13px] text-envoi-text-dim">
-          {formatPercent(trace.finalPassed, traceTotal)}
+          {formatPercent(tracePassed, traceTotal)}
         </span>
       </div>
 

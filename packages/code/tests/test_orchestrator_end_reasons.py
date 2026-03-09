@@ -152,6 +152,7 @@ def run_turn_loop_with_agent(agent_backend, monkeypatch) -> orchestrator.TurnLoo
     return asyncio.run(
         orchestrator.run_turn_loop(
             sandbox=FakeSandbox(),
+            eval_sandbox=FakeSandbox(),
             agent_backend=agent_backend,
             agent_trace=make_trace(),
             trajectory_id="traj-001",
@@ -220,6 +221,7 @@ def test_run_turn_loop_allows_unbounded_recovery_until_timeout(monkeypatch) -> N
     result = asyncio.run(
         orchestrator.run_turn_loop(
             sandbox=FakeSandbox(),
+            eval_sandbox=FakeSandbox(),
             agent_backend=agent,
             agent_trace=make_trace(),
             trajectory_id="traj-001",
@@ -262,6 +264,7 @@ def test_run_turn_loop_uses_run_budget_when_message_timeout_is_unset(monkeypatch
     result = asyncio.run(
         orchestrator.run_turn_loop(
             sandbox=FakeSandbox(),
+            eval_sandbox=FakeSandbox(),
             agent_backend=agent,
             agent_trace=make_trace(),
             trajectory_id="traj-001",

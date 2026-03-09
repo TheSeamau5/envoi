@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import time
 import uuid
 from typing import Any
 
@@ -87,8 +88,40 @@ def build_evaluation_python_script(
         f"eval_test_paths = {eval_test_paths_json}\n"
         f"eval_timeout_seconds = int({eval_timeout_seconds_json})\n"
         f"marker = {marker_json}\n"
+        "LOG_MARKER = '__ENVOI_EVAL_LOG__'\n"
         "MAX_MESSAGE_CHARS = 320\n"
         "MAX_TAIL_CHARS = 1200\n"
+        "def log_eval(event, **fields):\n"
+        "    payload = {'event': event}\n"
+        "    payload.update(fields)\n"
+        "    print(\n"
+        "        LOG_MARKER + json.dumps(payload, ensure_ascii=False, default=str),\n"
+        "        flush=True,\n"
+        "    )\n"
+        "def collect_repo_snapshot(root_dir):\n"
+        "    root = Path(root_dir)\n"
+        "    top_entries = []\n"
+        "    try:\n"
+        "        for child in sorted(root.iterdir(), key=lambda item: item.name):\n"
+        "            suffix = '/' if child.is_dir() else ''\n"
+        "            top_entries.append(child.name + suffix)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    src_entries = []\n"
+        "    src_dir = root / 'src'\n"
+        "    if src_dir.is_dir():\n"
+        "        try:\n"
+        "            for child in sorted(src_dir.rglob('*')):\n"
+        "                if child.is_file():\n"
+        "                    src_entries.append(str(child.relative_to(root)))\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return {\n"
+        "        'build_sh_exists': (root / 'build.sh').is_file(),\n"
+        "        'cargo_toml_exists': (root / 'Cargo.toml').is_file(),\n"
+        "        'top_entries': top_entries[:100],\n"
+        "        'src_entries': src_entries[:200],\n"
+        "    }\n"
         "def as_str(value):\n"
         "    if isinstance(value, str):\n"
         "        return value\n"
@@ -589,68 +622,185 @@ def build_evaluation_python_script(
         "        'selected_test_paths': selected_paths,\n"
         "        'error': None,\n"
         "    }\n"
+        "    log_eval(\n"
+        "        'evaluation.start',\n"
+        "        repo_dir=repo_dir,\n"
+        "        envoi_url=envoi_url,\n"
+        "        timeout_seconds=eval_timeout_seconds,\n"
+        "        selected_test_paths=selected_paths,\n"
+        "        selected_test_count=len(selected_paths),\n"
+        "    )\n"
+        "    log_eval('repo.snapshot', **collect_repo_snapshot(repo_dir))\n"
         "    try:\n"
+        "        log_eval('submission.prepare', docs_root=repo_dir)\n"
         "        docs = envoi.Documents(repo_dir)\n"
-        "        async with await envoi.connect_session(\n"
-        "            envoi_url,\n"
+        "        log_eval(\n"
+        "            'connect.start',\n"
+        "            envoi_url=envoi_url,\n"
         "            connect_timeout_seconds=eval_timeout_seconds,\n"
-        "            submission=docs,\n"
-        "            session_timeout_seconds=eval_timeout_seconds,\n"
-        "        ) as session:\n"
-        "            if selected_paths:\n"
-        "                for test_path in selected_paths:\n"
-        "                    result = await session.test(test_path)\n"
+        "        )\n"
+        "        client = await envoi.connect(\n"
+        "            envoi_url,\n"
+        "            timeout_seconds=eval_timeout_seconds,\n"
+        "        )\n"
+        "        session = None\n"
+        "        try:\n"
+        "            schema = getattr(client, 'schema', None)\n"
+        "            schema_tests = []\n"
+        "            schema_capabilities = None\n"
+        "            schema_version = None\n"
+        "            if isinstance(schema, dict):\n"
+        "                schema_version = schema.get('schema_version')\n"
+        "                schema_capabilities = schema.get('capabilities')\n"
+        "                tests_field = schema.get('tests')\n"
+        "                if isinstance(tests_field, list):\n"
+        "                    schema_tests = [\n"
+        "                        item\n"
+        "                        for item in tests_field\n"
+        "                        if isinstance(item, str)\n"
+        "                    ]\n"
+        "            log_eval(\n"
+        "                'connect.opened',\n"
+        "                schema_version=schema_version,\n"
+        "                capabilities=schema_capabilities,\n"
+        "                has_setup=getattr(client, 'has_setup', None),\n"
+        "                schema_test_count=len(schema_tests),\n"
+        "                schema_test_sample=schema_tests[:20],\n"
+        "                selected_test_paths=selected_paths,\n"
+        "            )\n"
+        "            log_eval(\n"
+        "                'session.create.start',\n"
+        "                session_timeout_seconds=eval_timeout_seconds,\n"
+        "                submission_root=repo_dir,\n"
+        "            )\n"
+        "            session = await client.session(\n"
+        "                timeout_seconds=eval_timeout_seconds,\n"
+        "                submission=docs,\n"
+        "            )\n"
+        "            session.close_client_on_close = True\n"
+        "            async with session:\n"
+        "                log_eval(\n"
+        "                    'session.opened',\n"
+        "                    session_id=getattr(session, 'session_id', None),\n"
+        "                    timeout_seconds=getattr(session, 'timeout_seconds', None),\n"
+        "                    schema_test_count=len(schema_tests),\n"
+        "                )\n"
+        "                if selected_paths:\n"
+        "                    selected_count = len(selected_paths)\n"
+        "                    for index, test_path in enumerate(selected_paths, start=1):\n"
+        "                        test_started = time.monotonic()\n"
+        "                        log_eval(\n"
+        "                            'test.start',\n"
+        "                            mode='selected',\n"
+        "                            index=index,\n"
+        "                            total=selected_count,\n"
+        "                            test_path=test_path,\n"
+        "                        )\n"
+        "                        result = await session.test(test_path)\n"
+        "                        passed, failed, total = collect_totals(result)\n"
+        "                        log_eval(\n"
+        "                            'test.done',\n"
+        "                            mode='selected',\n"
+        "                            index=index,\n"
+        "                            total=selected_count,\n"
+        "                            test_path=test_path,\n"
+        "                            duration_ms=int((time.monotonic() - test_started) * 1000),\n"
+        "                            passed=int(passed),\n"
+        "                            failed=int(failed),\n"
+        "                            total_tests=int(total),\n"
+        "                            result_type=type(result).__name__,\n"
+        "                            result_keys=(sorted(result.keys())[:30] if isinstance(result, dict) else None),\n"
+        "                        )\n"
+        "                        payload['passed'] += int(passed)\n"
+        "                        payload['failed'] += int(failed)\n"
+        "                        payload['total'] += int(total)\n"
+        "                        suite_key = normalize_suite_path(test_path)\n"
+        "                        extracted_tests = extract_tests(result, suite_key)\n"
+        "                        extracted_tests = attach_test_sources(\n"
+        "                            extracted_tests,\n"
+        "                            test_source_map,\n"
+        "                        )\n"
+        "                        extracted_tests = dedupe_tests(extracted_tests)\n"
+        "                        payload['tests'].extend(extracted_tests)\n"
+        "                        merge_suite_results(\n"
+        "                            payload['suite_results'],\n"
+        "                            suite_rollup(\n"
+        "                                extracted_tests,\n"
+        "                                suite_key,\n"
+        "                                int(passed),\n"
+        "                                int(failed),\n"
+        "                                int(total),\n"
+        "                            ),\n"
+        "                        )\n"
+        "                    payload['tests'] = dedupe_tests(payload['tests'])\n"
+        "                else:\n"
+        "                    run_started = time.monotonic()\n"
+        "                    log_eval(\n"
+        "                        'test.start',\n"
+        "                        mode='all',\n"
+        "                        test_path='all',\n"
+        "                    )\n"
+        "                    result = await session.test()\n"
         "                    passed, failed, total = collect_totals(result)\n"
-        "                    payload['passed'] += int(passed)\n"
-        "                    payload['failed'] += int(failed)\n"
-        "                    payload['total'] += int(total)\n"
-        "                    suite_key = normalize_suite_path(test_path)\n"
+        "                    log_eval(\n"
+        "                        'test.done',\n"
+        "                        mode='all',\n"
+        "                        test_path='all',\n"
+        "                        duration_ms=int((time.monotonic() - run_started) * 1000),\n"
+        "                        passed=int(passed),\n"
+        "                        failed=int(failed),\n"
+        "                        total_tests=int(total),\n"
+        "                        result_type=type(result).__name__,\n"
+        "                        result_keys=(sorted(result.keys())[:30] if isinstance(result, dict) else None),\n"
+        "                    )\n"
+        "                    payload['passed'] = int(passed)\n"
+        "                    payload['failed'] = int(failed)\n"
+        "                    payload['total'] = int(total)\n"
+        "                    suite_key = 'all'\n"
         "                    extracted_tests = extract_tests(result, suite_key)\n"
         "                    extracted_tests = attach_test_sources(\n"
         "                        extracted_tests,\n"
         "                        test_source_map,\n"
         "                    )\n"
         "                    extracted_tests = dedupe_tests(extracted_tests)\n"
-        "                    payload['tests'].extend(extracted_tests)\n"
-        "                    merge_suite_results(\n"
-        "                        payload['suite_results'],\n"
-        "                        suite_rollup(\n"
-        "                            extracted_tests,\n"
-        "                            suite_key,\n"
-        "                            int(passed),\n"
-        "                            int(failed),\n"
-        "                            int(total),\n"
-        "                        ),\n"
+        "                    payload['tests'] = extracted_tests\n"
+        "                    payload['suite_results'] = suite_rollup(\n"
+        "                        extracted_tests,\n"
+        "                        suite_key,\n"
+        "                        int(passed),\n"
+        "                        int(failed),\n"
+        "                        int(total),\n"
         "                    )\n"
-        "                payload['tests'] = dedupe_tests(payload['tests'])\n"
-        "            else:\n"
-        "                result = await session.test()\n"
-        "                passed, failed, total = collect_totals(result)\n"
-        "                payload['passed'] = int(passed)\n"
-        "                payload['failed'] = int(failed)\n"
-        "                payload['total'] = int(total)\n"
-        "                suite_key = 'all'\n"
-        "                extracted_tests = extract_tests(result, suite_key)\n"
-        "                extracted_tests = attach_test_sources(\n"
-        "                    extracted_tests,\n"
-        "                    test_source_map,\n"
+        "                log_eval(\n"
+        "                    'test.aggregate',\n"
+        "                    passed=int(payload['passed']),\n"
+        "                    failed=int(payload['failed']),\n"
+        "                    total=int(payload['total']),\n"
+        "                    suite_results=payload.get('suite_results', {}),\n"
         "                )\n"
-        "                extracted_tests = dedupe_tests(extracted_tests)\n"
-        "                payload['tests'] = extracted_tests\n"
-        "                payload['suite_results'] = suite_rollup(\n"
-        "                    extracted_tests,\n"
-        "                    suite_key,\n"
-        "                    int(passed),\n"
-        "                    int(failed),\n"
-        "                    int(total),\n"
-        "                )\n"
+        "        finally:\n"
+        "            if session is None:\n"
+        "                await client.close()\n"
         "    except Exception as error:\n"
         "        msg = str(error).strip()\n"
         "        payload['error'] = msg if msg else type(error).__name__\n"
         "        payload['traceback'] = traceback.format_exc()\n"
+        "        log_eval(\n"
+        "            'evaluation.error',\n"
+        "            error=payload['error'],\n"
+        "            traceback=payload.get('traceback'),\n"
+        "        )\n"
         "    finally:\n"
         "        payload['duration_ms'] = int((time.monotonic() - started_at) * 1000)\n"
-        "    print(marker + json.dumps(payload, ensure_ascii=False, default=str))\n"
+        "        log_eval(\n"
+        "            'evaluation.done',\n"
+        "            duration_ms=int(payload['duration_ms']),\n"
+        "            passed=int(payload['passed']),\n"
+        "            failed=int(payload['failed']),\n"
+        "            total=int(payload['total']),\n"
+        "            error=payload.get('error'),\n"
+        "        )\n"
+        "    print(marker + json.dumps(payload, ensure_ascii=False, default=str), flush=True)\n"
         "asyncio.run(main())\n"
     )
 
@@ -695,7 +845,7 @@ def build_commit_evaluation_command(
         f"{clone_cmd}"
         'cd "$repo_dir"\n'
         f"git checkout -q {quoted_commit}\n"
-        "python3 - <<'PY'\n"
+        "python3 -u - <<'PY'\n"
         f"{python_script}"
         "PY\n"
         "status=$?\n"
@@ -727,7 +877,13 @@ def build_workspace_evaluation_command(
         eval_timeout_seconds_json=eval_timeout_seconds_json,
         marker_json=marker_json,
     )
-    return f"set -euo pipefail\nrepo_dir={quoted_repo_dir}\npython3 - <<'PY'\n{python_script}PY\n"
+    return (
+        "set -euo pipefail\n"
+        f"repo_dir={quoted_repo_dir}\n"
+        "python3 -u - <<'PY'\n"
+        f"{python_script}"
+        "PY\n"
+    )
 
 
 def parse_commit_evaluation_payload(
@@ -755,8 +911,18 @@ async def run_commit_evaluation(
     timeout_seconds: int | None = None,
     clone_from_bundle: bool = False,
 ) -> dict[str, Any]:
+    short = commit[:10]
     eval_repo_dir = f"/tmp/envoi-eval-{commit[:12]}-{uuid.uuid4().hex[:8]}"
     resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
+    t0 = time.monotonic()
+    print(
+        f"[eval][{short}] start commit_eval "
+        f"clone_from_bundle={clone_from_bundle} "
+        f"repo_dir={eval_repo_dir} "
+        f"timeout={resolved_timeout}s "
+        f"test_paths={test_paths}",
+        flush=True,
+    )
     command = build_commit_evaluation_command(
         commit=commit,
         eval_repo_dir=eval_repo_dir,
@@ -764,14 +930,58 @@ async def run_commit_evaluation(
         timeout_seconds=resolved_timeout,
         clone_from_bundle=clone_from_bundle,
     )
+
+    async def log_eval_line(line: str) -> None:
+        stripped = line.strip()
+        if stripped:
+            print(f"[eval][{short}] {stripped}", flush=True)
+
+    print(
+        f"[eval][{short}] executing sandbox.run (timeout={resolved_timeout}s)...",
+        flush=True,
+    )
     exit_code, stdout, stderr = (
         await sandbox.run(
             command,
             timeout=resolved_timeout,
             quiet=True,
+            on_stdout_line=log_eval_line,
+            on_stderr_line=log_eval_line,
         )
     ).unpack()
+    elapsed = time.monotonic() - t0
+    print(
+        f"[eval][{short}] sandbox.run done "
+        f"exit={exit_code} "
+        f"elapsed={elapsed:.1f}s "
+        f"stdout={len(stdout)}chars "
+        f"stderr={len(stderr)}chars",
+        flush=True,
+    )
+    if stderr:
+        for line in stderr.strip().splitlines()[:20]:
+            print(f"[eval][{short}] stderr: {line}", flush=True)
     payload = parse_commit_evaluation_payload(stdout)
+    if payload:
+        print(
+            f"[eval][{short}] payload: "
+            f"passed={payload.get('passed')} "
+            f"failed={payload.get('failed')} "
+            f"total={payload.get('total')} "
+            f"error={payload.get('error')} "
+            f"duration_ms={payload.get('duration_ms')}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[eval][{short}] no payload parsed from stdout",
+            flush=True,
+        )
+        if stdout:
+            for line in stdout.strip().splitlines()[:10]:
+                print(
+                    f"[eval][{short}] stdout: {line}", flush=True,
+                )
     return {
         "command": command,
         "exit_code": exit_code,
@@ -789,19 +999,71 @@ async def run_workspace_evaluation(
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     resolved_timeout = resolve_evaluation_timeout(timeout_seconds)
+    short = "workspace"
+    print(
+        f"[eval][{short}] start workspace_eval "
+        f"repo_dir={repo_dir} "
+        f"timeout={resolved_timeout}s "
+        f"test_paths={test_paths}",
+        flush=True,
+    )
     command = build_workspace_evaluation_command(
         repo_dir=repo_dir,
         test_paths=test_paths,
         timeout_seconds=resolved_timeout,
+    )
+    async def log_eval_line(line: str) -> None:
+        stripped = line.strip()
+        if stripped:
+            print(f"[eval][{short}] {stripped}", flush=True)
+    t0 = time.monotonic()
+    print(
+        f"[eval][{short}] executing sandbox.run (timeout={resolved_timeout}s)...",
+        flush=True,
     )
     exit_code, stdout, stderr = (
         await sandbox.run(
             command,
             timeout=resolved_timeout,
             quiet=True,
+            on_stdout_line=log_eval_line,
+            on_stderr_line=log_eval_line,
         )
     ).unpack()
+    elapsed = time.monotonic() - t0
+    print(
+        f"[eval][{short}] sandbox.run done "
+        f"exit={exit_code} "
+        f"elapsed={elapsed:.1f}s "
+        f"stdout={len(stdout)}chars "
+        f"stderr={len(stderr)}chars",
+        flush=True,
+    )
+    if stderr:
+        for line in stderr.strip().splitlines()[:20]:
+            print(f"[eval][{short}] stderr: {line}", flush=True)
     payload = parse_commit_evaluation_payload(stdout)
+    if payload:
+        print(
+            f"[eval][{short}] payload: "
+            f"passed={payload.get('passed')} "
+            f"failed={payload.get('failed')} "
+            f"total={payload.get('total')} "
+            f"error={payload.get('error')} "
+            f"duration_ms={payload.get('duration_ms')}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[eval][{short}] no payload parsed from stdout",
+            flush=True,
+        )
+        if stdout:
+            for line in stdout.strip().splitlines()[:10]:
+                print(
+                    f"[eval][{short}] stdout: {line}",
+                    flush=True,
+                )
     return {
         "command": command,
         "exit_code": exit_code,
