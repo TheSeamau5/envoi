@@ -179,7 +179,7 @@ LOGS_FLUSH_INTERVAL_SECONDS = max(1, int(os.environ.get("LOGS_FLUSH_INTERVAL_SEC
 LOGS_FLUSH_BATCH_SIZE = max(1, int(os.environ.get("LOGS_FLUSH_BATCH_SIZE", "50")))
 SHUTDOWN_GRACE_SECONDS = max(0, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "300")))
 EVALUATOR_DRAIN_TIMEOUT_SECONDS = max(
-    0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "0"))
+    0, int(os.environ.get("EVALUATOR_DRAIN_TIMEOUT_SECONDS", "300"))
 )
 AGENT_INACTIVITY_TIMEOUT_SECONDS = max(
     60, int(os.environ.get("AGENT_INACTIVITY_TIMEOUT_SECONDS", "1800"))
@@ -339,6 +339,19 @@ def format_turn_eval_label(
     if has_error:
         return f"error({passed}/{total})"
     return f"{passed}/{total}"
+
+
+def is_terminal_zero_test_evaluation(
+    *,
+    passed: int | None,
+    total: int | None,
+    has_error: bool,
+) -> bool:
+    if not isinstance(passed, int) or not isinstance(total, int):
+        return False
+    if total != 0 or passed != 0:
+        return False
+    return not has_error
 
 
 def resolve_sandbox_timeout_seconds(
@@ -1400,6 +1413,9 @@ class EvaluationScheduler:
                 evaluation.status = "failed"
                 if not evaluation.error:
                     evaluation.error = reason
+                if evaluation.completed_at is None:
+                    evaluation.completed_at = now
+                self.emit_event(evaluation)
                 self.log_queue_state(
                     "cancel_running",
                     commit=evaluation.commit,
@@ -2793,7 +2809,11 @@ async def run_turn_end_evaluation_cycle(
             )
             turn_end_error = payload.get("error")
             turn_end_has_error = bool(isinstance(turn_end_error, str) and turn_end_error.strip())
-            turn_end_no_tests_detected = turn_end_total == 0 and turn_end_passed == 0
+            turn_end_no_tests_detected = is_terminal_zero_test_evaluation(
+                passed=turn_end_passed,
+                total=turn_end_total,
+                has_error=turn_end_has_error,
+            )
             if turn_end_no_tests_detected:
                 if not turn_end_has_error:
                     turn_end_has_error = True

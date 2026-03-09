@@ -216,8 +216,19 @@ def test_evaluation_scheduler_cancel_pending_marks_running_and_queued_failed(
 
     assert trace.evaluations["a" * 40].status == "failed"
     assert trace.evaluations["a" * 40].error == "Cancelled during test"
+    assert trace.evaluations["a" * 40].completed_at is not None
     assert trace.evaluations["b" * 40].status == "failed"
     assert trace.evaluations["b" * 40].error == "Cancelled during test"
+
+    # Verify running eval's cancellation was emitted to the trace
+    # (part 0 = eval "a" which was running when cancelled)
+    a_statuses = [event.status for event in trace.parts[0].eval_events_delta]
+    assert "failed" in a_statuses, (
+        "cancel_pending should emit a failed event for running evaluations"
+    )
+    # (part 1 = eval "b" which was queued when cancelled)
+    b_statuses = [event.status for event in trace.parts[1].eval_events_delta]
+    assert "failed" in b_statuses
 
 
 def test_resolve_sandbox_timeout_seconds_uses_modal_ceiling(monkeypatch) -> None:

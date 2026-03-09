@@ -166,3 +166,30 @@ def test_build_turn_end_eval_event_carries_regression_count() -> None:
     )
 
     assert event.regressions == 2
+
+
+def test_is_terminal_zero_test_evaluation_only_when_no_error() -> None:
+    assert (
+        orchestrator.is_terminal_zero_test_evaluation(
+            passed=0,
+            total=0,
+            has_error=False,
+        )
+        is True
+    )
+    assert (
+        orchestrator.is_terminal_zero_test_evaluation(
+            passed=0,
+            total=0,
+            has_error=True,
+        )
+        is False
+    )
+    assert (
+        orchestrator.is_terminal_zero_test_evaluation(
+            passed=0,
+            total=5,
+            has_error=True,
+        )
+        is False
+    )
