@@ -49,6 +49,9 @@ class SessionState(TypedDict):
     dir: str
     timeout_seconds: int
     timeout_task: asyncio.Task[None]
+    stdout_task: asyncio.Task[None]
+    stderr_task: asyncio.Task[None]
+    health_task: asyncio.Task[None]
 
 
 sessions: dict[str, SessionState] = {}
@@ -123,12 +126,107 @@ def find_free_port() -> int:
         return address[1]
 
 
+async def _stream_worker_pipe(stream: asyncio.StreamReader, prefix: str, target: object) -> None:
+    """Read lines from a worker pipe and write them to target (sys.stdout or sys.stderr)."""
+    try:
+        async for line in stream:
+            text = line.decode(errors="replace").rstrip("\n")
+            target.write(f"{prefix} {text}\n")  # type: ignore[union-attr]
+            target.flush()  # type: ignore[union-attr]
+    except (asyncio.CancelledError, ValueError, OSError):
+        pass
+
+
+async def _monitor_worker_health(session_id: str, process: asyncio.subprocess.Process) -> None:
+    """Periodically check if the worker process is alive."""
+    while True:
+        await asyncio.sleep(5)
+        if process.returncode is not None:
+            signal_name = _interpret_returncode(process.returncode)
+            emit_runtime_log(
+                "worker.health.dead",
+                level="error",
+                session_id=session_id,
+                returncode=process.returncode,
+                signal_name=signal_name,
+            )
+            if session_id in sessions:
+                session_state = sessions.pop(session_id)
+                timeout_task = session_state.get("timeout_task")
+                if timeout_task:
+                    timeout_task.cancel()
+                for task_name in ("stdout_task", "stderr_task"):
+                    task = session_state.get(task_name)
+                    if task and not task.done():
+                        task.cancel()
+                emit_runtime_log(
+                    "worker.health.session_removed",
+                    session_id=session_id,
+                    reason="worker_died",
+                )
+            return
+
+
+def _interpret_returncode(code: int) -> str:
+    """Interpret a process return code into a human-readable signal name."""
+    if code >= 0:
+        return f"exit({code})"
+    import signal as sig_module
+    try:
+        return sig_module.Signals(-code).name
+    except (ValueError, AttributeError):
+        return f"signal({-code})"
+
+
+async def _monitor_container_resources() -> None:
+    """Periodically log container memory and CPU usage from cgroups."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            metrics: dict[str, object] = {}
+            mem_current_path = Path("/sys/fs/cgroup/memory.current")
+            mem_max_path = Path("/sys/fs/cgroup/memory.max")
+            if mem_current_path.exists():
+                current = int(mem_current_path.read_text().strip())
+                metrics["memory_current_mb"] = round(current / 1048576, 1)
+            if mem_max_path.exists():
+                raw = mem_max_path.read_text().strip()
+                if raw != "max":
+                    max_bytes = int(raw)
+                    metrics["memory_max_mb"] = round(max_bytes / 1048576, 1)
+                    if "memory_current_mb" in metrics:
+                        metrics["memory_pct"] = round(
+                            100 * float(metrics["memory_current_mb"]) / float(metrics["memory_max_mb"]),
+                            1,
+                        )
+            mem_peak_path = Path("/sys/fs/cgroup/memory.peak")
+            if mem_peak_path.exists():
+                peak = int(mem_peak_path.read_text().strip())
+                metrics["memory_peak_mb"] = round(peak / 1048576, 1)
+            if metrics:
+                emit_runtime_log("container.resources", **metrics)
+        except (OSError, ValueError):
+            pass
+
+
+class SpawnResult:
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        stdout_task: asyncio.Task[None],
+        stderr_task: asyncio.Task[None],
+    ) -> None:
+        self.process = process
+        self.stdout_task = stdout_task
+        self.stderr_task = stderr_task
+
+
 async def spawn_worker(
     module_file: str,
     session_dir: str,
     port: int,
     session_id: str,
-) -> asyncio.subprocess.Process:
+) -> SpawnResult:
     worker_log_path = f"/tmp/envoi_worker_{session_id[:8]}_{port}.jsonl"
     worker_env = dict(os.environ)
     worker_env["ENVOI_LOG_PATH"] = worker_log_path
@@ -150,7 +248,7 @@ async def spawn_worker(
         "--port",
         str(port),
         env=worker_env,
-        stdout=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
 
@@ -186,7 +284,18 @@ async def spawn_worker(
                 pid=process.pid,
                 log_path=worker_log_path,
             )
-            return process
+            prefix = f"[worker:{session_id[:8]}]"
+            stdout_task = asyncio.create_task(
+                _stream_worker_pipe(process.stdout, prefix, sys.stdout)
+            )
+            stderr_task = asyncio.create_task(
+                _stream_worker_pipe(process.stderr, prefix, sys.stderr)
+            )
+            return SpawnResult(
+                process=process,
+                stdout_task=stdout_task,
+                stderr_task=stderr_task,
+            )
         except Exception:
             await asyncio.sleep(0.1)
 
@@ -242,6 +351,11 @@ async def cleanup_session(session_id: str) -> None:
 
     timeout_task = session_state["timeout_task"]
     _ = timeout_task.cancel()
+
+    for task_name in ("stdout_task", "stderr_task", "health_task"):
+        task = session_state.get(task_name)
+        if task and not task.done():
+            task.cancel()
 
     try:
         async with httpx.AsyncClient() as client:
@@ -359,12 +473,13 @@ def build_app(module_file: str) -> FastAPI:
                 await extract_upload(file, session_dir)
 
             port = find_free_port()
-            process = await spawn_worker(
+            spawn_result = await spawn_worker(
                 module_path,
                 str(session_dir),
                 port,
                 session_id,
             )
+            process = spawn_result.process
             worker_url = f"http://127.0.0.1:{port}"
             setup_timeout = max(300.0, float(timeout) + 30.0)
             started = time.monotonic()
@@ -380,12 +495,18 @@ def build_app(module_file: str) -> FastAPI:
                 raise RuntimeError(response_error_message(setup_response, setup_payload))
 
             timeout_task = asyncio.create_task(session_timeout(session_id, timeout))
+            health_task = asyncio.create_task(
+                _monitor_worker_health(session_id, process)
+            )
             sessions[session_id] = {
                 "url": worker_url,
                 "proc": process,
                 "dir": str(session_dir),
                 "timeout_seconds": timeout,
                 "timeout_task": timeout_task,
+                "stdout_task": spawn_result.stdout_task,
+                "stderr_task": spawn_result.stderr_task,
+                "health_task": health_task,
             }
             emit_runtime_log(
                 "session.create.complete",
@@ -446,12 +567,25 @@ def build_app(module_file: str) -> FastAPI:
                     timeout=request_timeout,
                 )
         except Exception as error:
+            proc = session_state.get("proc")
+            worker_alive = proc is not None and proc.returncode is None
+            worker_returncode = proc.returncode if proc else None
+            signal_name = (
+                _interpret_returncode(worker_returncode)
+                if worker_returncode is not None
+                else None
+            )
+
             emit_runtime_log(
                 "session.test.unavailable",
                 level="error",
                 session_id=session_id,
                 path=path or "/",
                 error=str(error),
+                error_type=type(error).__name__,
+                worker_alive=worker_alive,
+                worker_returncode=worker_returncode,
+                signal_name=signal_name,
             )
             return JSONResponse(
                 status_code=502,
@@ -525,6 +659,11 @@ def main() -> None:
         port=args.port,
     )
     app = build_app(args.file)
+
+    @app.on_event("startup")
+    async def start_resource_monitor() -> None:
+        _ = asyncio.create_task(_monitor_container_resources())
+
     uvicorn.run(app, host=args.host, port=args.port)
 
 

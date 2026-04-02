@@ -13,6 +13,7 @@ import asyncio
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Annotated
 
@@ -84,6 +85,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 "worker.setup.failed",
                 level="error",
                 error=str(error),
+                traceback=traceback.format_exc(),
             )
             return JSONResponse(status_code=500, content={"error": str(error)})
         finally:
@@ -121,6 +123,7 @@ def build_worker_app(module_file: str, session_dir: str) -> FastAPI:
                 path=path or "/",
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error=str(error),
+                traceback=traceback.format_exc(),
             )
             return JSONResponse(status_code=500, content={"error": str(error)})
 
@@ -170,7 +173,7 @@ def main() -> None:
         port=args.port,
     )
     app = build_worker_app(args.file, args.session_dir)
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="error")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

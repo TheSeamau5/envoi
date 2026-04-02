@@ -104,6 +104,18 @@ def session_path() -> Path:
     return Path(working_dir.get())
 
 
+def _signal_name(exit_code: int) -> str | None:
+    """Interpret a negative exit code as a signal name."""
+    if exit_code >= 0:
+        return None
+    import signal as sig_module
+
+    try:
+        return sig_module.Signals(-exit_code).name
+    except (ValueError, AttributeError):
+        return f"signal({-exit_code})"
+
+
 async def run(
     command: str,
     cwd: str | None = None,
@@ -146,6 +158,8 @@ async def run(
             cwd=effective_cwd,
             timeout_seconds=timeout_seconds,
             duration_ms=int((time.monotonic() - started) * 1000),
+            signal_name=_signal_name(-1),
+            was_timeout=True,
         )
         return RunResult(
             stdout="",
@@ -158,6 +172,7 @@ async def run(
     stderr_text = stderr_bytes.decode(errors="replace").strip()
     stdout_text = stdout_bytes.decode(errors="replace").strip()
     exit_code = process.returncode if process.returncode is not None else 0
+    signal_name = _signal_name(exit_code) if exit_code < 0 else None
     emit_environment_log(
         "command.complete",
         level="error" if exit_code != 0 else "info",
@@ -165,8 +180,10 @@ async def run(
         cwd=effective_cwd,
         exit_code=exit_code,
         duration_ms=duration_ms,
-        stdout_tail=stdout_text[-800:] if stdout_text else None,
-        stderr_tail=stderr_text[-800:] if stderr_text else None,
+        stdout_tail=stdout_text[-4000:] if stdout_text else None,
+        stderr_tail=stderr_text[-4000:] if stderr_text else None,
+        signal_name=signal_name,
+        was_timeout=False,
     )
     return RunResult(
         stdout=stdout_text,
