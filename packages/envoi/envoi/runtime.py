@@ -98,6 +98,8 @@ def load_environment(module_file: str) -> None:
         raise RuntimeError(f"Failed to load environment from {module_path}")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules["_envoi_environment"] = module
+    sys.modules["main"] = module
     spec.loader.exec_module(module)
     emit_runtime_log(
         "environment.load.complete",
